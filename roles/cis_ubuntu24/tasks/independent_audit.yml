@@ -53,9 +53,7 @@
           'benchmark_version': benchmark_version,
           'timeout_ms': audit_cmd_timeout,
           'run_heavy_tests': audit_run_heavy_tests,
-          'ubtu24_legacy_boot': (
-            ansible_facts.mounts | selectattr('mount', 'equalto', '/boot/efi') | list | length == 0
-          ),
+          'ubtu24_legacy_boot': (ansible_facts.mounts | selectattr('mount', 'equalto', '/boot/efi') | list | length == 0),
           'ubtu24cis_auditd_back_log_limit': ubtu24cis_audit_back_log_limit,
           'ubtu24cis_varlog_location': ubtu24cis_sudo_logfile
         })
