@@ -110,6 +110,32 @@ configuration parsing, initialization, included/excluded tamper detection,
 scheduler state, rollback, and repeat application require isolated Ubuntu 24
 acceptance under the validation repository's execution contract.
 
+Optional `cis_ubuntu24_disabled_filesystem_modules` entries contain exactly
+`name` and a single-line `reason`. The empty default changes no module policy.
+Inventory must review actual filesystem module metadata and dependencies;
+kernel directory names are not module names. Boot and container primitives
+are rejected. The native preflight rejects loaded or built-in modules, active
+or declared filesystem mounts (including inactive systemd mount files), and
+known active or potentially activated filesystem services. Each selection
+must resolve to its own module file in the running kernel's filesystem tree
+and declare a real `fs-*` alias. These checks supplement the operator's
+dependency assessment; they cannot discover arbitrary future application use.
+
+Remediation owns only `/etc/modprobe.d/60-lit-unused-filesystems.conf`. It
+requires a safe root-owned directory and refuses foreign, linked or unsafe
+existing fragments. Each selected module receives an install blocker and
+blacklist. Actual kmod configuration and non-loading resolution are checked;
+failed validation restores the exact previous fragment, or removes only the
+new fragment. No module is loaded or unloaded, and no initramfs is rewritten.
+Audit mode makes no changes. A real isolated apply, negative dependency and
+ownership tests, both rollback branches, alias resolution and a second
+unchanged apply are required; check mode cannot qualify this integration.
+After the upstream role, the wrapper rechecks effective policy. Boot-image
+contents, persistence after a controlled reboot and independent benchmark
+results require separate acceptance. Preserve required or loaded modules with
+their own documented disposition; a discovery warning is not an automatic
+authorization to block a filesystem or an audit pass.
+
 The upstream 6.2.4.1 remediation recursively applies a file-only mode to the
 audit log directory. When inventory explicitly disables that defective
 control while retaining 6.2.4.4, the wrapper preserves `/var/log/audit` as a

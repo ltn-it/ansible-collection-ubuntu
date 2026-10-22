@@ -15,6 +15,9 @@ cis_ubuntu24_aide_rebaseline: {}
 # Nonempty entries require the conflicting upstream L1 rewrite disabled.
 cis_ubuntu24_apparmor_preserved_profiles: []
 
+# Additional reviewed filesystem modules; never unload a module automatically.
+cis_ubuntu24_disabled_filesystem_modules: []
+
 cis_ubuntu24_remediation_dependency:
   repository: https://github.com/ansible-lockdown/UBUNTU24-CIS
   version: "1.6.0"

@@ -1,0 +1,28 @@
+---
+dependency:
+  name: shell
+  command: ":"
+driver:
+  name: default
+platforms:
+  - name: localhost
+    managed: false
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+scenario:
+  name: cis-ubuntu24-filesystem-inputs-basic
+  test_sequence:
+    - dependency
+    - syntax
+    - converge
+    - idempotence
+    - verify
+verifier:
+  name: ansible

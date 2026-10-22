@@ -1,0 +1,28 @@
+---
+- name: Read the effective module configuration without publishing unrelated options
+  ansible.builtin.command:
+    argv: [/usr/sbin/modprobe, --showconfig]
+  register: cis_ubuntu24_filesystem_effective
+  changed_when: false
+  no_log: true
+
+- name: Require each effective blacklist entry
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_filesystem_effective.stdout is search('(?m)^blacklist ' ~ item.name ~ '$')
+    fail_msg: The requested filesystem blacklist is absent from effective kmod configuration.
+  loop: "{{ cis_ubuntu24_disabled_filesystem_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Verify non-loading resolution of each explicitly requested module
+  ansible.builtin.command:
+    argv: [/usr/sbin/modprobe, --dry-run, --verbose, "{{ item.name }}"]
+  loop: "{{ cis_ubuntu24_disabled_filesystem_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: cis_ubuntu24_filesystem_resolution
+  changed_when: false
+  failed_when: >-
+    cis_ubuntu24_filesystem_resolution.rc != 0
+    or cis_ubuntu24_filesystem_resolution.stdout | trim != 'install /bin/false'
