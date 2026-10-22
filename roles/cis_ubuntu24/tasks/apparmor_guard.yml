@@ -25,5 +25,6 @@
       - '-'
       - "{{ cis_ubuntu24_apparmor_preserved_profiles | to_json }}"
     stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/apparmor_profile_guard.py') }}"
+  register: cis_ubuntu24_apparmor_guard_result
   changed_when: false
   check_mode: false
