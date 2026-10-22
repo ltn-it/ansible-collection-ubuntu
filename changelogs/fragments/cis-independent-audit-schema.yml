@@ -1,0 +1,4 @@
+---
+bugfixes:
+  - cis_ubuntu24 audit mode now combines the immutable audit schema with effective policy instead of using the incompatible remediation 1.6 variable template.
+  - CIS audit runtime variables are written outside the immutable checkout; raw evidence remains owner-only on target and controller.

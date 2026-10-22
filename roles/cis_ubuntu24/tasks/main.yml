@@ -63,9 +63,15 @@
   # imported task and make non-matching upstream controls eligible to run.
   ansible.builtin.import_role:
     name: ansible-lockdown.ubuntu24_cis  # noqa syntax-check[specific] -- EE-installed dependency
+  when: cis_ubuntu24_execution_mode == 'remediate'
   vars:
     audit_file_git: "{{ cis_ubuntu24_audit_dependency.repository }}"  # noqa: var-naming[no-role-prefix]
     audit_git_version: "{{ cis_ubuntu24_audit_dependency.commit }}"  # noqa: var-naming[no-role-prefix]
+
+- name: Run the pinned audit with its complete effective variable contract
+  ansible.builtin.import_tasks: independent_audit.yml
+  when: cis_ubuntu24_execution_mode == 'audit'
+  tags: setup_audit
 
 - name: Verify effective unused filesystem protection after upstream execution
   ansible.builtin.import_tasks: filesystem_modules_verify.yml

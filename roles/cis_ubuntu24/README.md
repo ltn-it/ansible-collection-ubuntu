@@ -25,6 +25,25 @@ remediation tasks. Audit mode additionally requires `setup_audit`, `run_audit`,
 Git audit source. Configure other upstream variables such as
 `ubtu24cis_disruption_high` through inventory.
 
+Independent audit execution retains the reviewed remediation 1.6 and audit
+commit pins. It installs only the upstream checksum-pinned Goss binary, then
+combines the pinned audit's `vars/CIS.yml` schema with the effective
+`ubtu24cis_*` policy. Effective values override schema defaults, including
+profile booleans, deliberate exceptions, flat SSH and password-aging inputs.
+Explicit aliases bind the audit backlog and sudo-log expectations to their
+remediation names. Boot applicability comes from actual EFI mounts.
+This avoids the remediation 1.6 template's incomplete audit variable contract.
+
+The caller must prepare a clean reviewed checkout below `audit_conf_dest` and
+fresh protected target/controller evidence directories. Audit mode rejects
+check mode and container targets. Runtime variables remain root-only outside
+the immutable checkout, below `audit_log_dir`; the checkout is never patched.
+Fresh raw output is protected and copied to `audit_output_destination`.
+Creating evidence is intentionally a change and is excluded from remediation
+idempotence. A successful audit process alone is not a compliance pass: the
+caller must validate provenance and normalize all failures, omissions and
+approved exceptions, as the independent audit runbook does.
+
 `cis_ubuntu24_exceptions` is the inventory-owned exception registry. Each item
 records control IDs, scope, reason, compensating control, effective upstream
 variables, and audit visibility. Omitted controls remain exceptions and must
