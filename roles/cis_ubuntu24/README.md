@@ -37,6 +37,43 @@ disable a static systemd unit. Selecting the upstream timer scheduler removes
 only that wrapper-owned `/dev/null` mask before the upstream role configures
 the timer units.
 
+Optional `cis_ubuntu24_aide_exclusions` entries contain exactly `path` and
+`reason`. They declare mutable data directories outside system trees; paths
+must be normalized, contain at least three components, and resolve without
+symlink redirection. An empty list preserves the existing upstream behavior.
+Nonempty exclusions require enabled upstream AIDE and control 6.3.1. Their
+preparation rejects check mode: package and parser acceptance require a real
+isolated Ubuntu target.
+
+Before installation, the wrapper disables the package's background-init
+debconf answer and uses Ansible's temporary `policy_rc_d` protection. It then
+verifies the package include and database paths, renders only its root-owned
+non-executable `90_lit_mutable_data` fragment, checks the full configuration,
+and restores that fragment if validation fails. The root configuration is
+never rewritten. For cron scheduling, the package timer is stopped and
+disabled; the existing service mask is preserved. Upstream initializes only
+after these checks. Exclusions require their own inventory exception and
+independent evidence; they are not benchmark passes or a replacement for
+application backups and image integrity.
+
+The pinned upstream can delete an aged database before initializing again.
+With exclusions enabled, an existing database therefore requires a reviewed
+`cis_ubuntu24_aide_rebaseline` binding before age-triggered recreation,
+explicit recreation, or a policy change. Its exact keys are
+`database_sha256`, `exclusions_sha256`, and `approval_reference`. The hashes
+bind the observed database and newly rendered exclusion fragment, not the
+entire host configuration. Policy changes additionally require upstream
+`ubtu24cis_aide_db_recreate: true`. Approval must come from the normal change
+process; the wrapper does not grant it. Clear the one-time recreate input
+after acceptance. A stale database binding fails before package changes.
+Neither the default empty approval nor database age authorizes rebaselining.
+
+The unmanaged `cis-ubuntu24-aide-inputs-basic` scenario tests input and
+admission assertions only. Real package post-installation behavior, AIDE
+configuration parsing, initialization, included/excluded tamper detection,
+scheduler state, rollback, and repeat application require isolated Ubuntu 24
+acceptance under the validation repository's execution contract.
+
 The upstream 6.2.4.1 remediation recursively applies a file-only mode to the
 audit log directory. When inventory explicitly disables that defective
 control while retaining 6.2.4.4, the wrapper preserves `/var/log/audit` as a

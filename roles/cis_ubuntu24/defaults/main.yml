@@ -4,6 +4,13 @@ cis_ubuntu24_execution_mode: remediate
 cis_ubuntu24_audit_log_directory: /var/log/audit
 cis_ubuntu24_network_sysctl_file: /etc/sysctl.d/60-lit-cis-network.conf
 
+# Optional inventory-owned mutable data directories. Empty preserves the
+# existing upstream integration; an entry requires both path and reason.
+cis_ubuntu24_aide_exclusions: []
+# A reviewed, one-use input binding for an existing database. Never infer
+# approval merely from database age or a requested policy change.
+cis_ubuntu24_aide_rebaseline: {}
+
 cis_ubuntu24_remediation_dependency:
   repository: https://github.com/ansible-lockdown/UBUNTU24-CIS
   version: "1.6.0"

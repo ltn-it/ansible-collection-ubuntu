@@ -1,0 +1,66 @@
+---
+- name: Require explicit AIDE configuration and native install control
+  ansible.builtin.assert:
+    that:
+      - ubtu24cis_config_aide | default(false) | bool
+      - ubtu24cis_rule_6_3_1 | default(true) | bool
+      - ubtu24cis_aide_scan | default('cron') in ['cron', 'timer']
+    fail_msg: Custom AIDE exclusions require enabled upstream AIDE installation and an explicit supported scheduler.
+
+- name: Reject unsafe or foreign AIDE exclusion files
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cis_ubuntu24_aide_previous.stat.exists
+        or
+        (
+          cis_ubuntu24_aide_previous.stat.isreg | default(false)
+          and not (cis_ubuntu24_aide_previous.stat.islnk | default(false))
+          and cis_ubuntu24_aide_previous.stat.nlink == 1
+          and cis_ubuntu24_aide_previous.stat.uid == 0
+          and cis_ubuntu24_aide_previous.stat.gid == 0
+          and cis_ubuntu24_aide_previous.stat.mode == '0644'
+          and
+          (cis_ubuntu24_aide_previous_content.content | default('') | b64decode)
+          is match('^# Managed by lit[.]ubuntu[.]cis_ubuntu24;')
+        )
+      - >-
+        not cis_ubuntu24_aide_database.stat.exists
+        or
+        (
+          cis_ubuntu24_aide_database.stat.isreg | default(false)
+          and not (cis_ubuntu24_aide_database.stat.islnk | default(false))
+          and cis_ubuntu24_aide_database.stat.nlink == 1
+        )
+    fail_msg: Refusing a foreign or unsafe AIDE policy file or database.
+
+- name: Require a reviewed binding before replacing an existing AIDE baseline
+  when:
+    - cis_ubuntu24_aide_database.stat.exists
+    - >-
+      (cis_ubuntu24_aide_aged.files | default([]) | length > 0)
+      or (ubtu24cis_aide_db_recreate | default(false) | bool)
+      or
+      (
+        cis_ubuntu24_aide_previous.stat.checksum | default('')
+        != (lookup('ansible.builtin.template', 'aide-exclusions.conf.j2') | hash('sha256'))
+      )
+  ansible.builtin.assert:
+    that:
+      - >-
+        cis_ubuntu24_aide_rebaseline.database_sha256 | default('')
+        == cis_ubuntu24_aide_database.stat.checksum
+      - >-
+        cis_ubuntu24_aide_rebaseline.exclusions_sha256 | default('')
+        == (lookup('ansible.builtin.template', 'aide-exclusions.conf.j2') | hash('sha256'))
+      - cis_ubuntu24_aide_rebaseline.approval_reference | default('') | trim | length > 0
+      - >-
+        (
+          cis_ubuntu24_aide_previous.stat.checksum | default('')
+          == (lookup('ansible.builtin.template', 'aide-exclusions.conf.j2') | hash('sha256'))
+        )
+        or (ubtu24cis_aide_db_recreate | default(false) | bool)
+    fail_msg: >-
+      An existing, aged or changed-policy AIDE baseline needs a reviewed
+      database/exclusion hash binding. Policy changes also require the
+      explicit upstream recreate action; no automatic acceptance is allowed.

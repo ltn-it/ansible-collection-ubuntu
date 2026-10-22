@@ -1,0 +1,62 @@
+---
+- name: Exercise baseline admission with bounded synthetic metadata only
+  block:
+    - name: Exercise the actual admission taskset
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: aide_admission.yml
+      vars:
+        cis_ubuntu24_aide_exclusions:
+          - path: /var/lib/example/overlay
+            reason: Mutable overlay data.
+        cis_ubuntu24_aide_previous:
+          stat: >-
+            {{
+              {
+                'exists': true,
+                'isreg': true,
+                'islnk': false,
+                'nlink': 1,
+                'uid': cis_ubuntu24_test_case.uid | default(0),
+                'gid': 0,
+                'mode': '0644',
+                'checksum': cis_ubuntu24_test_case.previous_sha
+                  | default(cis_ubuntu24_test_fragment | hash('sha256'))
+              }
+            }}
+        cis_ubuntu24_aide_previous_content:
+          content: "{{ cis_ubuntu24_test_fragment | b64encode }}"
+        cis_ubuntu24_aide_database:
+          stat: >-
+            {{
+              {
+                'exists': true,
+                'isreg': true,
+                'islnk': cis_ubuntu24_test_case.database_link | default(false),
+                'nlink': 1,
+                'checksum': cis_ubuntu24_test_case.database_sha | default('b' * 64)
+              }
+            }}
+        cis_ubuntu24_aide_aged:
+          files: "{{ ['/var/lib/aide/aide.db'] if cis_ubuntu24_test_case.aged | default(false) else [] }}"
+        cis_ubuntu24_aide_rebaseline: "{{ cis_ubuntu24_test_case.approval | default({}) }}"
+        ubtu24cis_config_aide: true  # noqa: var-naming[no-role-prefix]
+        ubtu24cis_aide_db_recreate: >-  # noqa: var-naming[no-role-prefix]
+          {{ cis_ubuntu24_test_case.recreate | default(false) }}
+
+    - name: Require success only for an admitted case
+      ansible.builtin.assert:
+        that:
+          - cis_ubuntu24_test_case.allowed
+  rescue:
+    - name: Verify an expected failure came from the actual role admission
+      ansible.builtin.assert:
+        that:
+          - not cis_ubuntu24_test_case.allowed
+          - ansible_failed_task.action == 'ansible.builtin.assert'
+          - >-
+            'Require a reviewed binding' in ansible_failed_task.name
+            or 'Reject unsafe or foreign' in ansible_failed_task.name
+          - >-
+            ansible_failed_result.msg.startswith('An existing, aged or changed-policy AIDE baseline needs')
+            or ansible_failed_result.msg.startswith('Refusing a foreign or unsafe AIDE policy file or database.')

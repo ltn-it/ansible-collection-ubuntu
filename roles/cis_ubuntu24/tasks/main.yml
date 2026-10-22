@@ -3,6 +3,17 @@
   ansible.builtin.import_tasks: assert.yml
   tags: always
 
+- name: Prepare guarded AIDE exclusions before upstream initialization
+  ansible.builtin.import_tasks: aide_prepare.yml
+  when:
+    - cis_ubuntu24_execution_mode == 'remediate'
+    - cis_ubuntu24_aide_exclusions | length > 0
+  tags:
+    - level1-server
+    - level1-workstation
+    - level2-server
+    - level2-workstation
+
 - name: Normalize the upstream AIDE scheduler integration
   ansible.builtin.import_tasks: aide_scheduler.yml
   tags:

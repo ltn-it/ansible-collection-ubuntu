@@ -1,4 +1,7 @@
 ---
+- name: Validate optional AIDE policy inputs before any mutation
+  ansible.builtin.import_tasks: aide_assert.yml
+
 - name: Validate the Ubuntu 24 CIS execution profile and dependency pins
   ansible.builtin.assert:
     that:

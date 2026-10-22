@@ -1,0 +1,8 @@
+---
+- name: Require Ubuntu 24 and systemd before any AIDE preparation
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution | default('') == 'Ubuntu'
+      - ansible_facts.distribution_major_version | default('') == '24'
+      - ansible_facts.service_mgr | default('') == 'systemd'
+    fail_msg: Guarded AIDE preparation requires gathered Ubuntu 24 systemd facts before any package changes.
