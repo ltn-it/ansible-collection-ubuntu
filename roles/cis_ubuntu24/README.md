@@ -185,3 +185,16 @@ MIT
 ## Author
 
 Lightning IT
+
+### Read-only native password-aging evidence
+
+The explicit `password_policy_audit.yml` entrypoint verifies effective
+`ubtu24cis_pass_max_days` and `ubtu24cis_pass_warn_age` against global
+`login.defs` defaults and every native unlocked password account. Locked
+accounts do not require password-aging metadata. No eligible password accounts
+is a valid empty account subject, but never excuses invalid global defaults.
+Missing, password-free or unknown account status fails closed; incomplete native
+metadata stops the audit. Only counts and per-control results are returned, with
+no account names, shadow hashes or credential values. The independent consumer
+must retain raw producer failures and require the matching supplemental result;
+this entrypoint does not remediate accounts or run automatically during CIS apply.
