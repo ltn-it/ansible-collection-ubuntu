@@ -63,6 +63,31 @@
 - name: Verify AIDE policy and database admission before package changes
   ansible.builtin.import_tasks: aide_admission.yml
 
+- name: Inspect existing mutable directory exclusions without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ cis_ubuntu24_aide_exclusions }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: cis_ubuntu24_aide_exclusion_metadata
+
+- name: Reject existing exclusion objects that are not directories
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists
+        or
+        (
+          item.stat.isdir | default(false)
+          and not (item.stat.islnk | default(false))
+        )
+    fail_msg: Existing AIDE exclusion paths must be directories; regular files and special objects are not accepted.
+  loop: "{{ cis_ubuntu24_aide_exclusion_metadata.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
 - name: Resolve declared mutable directories including existing parent aliases
   ansible.builtin.command:
     argv:

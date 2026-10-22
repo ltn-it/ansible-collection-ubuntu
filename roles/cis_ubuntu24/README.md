@@ -40,7 +40,9 @@ the timer units.
 Optional `cis_ubuntu24_aide_exclusions` entries contain exactly `path` and
 `reason`. They declare mutable data directories outside system trees; paths
 must be normalized, contain at least three components, and resolve without
-symlink redirection. An empty list preserves the existing upstream behavior.
+symlink redirection. Existing exclusion objects must be directories; files
+and special objects are rejected before package changes. An empty list
+preserves the existing upstream behavior.
 Nonempty exclusions require enabled upstream AIDE and control 6.3.1. Their
 preparation rejects check mode: package and parser acceptance require a real
 isolated Ubuntu target.
