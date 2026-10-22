@@ -36,7 +36,7 @@
   changed_when: false
   failed_when: >-
     cis_ubuntu24_filesystem_mounts.rc != 0
-    and not (cis_ubuntu24_filesystem_mounts.item[1] == '--fstab' and cis_ubuntu24_filesystem_mounts.rc == 1)
+    and not (item[1] == '--fstab' and cis_ubuntu24_filesystem_mounts.rc == 1)
   check_mode: false
 
 - name: List declared systemd mount units including inactive files
