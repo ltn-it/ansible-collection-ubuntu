@@ -30,6 +30,37 @@ records control IDs, scope, reason, compensating control, effective upstream
 variables, and audit visibility. Omitted controls remain exceptions and must
 never be reported as passes.
 
+Optional `cis_ubuntu24_apparmor_preserved_profiles` records accepted Ubuntu
+package-compatible usernamespace attachment profiles. Each entry contains
+exactly `name`, `executable`, `sha256`, `reason`, and `approval_reference`.
+The reference must bind an existing accepted intentional exception for control
+1.3.1.3 in `cis_ubuntu24_exceptions`; declaring metadata does not grant approval.
+This interface supports Level 1 only and requires the conflicting upstream
+`ubtu24cis_rule_1_3_1_3: false`. An empty list retains upstream behavior.
+
+Before and after upstream execution, including audit setup, a read-only guard
+requires enabled AppArmor and the unprivileged-usernamespace restriction. It
+verifies AppArmor package ownership, root-owned non-writable directory
+boundaries, root-owned mode-0644 single-link regular files, exact hashes,
+attachment declarations and the usernamespace permission. Only declared
+profiles may be loaded as unconfined; every other loaded profile must enforce.
+Missing profiles, unknown non-enforcing modes, unsafe files, changed packages
+or policy drift require review and stop the run. No profile is rewritten,
+reloaded or downgraded by this guard. Check mode performs these read-only checks.
+
+Retain the accepted exception and its approval reference in independent audit
+evidence; it remains an exception, not a benchmark pass. Kernel container-process
+labels, confinement stacking and container/host/network boundaries need their
+own acceptance. A loaded-profile count or application startup alone does not
+prove them. Re-review the binding after package, profile, runtime or policy
+changes. Do not infer installed tool behavior from a newer AppArmor manual:
+some installed `aa-enforce` implementations remove the `unconfined` flag.
+
+`cis-ubuntu24-apparmor-inputs-basic` verifies the actual Ansible input and
+audit-binding assertions without changing a host. The filesystem guard unit
+tests use isolated files and synthetic kernel listings; they do not load policy
+or prove live confinement. Fresh-package target verification remains required.
+
 When upstream AIDE remediation uses its default cron scheduler, the wrapper
 masks the unused package-provided `dailyaidecheck.service`. This preserves the
 cron job while preventing the upstream role from repeatedly attempting to
@@ -54,9 +85,12 @@ non-executable `90_lit_mutable_data` fragment, checks the full configuration,
 and restores that fragment if validation fails. The root configuration is
 never rewritten. For cron scheduling, the package timer is stopped and
 disabled; the existing service mask is preserved. Upstream initializes only
-after these checks. Exclusions require their own inventory exception and
-independent evidence; they are not benchmark passes or a replacement for
-application backups and image integrity.
+after these checks. Document the exact mutable-data scope and reasons in
+inventory and prove the included and excluded boundaries independently.
+The installation, regular-check and audit-tool protection controls remain
+enabled; scoped data policy alone proves none of those controls. An actual
+control omission requires its own visible exception. Exclusions replace
+neither application backups nor image integrity verification.
 
 The pinned upstream can delete an aged database before initializing again.
 With exclusions enabled, an existing database therefore requires a reviewed

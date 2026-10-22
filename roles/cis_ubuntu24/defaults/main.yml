@@ -11,6 +11,10 @@ cis_ubuntu24_aide_exclusions: []
 # approval merely from database age or a requested policy change.
 cis_ubuntu24_aide_rebaseline: {}
 
+# Accepted, exact package-compatible usernamespace attachment profiles.
+# Nonempty entries require the conflicting upstream L1 rewrite disabled.
+cis_ubuntu24_apparmor_preserved_profiles: []
+
 cis_ubuntu24_remediation_dependency:
   repository: https://github.com/ansible-lockdown/UBUNTU24-CIS
   version: "1.6.0"

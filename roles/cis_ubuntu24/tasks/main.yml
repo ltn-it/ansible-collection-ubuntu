@@ -3,6 +3,14 @@
   ansible.builtin.import_tasks: assert.yml
   tags: always
 
+- name: Verify the accepted AppArmor attachment boundary before remediation
+  ansible.builtin.import_tasks: apparmor_guard.yml
+  when: cis_ubuntu24_apparmor_preserved_profiles | length > 0
+  tags:
+    - level1-server
+    - level1-workstation
+    - setup_audit
+
 - name: Prepare guarded AIDE exclusions before upstream initialization
   ansible.builtin.import_tasks: aide_prepare.yml
   when:
@@ -47,3 +55,11 @@
   vars:
     audit_file_git: "{{ cis_ubuntu24_audit_dependency.repository }}"  # noqa: var-naming[no-role-prefix]
     audit_git_version: "{{ cis_ubuntu24_audit_dependency.commit }}"  # noqa: var-naming[no-role-prefix]
+
+- name: Verify the accepted AppArmor attachment boundary after upstream execution
+  ansible.builtin.import_tasks: apparmor_guard.yml
+  when: cis_ubuntu24_apparmor_preserved_profiles | length > 0
+  tags:
+    - level1-server
+    - level1-workstation
+    - setup_audit

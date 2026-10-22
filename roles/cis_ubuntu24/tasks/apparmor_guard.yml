@@ -1,0 +1,29 @@
+---
+- name: Require the native Ubuntu 24 AppArmor target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution | default('') == 'Ubuntu'
+      - ansible_facts.distribution_major_version | default('') == '24'
+
+- name: Verify package ownership of the preserved AppArmor attachments
+  ansible.builtin.command:
+    argv: [dpkg-query, --search, "/etc/apparmor.d/{{ item.name }}"]
+  loop: "{{ cis_ubuntu24_apparmor_preserved_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: cis_ubuntu24_apparmor_package_owner
+  changed_when: false
+  check_mode: false
+  failed_when: >-
+    cis_ubuntu24_apparmor_package_owner.rc != 0
+    or cis_ubuntu24_apparmor_package_owner.stdout != 'apparmor: /etc/apparmor.d/' ~ item.name
+
+- name: Verify exact preserved profiles and every other loaded AppArmor mode
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - '-'
+      - "{{ cis_ubuntu24_apparmor_preserved_profiles | to_json }}"
+    stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/apparmor_profile_guard.py') }}"
+  changed_when: false
+  check_mode: false
