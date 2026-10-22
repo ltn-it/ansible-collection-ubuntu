@@ -50,7 +50,7 @@
   when: cis_ubuntu24_filesystem_declared_mounts.stdout_lines | length > 0
   ansible.builtin.command:
     argv: >-
-      {{ ['/usr/bin/systemctl', 'show', '--property=Type', '--value'] +
+      {{ ['/usr/bin/systemctl', 'show', '--property=Type', '--value', '--'] +
          (cis_ubuntu24_filesystem_declared_mounts.stdout_lines | map('split') | map('first') | list) }}
   register: cis_ubuntu24_filesystem_declared_types
   changed_when: false
