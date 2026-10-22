@@ -124,7 +124,13 @@ dependency assessment; they cannot discover arbitrary future application use.
 Remediation owns only `/etc/modprobe.d/60-lit-unused-filesystems.conf`. It
 requires a safe root-owned directory and refuses foreign, linked or unsafe
 existing fragments. Each selected module receives an install blocker and
-blacklist. Actual kmod configuration and non-loading resolution are checked;
+blacklist. An empty per-module soft dependency prevents kernel-provided soft
+dependencies from overriding the install blocker. This affects only the
+selected unused module; hard dependencies and unrelated configuration remain
+intact. The actual non-loading resolution must contain the blocker and must
+not insert the selected module. Listing hard dependencies before the blocker
+does not mean the selected filesystem is loadable. Actual kmod configuration
+and non-loading resolution are checked;
 failed validation restores the exact previous fragment, or removes only the
 new fragment. No module is loaded or unloaded, and no initramfs is rewritten.
 Audit mode makes no changes. A real isolated apply, negative dependency and

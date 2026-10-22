@@ -3,4 +3,5 @@
 # {{ module.reason }}
 install {{ module.name }} /bin/false
 blacklist {{ module.name }}
+softdep {{ module.name }} pre:
 {% endfor %}

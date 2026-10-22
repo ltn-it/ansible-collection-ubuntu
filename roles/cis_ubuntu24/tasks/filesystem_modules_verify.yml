@@ -25,4 +25,9 @@
   changed_when: false
   failed_when: >-
     cis_ubuntu24_filesystem_resolution.rc != 0
-    or cis_ubuntu24_filesystem_resolution.stdout | trim != 'install /bin/false'
+    or not (cis_ubuntu24_filesystem_resolution.stdout is search('(?m)^install /bin/false\s*$'))
+    or
+    (
+      cis_ubuntu24_filesystem_resolution.stdout
+      is search('(?m)^insmod .*/' ~ item.name ~ '[.]ko([.](xz|gz|zst))?(\s|$)')
+    )
