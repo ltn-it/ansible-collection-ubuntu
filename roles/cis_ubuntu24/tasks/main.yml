@@ -57,15 +57,26 @@
     - level2-server
     - level2-workstation
 
-- name: Apply ansible-lockdown Ubuntu 24 CIS role
-  # Keep this static import untagged so the upstream tasks retain their native
-  # profile and audit tag filtering. Tags here would propagate to every
-  # imported task and make non-matching upstream controls eligible to run.
-  ansible.builtin.import_role:
-    name: ansible-lockdown.ubuntu24_cis  # noqa syntax-check[specific] -- EE-installed dependency
-  vars:
-    audit_file_git: "{{ cis_ubuntu24_audit_dependency.repository }}"  # noqa: var-naming[no-role-prefix]
-    audit_git_version: "{{ cis_ubuntu24_audit_dependency.commit }}"  # noqa: var-naming[no-role-prefix]
+- name: Admit the independently bound offline audit archive before upstream execution
+  ansible.builtin.import_tasks: audit_archive.yml
+  when:
+    - cis_ubuntu24_execution_mode == 'audit'
+    - audit_content | default('git') == 'archive'
+  tags: always
+
+- name: Preserve root ownership across upstream audit extraction
+  module_defaults:
+    ansible.builtin.unarchive:
+      owner: root
+      group: root
+  block:
+    - name: Apply ansible-lockdown Ubuntu 24 CIS role
+      # Keep the import untagged to retain native upstream profile filtering.
+      ansible.builtin.import_role:
+        name: ansible-lockdown.ubuntu24_cis  # noqa syntax-check[specific] -- EE-installed dependency
+      vars:
+        audit_file_git: "{{ cis_ubuntu24_audit_dependency.repository }}"  # noqa: var-naming[no-role-prefix]
+        audit_git_version: "{{ cis_ubuntu24_audit_dependency.commit }}"  # noqa: var-naming[no-role-prefix]
 
 - name: Verify effective unused filesystem protection after upstream execution
   ansible.builtin.import_tasks: filesystem_modules_verify.yml

@@ -1,0 +1,41 @@
+---
+- name: Validate the explicit single-profile restoration contract
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_apparmor_restoration is mapping
+      - >-
+        cis_ubuntu24_apparmor_restoration.keys() | sort
+        == ['approval_reference', 'machine_id', 'name', 'package_version', 'previous_sha256', 'source']
+      - cis_ubuntu24_execution_mode == 'remediate'
+      - not ansible_check_mode
+    fail_msg: Restoration is an explicit real remediation with a complete reviewed binding; check mode cannot apply it.
+
+- name: Validate restoration values and exact preservation approval
+  ansible.builtin.assert:
+    that:
+      - item.value is string
+      - item.value | trim | length > 0
+      - item.value | regex_search('[\x00-\x1f\x7f]') is none
+  loop: "{{ cis_ubuntu24_apparmor_restoration | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Validate restoration identity and source boundaries
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_apparmor_restoration.name is match('^[a-z][a-z0-9_-]*$')
+      - cis_ubuntu24_apparmor_restoration.machine_id is match('^[a-f0-9]{32}$')
+      - cis_ubuntu24_apparmor_restoration.previous_sha256 is match('^[a-f0-9]{64}$')
+      - cis_ubuntu24_apparmor_restoration.source is match('^/[^/]+(/[^/]+)*$')
+      - cis_ubuntu24_apparmor_restoration.source.split('/') | intersect(['..', '.']) | length == 0
+      - cis_ubuntu24_apparmor_restore_selected | length == 1
+      - >-
+        cis_ubuntu24_apparmor_restoration.approval_reference
+        == cis_ubuntu24_apparmor_restore_selected[0].approval_reference
+      - >-
+        cis_ubuntu24_apparmor_restoration.previous_sha256
+        != cis_ubuntu24_apparmor_restore_selected[0].sha256
+  vars:
+    cis_ubuntu24_apparmor_restore_selected: >-
+      {{ cis_ubuntu24_apparmor_preserved_profiles
+         | selectattr('name', 'equalto', cis_ubuntu24_apparmor_restoration.name) | list }}

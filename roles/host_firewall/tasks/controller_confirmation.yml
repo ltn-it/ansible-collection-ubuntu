@@ -66,26 +66,4 @@
   no_log: true
 
 - name: Rebuild transaction request with confirmed envelope
-  ansible.builtin.set_fact:
-    host_firewall_transaction_request: >-
-      {{
-        {
-          'schema': 'lit.host_firewall.transaction-request/v3',
-          'target': host_firewall_expected_inventory_hostname,
-          'action': host_firewall_action,
-          'change_id': host_firewall_change_id,
-          'mode': host_firewall_mode,
-          'candidate_sha256': host_firewall_candidate_sha256,
-          'approved_readback_sha256': host_firewall_approved_readback_sha256,
-          'policy_fingerprint': host_firewall_policy_fingerprint,
-          'egress_policy_sha256': host_firewall_egress_policy_sha256,
-          'egress_status': host_firewall_egress_status,
-          'authorization': host_firewall_authorization_contract
-        }
-        | combine(
-          {'candidate_base64': host_firewall_candidate_content | b64encode}
-          if host_firewall_action == 'apply'
-          else {}
-        )
-      }}
-  no_log: true
+  ansible.builtin.import_tasks: transaction_request.yml

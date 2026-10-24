@@ -1,7 +1,8 @@
 # lit.ubuntu.host_firewall
 
-Build and inspect a fail-closed nftables host policy for Ubuntu 24.04. The role owns exactly one `inet` table and one
-dedicated persistence include. It never captures, flushes, restores, or persists the complete host ruleset, and it
+Build and inspect a fail-closed nftables host policy for Ubuntu 24.04. The role owns one `inet` table and optionally
+one explicitly managed `bridge` SSH guard in the same transaction and dedicated persistence include.
+It never captures, flushes, restores, or persists the complete host ruleset, and it
 never overwrites the administrator-owned root nftables configuration. Foreign tables and Podman/Netavark tables stay
 outside the role boundary.
 
@@ -43,6 +44,10 @@ network namespace and verifies its canonical readback without changing the host 
 runs in global check mode. Structured readback uses `nft --json`, removes only documented runtime fields, and compares
 the resulting canonical SHA-256 with an independently approved policy artifact. Text comments are not acceptance
 evidence.
+
+The preview approval digest hashes the canonical command output directly. It
+does not hash a JSON mapping reconstructed by Ansible; the transaction must
+compare the same canonical bytes after apply and again before confirmation.
 
 Productive `apply`, `confirm`, and `rollback` use one static root-owned transaction routine and one exclusive lock.
 The routine validates a short-lived, externally signed authorization, retains its signed envelope and verifier receipt,
@@ -98,6 +103,51 @@ Traffic between a reverse proxy and its backend on the same dedicated Podman bri
 not claim or render a host-routed forwarding capability for that path.
 
 ## Variables
+
+The read-only `files/container_ssh_binding.py --discover` helper plans container
+SSH ingress bindings from rootful Podman identity and actual kernel state. Its
+stdin JSON contains `capabilities`, `mode`, and `table_name`. Each capability
+requires `container_name`, `interface`, one RFC1918 `source_ipv4` `/32`, the
+observed bridge `destination_ipv4`, `port: 1905`, and explicit `modes`.
+
+It checks the selected container and namespace twice, refuses host networking
+and privileged containers, and verifies both veth directions and bridge
+membership. Only public identity fields are requested from Podman; application
+environment values are not read. The returned bridge guard binds the observed
+port name and index and protects the source identity for IPv4 and ARP. Shared
+pod network namespaces are one trust unit; this does not authenticate individual
+processes within a namespace or replace SSH key authentication.
+
+The helper changes no firewall, interface, service or persistence file. Set
+`host_firewall_container_ssh_guard_managed: true` to have the role discover
+active `host_firewall_container_ssh_access` entries and include both the guard
+and the exact TCP/1905 INPUT grants in one candidate. The managed flag remains
+explicit when entries are removed, so an empty map clears old bindings rather
+than orphaning a guard. Default-off consumers retain the single-table canonical
+format. A coupled policy uses plan v4, policy v6 and transaction metadata v4,
+including the exact owned-table scope and explicit prior table absence.
+
+Coupled confirmation requires both tables to match the approved canonical
+digest. Rollback restores both prior tables in one nft batch, including mixed
+present/absent states. Explicit rollback and readback do not require a running
+application container; rollback reads its protected original transaction
+context. The existing signing/confirmation boundary remains required. The
+[interface-index data type](https://netfilter.org/projects/nftables/manpage.html)
+can still be printed as a live interface name with `--numeric` on nft 1.0.9.
+Bridge snapshots therefore resolve scalar `iif`/`oif`/`sdif` equality operands
+against the actual network namespace, retain numbers in canonical JSON and
+restore text, and reject identity/count drift between text and both structured
+observations. Deleted-index decimal JSON strings are normalized as numbers;
+ambiguous numeric interface names fail instead of redirecting a stored index.
+Interface-name matches and comments keep their original bytes.
+Unsupported index sets, assignments or non-equality expressions in the owned
+guard fail before mutation. A vanished ingress device cannot require name
+resolution during rollback.
+
+Discovery is repeated for each new candidate. A restarted namespace needs a
+fresh binding; lifecycle automation and authenticated SSH/Guacamole acceptance
+are separate required operational checks. A read-only discovery result alone
+does not establish them or authorize a productive apply.
 
 `host_firewall_forward_proxy_egress` optionally binds all hardened public
 HTTP(S) egress to one local service identity (`meta skuid`). Direct mode permits

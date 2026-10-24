@@ -61,6 +61,37 @@ audit-binding assertions without changing a host. The filesystem guard unit
 tests use isolated files and synthetic kernel listings; they do not load policy
 or prove live confinement. Fresh-package target verification remains required.
 
+The separate **`apparmor_restore.yml`** entrypoint repairs one previously
+rewritten attachment to its exact accepted package-compatible content. It is
+never invoked by the ordinary wrapper or audit. Supply
+`cis_ubuntu24_apparmor_restoration` with exactly `name`, `machine_id`,
+`package_version`, `source`, `previous_sha256`, and `approval_reference`.
+The profile name, desired hash and approval must match the existing accepted
+preservation policy. `source` is an absolute controller path to an independently
+verified manufacturer profile; the role neither downloads nor derives it from
+the current file. Target machine ID, exact installed AppArmor package version,
+package ownership, previous or desired file hash and all loaded profile modes
+must match before any target write. Check mode and audit mode refuse restoration.
+
+Invoke it explicitly with `ansible.builtin.include_role`,
+`name: lit.ubuntu.cis_ubuntu24`, and `tasks_from: apparmor_restore.yml`, in a
+fact-gathering, privileged Ubuntu 24 play. Keep the accepted Level 1 policy and
+visible CIS exception in inventory; a newly entered reference grants no approval.
+Use the normal wrapper afterwards for baseline and independent audit acceptance.
+
+The transaction retains a root-only immutable ownership record and original
+file under `/var/lib/lit-cis-apparmor/<machine-id>/<name>-<previous-sha256>`.
+Redirected, writable, linked, colliding or changed rollback resources fail closed.
+The parser validates the candidate before replacement. Only that changed
+attachment is reloaded, then the normal full preservation guard and exact
+loaded-profile map are checked. Failure restores and verifies the original file
+and map when the invocation began with the previous policy. An unchanged repeat
+requires the retained rollback but never reinstalls that older policy on failure.
+Rollback failure remains a failure requiring investigation. Preserve the snapshot
+until change acceptance; the role never deletes it or reconfigures other profiles.
+Kernel interruption recovery and package updates still require their normal
+operational recovery procedure. The entrypoint has no host-side timeout rollback.
+
 When upstream AIDE remediation uses its default cron scheduler, the wrapper
 masks the unused package-provided `dailyaidecheck.service`. This preserves the
 cron job while preventing the upstream role from repeatedly attempting to
@@ -198,3 +229,20 @@ metadata stops the audit. Only counts and per-control results are returned, with
 no account names, shadow hashes or credential values. The independent consumer
 must retain raw producer failures and require the matching supplemental result;
 this entrypoint does not remediate accounts or run automatically during CIS apply.
+
+### Independently admitted offline audit transport
+
+Audit mode accepts `audit_content: archive` only with an absolute controller
+`audit_conf_source`, absolute target `audit_conf_dest` and independent
+`cis_ubuntu24_audit_transport_sha256`. The caller must first stage
+`UBUNTU24-CIS-Audit/` under that destination. The wrapper rechecks archive bytes,
+canonical target path, root ownership and executable modes, clean Git state,
+origin and the unchanged reviewed audit commit before vendor execution. The
+transport checksum describes the authenticated delivery archive; it does not
+replace `cis_ubuntu24_audit_dependency.archive_sha256` or any source pin.
+
+Archive and destination facts survive vendor variable loading. Scoped module
+defaults keep repeated upstream extraction root-owned. Normal Git transport,
+profile tags, audit-only selection, independent evidence and exception controls
+remain unchanged. Missing digest, changed archive, dirty/foreign checkout or
+unsafe ownership fails before the vendor audit. Other transports remain refused.

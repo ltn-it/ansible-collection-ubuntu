@@ -24,8 +24,22 @@
     - not ansible_check_mode
     - ansible_connection | default('ssh') != 'local'
 
+- name: Discover target-observed container SSH protection before rendering
+  ansible.builtin.import_tasks: container_ssh.yml
+  when:
+    - host_firewall_container_ssh_guard_managed
+    - host_firewall_action not in ['rollback', 'readback']
+
+- name: Load protected coupled rollback context without live containers
+  ansible.builtin.import_tasks: coupled_rollback_context.yml
+  when:
+    - host_firewall_container_ssh_guard_managed
+    - host_firewall_action == 'rollback'
+    - not ansible_check_mode
+
 - name: Render deterministic host firewall candidate
   ansible.builtin.import_tasks: render.yml
+  when: not (host_firewall_container_ssh_guard_managed and host_firewall_action in ['rollback', 'readback'])
 
 - name: Build candidate-bound controller confirmation
   ansible.builtin.include_tasks: controller_confirmation.yml
@@ -115,4 +129,12 @@
 
 - name: Read back current host firewall table
   ansible.builtin.include_tasks: readback.yml
-  when: host_firewall_action == 'readback'
+  when:
+    - host_firewall_action == 'readback'
+    - not host_firewall_container_ssh_guard_managed
+
+- name: Read back the complete coupled host firewall policy
+  ansible.builtin.include_tasks: coupled_readback.yml
+  when:
+    - host_firewall_action == 'readback'
+    - host_firewall_container_ssh_guard_managed

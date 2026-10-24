@@ -58,7 +58,7 @@ Ubuntu-native package and repository management.
 - `lit.ubuntu.repos`
   Configure apt repositories, apt signing key files, and optional apt proxy
   policy.
-- `lit.ubuntu.automatic_updates`
+- `lit.ubuntu.automatic_updates` - periodic updates and signed staged package-data supply and verification
   Schedule weekly `apt-get update && apt-get upgrade` runs via cron.
 - `lit.ubuntu.users`
   Manage local Linux users and SSH keys.

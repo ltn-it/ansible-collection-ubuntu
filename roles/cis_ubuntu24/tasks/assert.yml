@@ -84,7 +84,19 @@
           and
           (audit_format | default('json')) == 'json'
           and
-          (audit_content | default('git')) == 'git'
+          (
+            (audit_content | default('git')) == 'git'
+            or
+            (
+              (audit_content | default('git')) == 'archive'
+              and
+              (cis_ubuntu24_audit_transport_sha256 | default('')) is match('^[0-9a-f]{64}$')
+              and
+              (audit_conf_source | default('')) is match('^/[^\r\n]+$')
+              and
+              (audit_conf_dest | default('')) is match('^/[^\r\n]+$')
+            )
+          )
         )
       - >-
         cis_ubuntu24_execution_mode != 'remediate'

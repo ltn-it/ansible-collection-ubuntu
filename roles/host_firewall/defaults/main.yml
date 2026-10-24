@@ -85,6 +85,12 @@ host_firewall_published_https_access:
 # default keeps all new container forwarding denied.
 host_firewall_container_service_access: {}
 
+# Explicit management persists even when the capability map becomes empty, so
+# a later transaction can remove old bindings without orphaning its guard.
+host_firewall_container_ssh_access: {}
+host_firewall_container_ssh_guard_managed: false
+host_firewall_container_ssh_guard_table_name: lit_container_ssh_guard
+
 # Deprecated aggregate inputs are retained only to fail closed with an actionable migration error.
 host_firewall_controller_source_cidrs: []
 host_firewall_recovery_source_cidrs: []
@@ -319,6 +325,16 @@ host_firewall_policy_material_effective: >-
         if host_firewall_container_dns_clients | length > 0
         else {}
       )
+    | combine(
+        {
+          'schema': 'lit.host_firewall.policy/v6',
+          'container_ssh_access': host_firewall_container_ssh_access,
+          'container_ssh_bindings': host_firewall_container_ssh_bindings,
+          'bridge_guard_table': host_firewall_container_ssh_guard_table_name
+        }
+        if host_firewall_container_ssh_guard_managed
+        else {}
+      )
   }}
 host_firewall_policy_fingerprint: >-
   {{ host_firewall_policy_material_effective | to_json | hash('sha256') }}
@@ -370,6 +386,8 @@ host_firewall_transaction_program_argv:
   - "{{ host_firewall_table_family }}"
   - --table-name
   - "{{ host_firewall_table_name }}"
+  - --bridge-table-name
+  - "{{ host_firewall_container_ssh_guard_table_name if host_firewall_container_ssh_guard_managed else '-' }}"
   - --nft-binary
   - "{{ host_firewall_nft_binary }}"
   - --systemctl-binary

@@ -1,0 +1,72 @@
+---
+- name: Read the exact controller audit archive without following links
+  ansible.builtin.stat:
+    path: '{{ audit_conf_source }}'
+    follow: false
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: cis_ubuntu24_audit_archive_source
+
+- name: Require the independently admitted audit transport digest
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_audit_archive_source.stat.isreg | default(false)
+      - not (cis_ubuntu24_audit_archive_source.stat.islnk | default(false))
+      - >-
+        cis_ubuntu24_audit_archive_source.stat.checksum | default('') ==
+        cis_ubuntu24_audit_transport_sha256
+    fail_msg: Refusing an unbound or changed offline audit archive before vendor execution.
+
+- name: Require a canonical already staged audit checkout destination
+  ansible.builtin.command:
+    argv: [/usr/bin/realpath, -e, '--', '{{ audit_conf_dest }}/UBUNTU24-CIS-Audit']
+  register: cis_ubuntu24_audit_archive_realpath
+  changed_when: false
+
+- name: Inspect the staged audit directory and executable ownership
+  ansible.builtin.stat:
+    path: '{{ audit_conf_dest }}/UBUNTU24-CIS-Audit{{ item }}'
+    follow: false
+  loop: ['', /run_audit.sh]
+  register: cis_ubuntu24_audit_archive_checkout
+
+- name: Require the protected executable before any root audit invocation
+  ansible.builtin.assert:
+    that:
+      - >-
+        cis_ubuntu24_audit_archive_realpath.stdout ==
+        audit_conf_dest ~ '/UBUNTU24-CIS-Audit'
+      - cis_ubuntu24_audit_archive_checkout.results[0].stat.isdir | default(false)
+      - cis_ubuntu24_audit_archive_checkout.results[1].stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.uid == 0
+      - item.stat.gid == 0
+      - item.stat.mode == '0755'
+  loop: '{{ cis_ubuntu24_audit_archive_checkout.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+
+- name: Read actual staged commit origin and cleanliness without fetching remote content
+  ansible.builtin.command:
+    argv: '{{ ["/usr/bin/git", "-C", audit_conf_dest ~ "/UBUNTU24-CIS-Audit"] + item }}'
+  loop:
+    - [rev-parse, --verify, 'HEAD^{commit}']
+    - [remote, get-url, origin]
+    - [status, --porcelain=v1, --untracked-files=all]
+  register: cis_ubuntu24_audit_archive_git
+  changed_when: false
+
+- name: Require the same exact reviewed audit revision and origin as Git mode
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_audit_archive_git.results[0].stdout | trim == cis_ubuntu24_audit_dependency.commit
+      - cis_ubuntu24_audit_archive_git.results[1].stdout | trim == cis_ubuntu24_audit_dependency.repository
+      - cis_ubuntu24_audit_archive_git.results[2].stdout | trim | length == 0
+    fail_msg: Offline transport does not relax the reviewed audit provenance.
+
+- name: Bind admitted archive transport above upstream variable loading
+  ansible.builtin.set_fact:
+    audit_content: archive  # noqa: var-naming[no-role-prefix] -- Upstream audit interface.
+    audit_conf_source: '{{ audit_conf_source }}'  # noqa: var-naming[no-role-prefix]
+    audit_conf_dest: '{{ audit_conf_dest }}'  # noqa: var-naming[no-role-prefix]

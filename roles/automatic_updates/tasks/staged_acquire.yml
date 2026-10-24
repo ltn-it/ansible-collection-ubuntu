@@ -1,0 +1,143 @@
+---
+- name: Validate independently selected collector and fresh unprivileged paths
+  ansible.builtin.assert:
+    that:
+      - automatic_updates_staged_expected_collector_id is match('^[0-9a-f]{32}$')
+      - automatic_updates_staged_capture_sha256 is match('^[0-9a-f]{64}$')
+      - automatic_updates_staged_controller_directory is match('^/[^\n\r]+$')
+      - automatic_updates_staged_delivery_directory is match('^/[^\n\r]+$')
+      - automatic_updates_staged_acquisition_directory is match('^/[^\n\r]+$')
+      - automatic_updates_staged_acquisition_inputs_directory is match('^/[^\n\r]+$')
+      - automatic_updates_staged_acquisition_directory != automatic_updates_staged_acquisition_inputs_directory
+      - not ansible_check_mode
+    fail_msg: A previously selected compatible collector, authenticated capture and new private paths are required.
+
+- name: Inspect the new private controller delivery destination
+  ansible.builtin.stat:
+    path: '{{ automatic_updates_staged_delivery_directory }}'
+    follow: false
+  register: automatic_updates_staged_delivery_previous
+  delegate_to: localhost
+  become: false
+
+- name: Refuse collision with an existing delivery attempt
+  ansible.builtin.assert:
+    that: [not automatic_updates_staged_delivery_previous.stat.exists]
+
+- name: Read collector identity before creating any private attempt state
+  ansible.builtin.slurp:
+    src: /etc/machine-id
+  register: automatic_updates_staged_collector_identity
+  become: false
+
+- name: Require the independently admitted collector identity
+  ansible.builtin.assert:
+    that:
+      - >-
+        automatic_updates_staged_collector_identity.content | b64decode | trim ==
+        automatic_updates_staged_expected_collector_id
+
+- name: Check the actual unprivileged collector execution identity
+  ansible.builtin.command:
+    argv: [/usr/bin/id, -u]
+  register: automatic_updates_staged_collector_uid
+  changed_when: false
+  become: false
+
+- name: Require unprivileged acquisition before creating collector files
+  ansible.builtin.assert:
+    that: [automatic_updates_staged_collector_uid.stdout | trim != '0']
+
+- name: Inspect prior collector attempt paths without following links
+  ansible.builtin.stat:
+    path: '{{ item }}'
+    follow: false
+  loop:
+    - '{{ automatic_updates_staged_acquisition_directory }}'
+    - '{{ automatic_updates_staged_acquisition_inputs_directory }}'
+  register: automatic_updates_staged_collector_previous
+  become: false
+
+- name: Refuse replay or collision with any prior collector attempt
+  ansible.builtin.assert:
+    that:
+      - not automatic_updates_staged_collector_previous.results[0].stat.exists
+      - not automatic_updates_staged_collector_previous.results[1].stat.exists
+
+- name: Prepare only the new unprivileged collector input directory
+  ansible.builtin.file:
+    path: '{{ automatic_updates_staged_acquisition_inputs_directory }}'
+    state: directory
+    mode: '0700'
+  become: false
+
+- name: Transfer the authenticated public target snapshot to the selected collector
+  ansible.builtin.copy:
+    src: '{{ automatic_updates_staged_controller_directory }}/'
+    dest: '{{ automatic_updates_staged_acquisition_inputs_directory }}/'
+    mode: '0600'
+    directory_mode: '0700'
+  become: false
+
+- name: Transfer the fresh Collection acquisition and verification helpers
+  ansible.builtin.copy:
+    src: '{{ item }}'
+    dest: '{{ automatic_updates_staged_acquisition_inputs_directory }}/{{ item }}'
+    mode: '0600'
+  loop:
+    - apt_staged_bundle.py
+    - apt_staged_acquire.py
+  become: false
+
+- name: Acquire signed metadata and resolved debs without installing host or target packages
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - '{{ automatic_updates_staged_acquisition_inputs_directory }}/apt_staged_acquire.py'
+      - --snapshot
+      - '{{ automatic_updates_staged_acquisition_inputs_directory }}'
+      - --capture-sha256
+      - '{{ automatic_updates_staged_capture_sha256 }}'
+      - --destination
+      - '{{ automatic_updates_staged_acquisition_directory }}'
+      - --expected-collector-id
+      - '{{ automatic_updates_staged_expected_collector_id }}'
+  register: automatic_updates_staged_acquisition
+  changed_when: true
+  become: false
+
+- name: Prepare the new private controller delivery directory
+  ansible.builtin.file:
+    path: '{{ automatic_updates_staged_delivery_directory }}'
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Transfer the public signed bundle and independent delivery receipts
+  ansible.builtin.fetch:
+    src: '{{ automatic_updates_staged_acquisition_directory }}/{{ item }}'
+    dest: '{{ automatic_updates_staged_delivery_directory }}/{{ item }}'
+    flat: true
+    validate_checksum: true
+  loop: [receipt.json, request.json, bundle.tar.gz]
+  become: false
+
+- name: Read back the received request and archive digests
+  ansible.builtin.stat:
+    path: '{{ automatic_updates_staged_delivery_directory }}/{{ item }}'
+    checksum_algorithm: sha256
+  loop: [request.json, bundle.tar.gz]
+  register: automatic_updates_staged_delivery_digests
+  delegate_to: localhost
+  become: false
+
+- name: Bind received artifacts to the authenticated collector result
+  ansible.builtin.assert:
+    that:
+      - >-
+        automatic_updates_staged_delivery_digests.results[0].stat.checksum ==
+        (automatic_updates_staged_acquisition.stdout | from_json).request_sha256
+      - >-
+        automatic_updates_staged_delivery_digests.results[1].stat.checksum ==
+        (automatic_updates_staged_acquisition.stdout | from_json).archive_sha256

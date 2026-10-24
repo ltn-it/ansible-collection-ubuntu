@@ -35,7 +35,7 @@ class HostFirewallStaticSafetyTests(unittest.TestCase):
             "def stage_confirmation", maxsplit=1
         )[0]
         lock = apply.index('with transaction_scope(config, action="apply"):')
-        snapshot = apply.index("read_nft_table_state", lock)
+        snapshot = apply.index("read_nft_policy_state", lock)
         stage = apply.index("write_exclusive(paths[key]", snapshot)
         metadata = apply.index('write_exclusive(paths["metadata"]', stage)
         watchdog = apply.index('systemctl(config, "enable", "--now"', metadata)
@@ -52,12 +52,12 @@ class HostFirewallStaticSafetyTests(unittest.TestCase):
         )[0]
         first_rehash = confirm.index("validate_metadata_and_assets")
         first_root = confirm.index("validate_pending_persistence", first_rehash)
-        readback = confirm.index("read_nft_table_state", first_root)
+        readback = confirm.index("read_nft_policy_state", first_root)
         stop = confirm.index('systemctl(config, "stop"', readback)
         rollback_recheck = confirm.index("require_rollback_service_quiescent", stop)
         second_rehash = confirm.index("validate_metadata_and_assets", rollback_recheck)
         second_root = confirm.index("validate_pending_persistence", second_rehash)
-        final_readback = confirm.index("read_nft_table_state", second_root)
+        final_readback = confirm.index("read_nft_policy_state", second_root)
         persistent_write = confirm.index("atomic_replace(config.persistent_include", final_readback)
         self.assertLess(first_rehash, first_root)
         self.assertLess(first_root, readback)

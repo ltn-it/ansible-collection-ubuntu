@@ -14,6 +14,13 @@
         audit_visibility: intentional_exception
         approval_state: accepted
         approval_reference: SYNTHETIC-APPROVAL-NOT-A-PRODUCTION-DECISION
+    fixture_restoration:
+      name: podman
+      machine_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      package_version: 1.2.3-synthetic
+      source: /controller/approved-profile
+      previous_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      approval_reference: SYNTHETIC-APPROVAL-NOT-A-PRODUCTION-DECISION
   tasks:
     - name: Verify a complete synthetic Level 1 binding is accepted
       ansible.builtin.include_role:
@@ -64,6 +71,38 @@
               audit_visibility: manual_evidence
               approval_state: accepted
               approval_reference: SYNTHETIC-APPROVAL-NOT-A-PRODUCTION-DECISION
+      loop_control:
+        loop_var: guard_case
+        label: "{{ guard_case.name }}"
+
+    - name: Verify the complete explicit restoration input contract
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: apparmor_restoration_assert.yml
+      vars:
+        cis_ubuntu24_apparmor_preserved_profiles: "{{ fixture_policy }}"
+        cis_ubuntu24_apparmor_restoration: "{{ fixture_restoration }}"
+
+    - name: Verify incomplete unsafe unapproved and audit restoration requests fail
+      ansible.builtin.include_tasks: tasks/invalid-restoration.yml
+      loop:
+        - name: absent-request
+          request: {}
+        - name: unknown-profile
+          request: "{{ fixture_restoration | combine({'name': 'unknown'}) }}"
+        - name: invalid-machine-identity
+          request: "{{ fixture_restoration | combine({'machine_id': 'unknown'}) }}"
+        - name: approval-mismatch
+          request: "{{ fixture_restoration | combine({'approval_reference': 'ANOTHER'}) }}"
+        - name: ambiguous-source
+          request: "{{ fixture_restoration | combine({'source': '/controller/../other'}) }}"
+        - name: noncanonical-source
+          request: "{{ fixture_restoration | combine({'source': '//controller/approved-profile'}) }}"
+        - name: unknown-field
+          request: "{{ fixture_restoration | combine({'unexpected': 'field'}) }}"
+        - name: audit-never-remediates
+          request: "{{ fixture_restoration }}"
+          mode: audit
       loop_control:
         loop_var: guard_case
         label: "{{ guard_case.name }}"

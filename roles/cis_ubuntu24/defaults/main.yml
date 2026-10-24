@@ -14,6 +14,8 @@ cis_ubuntu24_aide_rebaseline: {}
 # Accepted, exact package-compatible usernamespace attachment profiles.
 # Nonempty entries require the conflicting upstream L1 rewrite disabled.
 cis_ubuntu24_apparmor_preserved_profiles: []
+# Explicit apparmor_restore.yml entrypoint only; never applied by the CIS wrapper.
+cis_ubuntu24_apparmor_restoration: {}
 
 # Additional reviewed filesystem modules; never unload a module automatically.
 cis_ubuntu24_disabled_filesystem_modules: []
