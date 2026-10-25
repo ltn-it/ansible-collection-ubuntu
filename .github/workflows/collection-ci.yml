@@ -29,6 +29,7 @@ jobs:
   # Collection CI
   # ---------------------------------------------------------------------------
   lint:
+    timeout-minutes: 30
     name: Lint (ansible-lint via ee-wunder-devtools-ubi9)
     runs-on: ubuntu-latest
 
@@ -50,6 +51,7 @@ jobs:
           bash scripts/devtools-ansible-lint.sh
 
   molecule:
+    timeout-minutes: 90
     name: Molecule (via devtools)
     runs-on: ubuntu-latest
     needs: lint
@@ -72,6 +74,7 @@ jobs:
           bash scripts/devtools-molecule.sh
 
   build-install:
+    timeout-minutes: 60
     name: Build & install collection (via devtools smoke test)
     runs-on: ubuntu-latest
     needs: lint

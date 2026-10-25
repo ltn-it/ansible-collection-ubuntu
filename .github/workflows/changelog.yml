@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   changelog:
+    timeout-minutes: 30
     name: Changelog fragments
     runs-on: ubuntu-latest
 

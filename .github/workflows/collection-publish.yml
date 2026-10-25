@@ -38,6 +38,7 @@ permissions:
 
 jobs:
   dispatch:
+    timeout-minutes: 10
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.merged == true &&
@@ -104,6 +105,7 @@ jobs:
             -f publish_galaxy="$PUBLISH_GALAXY"
 
   publish:
+    timeout-minutes: 60
     if: github.event_name == 'workflow_dispatch'
     name: Publish collection release
     runs-on: ubuntu-latest
