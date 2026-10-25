@@ -22,8 +22,8 @@ cis_ubuntu24_disabled_filesystem_modules: []
 
 cis_ubuntu24_remediation_dependency:
   repository: https://github.com/ansible-lockdown/UBUNTU24-CIS
-  version: "1.6.0"
-  commit: c893ca6836fb32b1ea067d4a63c341e39693074b
+  version: "1.8.0"
+  commit: 3a2f05b9a8040eb869fd14fdca882aae4f68733b
   license: MIT
 
 cis_ubuntu24_audit_dependency:

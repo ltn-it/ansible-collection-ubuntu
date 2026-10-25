@@ -185,14 +185,19 @@ absolute log directory.
 
 External Galaxy role: `ansible-lockdown.ubuntu24_cis`.
 
-- Remediation: `ansible-lockdown/UBUNTU24-CIS` release `1.6.0`, commit
-  `c893ca6836fb32b1ea067d4a63c341e39693074b`, MIT.
+- Remediation: `ansible-lockdown/UBUNTU24-CIS` release `1.8.0`, commit
+  `3a2f05b9a8040eb869fd14fdca882aae4f68733b`, MIT.
 - Audit: `ansible-lockdown/UBUNTU24-CIS-Audit` benchmark `v1.0.0`, commit
   `87efcc6d409d1a998a7cb809c5ce5a6afedf84c7`, MIT.
 
 The remediation role is updated through `requirements.yml`. Audit content has
 no upstream release, so update its immutable commit and archive checksum
 together after reviewing compatibility with the remediation release.
+
+The standard Ansible EE and the Automation runtime admission must select the
+same remediation release. Version 1.8.0 continues to use CIS benchmark v1.0.0;
+its split audit defaults do not replace the independently pinned audit above.
+Changing the dependency does not approve an exception or disable a control.
 
 ## Example Playbook
 
