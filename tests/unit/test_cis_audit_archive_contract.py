@@ -64,5 +64,57 @@ class AuditArchiveTests(unittest.TestCase):
             self.assertIn('Require the protected executable',done.stdout)
             self.assertNotIn('TASK [cis_ubuntu24 : Read actual staged commit',done.stdout)
 
+    def test_auditor_refuses_unreviewed_architecture_pin_and_paths_before_acquisition(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
+            root=Path(temporary)
+            for extra in [
+                {'ansible_facts':{'machine':'s390x'}},
+                {'cis_ubuntu24_auditor_source':'relative/goss'},
+                {'cis_ubuntu24_auditor_dependency':{'repository':'https://github.com/krameff/goss',
+                  'version':'v0.5.0','checksums':{}}},
+            ]:
+                with self.subTest(extra=extra):
+                    done=self.run_role(root,'auditor.yml',{'ansible_facts':{'machine':'x86_64'},**extra})
+                    self.assertEqual(done.returncode,2,done.stdout+done.stderr)
+                    self.assertIn('Refusing an unreviewed auditor runtime',done.stdout)
+                    self.assertNotIn('TASK [cis_ubuntu24 : Acquire',done.stdout)
+
+    def test_offline_auditor_requires_fixed_release_bytes_and_never_downloads(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
+            root=Path(temporary);binary=root/'goss';binary.write_bytes(b'not the reviewed release')
+            linked=root/'linked-goss';linked.symlink_to(binary)
+            for path in [binary,linked,root/'missing']:
+                with self.subTest(path=path):
+                    done=self.run_role(root,'auditor.yml',{'ansible_facts':{'machine':'x86_64'},
+                        'cis_ubuntu24_auditor_source':str(path),
+                        'cis_ubuntu24_auditor_cache_directory':str(root/'no-download')})
+                    self.assertEqual(done.returncode,2,done.stdout+done.stderr)
+                    self.assertIn('Refusing missing, linked or changed auditor bytes',done.stdout)
+                    self.assertNotIn('TASK [cis_ubuntu24 : Bind the admitted auditor',done.stdout)
+                    self.assertFalse((root/'no-download').exists())
+
+    def test_admitted_vendor_inputs_survive_include_vars(self):
+        # Exercise the real binding task and Ansible precedence, without claiming
+        # fixture bytes satisfy the fixed release checksum. Real bytes run natively.
+        tasks=yaml.safe_load((ROOT/'roles/cis_ubuntu24/tasks/auditor.yml').read_text())
+        defaults=yaml.safe_load((ROOT/'roles/cis_ubuntu24/defaults/main.yml').read_text())
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
+            root=Path(temporary);vendor=root/'vendor.yml'
+            vendor.write_text(yaml.safe_dump({'get_audit_binary_method':'download',
+                'audit_bin_version':{'release':'v0.5.0'},'audit_bin':'/foreign/goss'}))
+            book=root/'bind.yml';book.write_text(yaml.safe_dump([{'hosts':'all','gather_facts':False,
+                'vars':{**defaults,'cis_ubuntu24_auditor_controller_file':str(root/'admitted-goss')},
+                'tasks':[tasks[-1],{'ansible.builtin.include_vars':str(vendor)},
+                    {'ansible.builtin.assert':{'that':["get_audit_binary_method == 'copy'",
+                      "audit_bin_version.release == 'v0.4.8'", "audit_bin == '/usr/local/bin/goss'",
+                      'audit_bin_copy_location == cis_ubuntu24_auditor_controller_file',
+                      "audit_bin_version.AMD64_checksum == 'sha256:' ~ cis_ubuntu24_auditor_dependency.checksums.x86_64",
+                      "audit_bin_version.ARM64_checksum == 'sha256:' ~ cis_ubuntu24_auditor_dependency.checksums.aarch64"]}}]}]))
+            env=dict(os.environ,ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TEMP=str(root/'remote'))
+            env.pop('ANSIBLE_VAULT_PASSWORD_FILE',None)
+            done=subprocess.run(['ansible-playbook','-i','localhost,','-c','local',str(book)],
+                env=env,capture_output=True,text=True,timeout=90)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+
 
 if __name__=='__main__':unittest.main()

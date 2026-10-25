@@ -199,6 +199,26 @@ same remediation release. Version 1.8.0 continues to use CIS benchmark v1.0.0;
 its split audit defaults do not replace the independently pinned audit above.
 Changing the dependency does not approve an exception or disable a control.
 
+The auditor runtime is separately fixed to canonical `goss-org/goss` **v0.4.8**,
+with the reviewed SHA256 for each target architecture (`x86_64` or `aarch64`)
+in `cis_ubuntu24_auditor_dependency`. The wrapper does not inherit a changed
+vendor fork, version or download source. A runtime-pin change requires reviewing
+both architecture checksums together with benchmark compatibility.
+
+During audit setup, the controller acquires that exact release with TLS and
+checksum verification into its private, checksum-addressed
+`cis_ubuntu24_auditor_cache_directory`. For offline execution, supply the absolute
+controller path `cis_ubuntu24_auditor_source` to those same public release bytes.
+The offline input is checked against the fixed architecture checksum, never a
+caller-supplied replacement hash. Missing, linked, changed or unsupported inputs
+fail before vendor execution. The binary is not executed on the controller.
+
+The admitted input uses the vendor-supported `copy` interface and fixed
+`/usr/local/bin/goss` destination. Host facts preserve the version, checksums,
+path and transport across vendor variable loading. The target needs no Internet
+access for the auditor binary. Audit content still uses its separate reviewed
+Git/archive contract; neither transport waives a benchmark control or exception.
+
 ## Example Playbook
 
 ```yaml

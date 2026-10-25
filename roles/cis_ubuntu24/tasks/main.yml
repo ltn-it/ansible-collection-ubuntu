@@ -57,6 +57,11 @@
     - level2-server
     - level2-workstation
 
+- name: Prepare the independently pinned auditor on the controller
+  ansible.builtin.import_tasks: auditor.yml
+  when: cis_ubuntu24_execution_mode == 'audit'
+  tags: always
+
 - name: Admit the independently bound offline audit archive before upstream execution
   ansible.builtin.import_tasks: audit_archive.yml
   when:

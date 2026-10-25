@@ -37,3 +37,14 @@ cis_ubuntu24_audit_dependency:
 # wrapper validates their schema; the independent audit reports them as
 # exceptions instead of treating an omitted check as a pass.
 cis_ubuntu24_exceptions: []
+
+# Auditor runtime is reviewed independently from remediation and benchmark content.
+# An offline file must contain these exact upstream release bytes; no target download.
+cis_ubuntu24_auditor_source: ""
+cis_ubuntu24_auditor_cache_directory: '{{ lookup("ansible.builtin.env", "HOME") }}/.cache/lit-ubuntu/cis-auditor'
+cis_ubuntu24_auditor_dependency:
+  repository: https://github.com/goss-org/goss
+  version: v0.4.8
+  checksums:
+    x86_64: 85d00b7bba5f175bec95de7dfe1f71f8f25204914aad4c6f03c8457868eb6e2f
+    aarch64: bca8c898bfd35b94c51455ece6193c95e2cd7b2b183ac2047b2d76291e73e47d
