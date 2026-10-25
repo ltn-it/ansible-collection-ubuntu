@@ -66,10 +66,7 @@
 
 - name: Bind the admitted auditor above upstream variable loading
   ansible.builtin.set_fact:
-    '{{ item.key }}': '{{ item.value }}'
-  loop: '{{ cis_ubuntu24_auditor_vendor_inputs | dict2items }}'
-  loop_control:
-    label: '{{ item.key }}'
+  args: '{{ cis_ubuntu24_auditor_vendor_inputs }}'
   vars:
     # These are the vendor's existing interface names, not collection-owned variables.
     cis_ubuntu24_auditor_vendor_inputs:
