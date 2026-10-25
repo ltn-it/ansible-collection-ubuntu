@@ -1,0 +1,6 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 - align the immutable CIS 1.0.0 audit producer with remediation
+    role 1.8.0 so SSH and other audit checks use the supported variable contract
+    without template repairs or suppressed controls.

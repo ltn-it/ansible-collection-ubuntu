@@ -87,7 +87,7 @@
               | b64decode
               | from_json
             ).audit_git_version
-            == '87efcc6d409d1a998a7cb809c5ce5a6afedf84c7'
+            == '4eb9eb9e6d3924af7377fc9dd6d3c9f32c63114a'
           - >-
             (
               cis_ubuntu24_test_evidence.content

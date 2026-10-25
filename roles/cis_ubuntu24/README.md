@@ -188,7 +188,10 @@ External Galaxy role: `ansible-lockdown.ubuntu24_cis`.
 - Remediation: `ansible-lockdown/UBUNTU24-CIS` release `1.8.0`, commit
   `3a2f05b9a8040eb869fd14fdca882aae4f68733b`, MIT.
 - Audit: `ansible-lockdown/UBUNTU24-CIS-Audit` benchmark `v1.0.0`, commit
-  `87efcc6d409d1a998a7cb809c5ce5a6afedf84c7`, MIT.
+  `4eb9eb9e6d3924af7377fc9dd6d3c9f32c63114a`, MIT.
+  This is the immutable `benchmark_v1.0.0` producer revision matched to
+  remediation role 1.8.0. Its full audit-variable contract and all required
+  control IDs are checked before native integration; the benchmark stays 1.0.0.
 
 The remediation role is updated through `requirements.yml`. Audit content has
 no upstream release, so update its immutable commit and archive checksum

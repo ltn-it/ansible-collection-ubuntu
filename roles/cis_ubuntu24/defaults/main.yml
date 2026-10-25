@@ -29,8 +29,8 @@ cis_ubuntu24_remediation_dependency:
 cis_ubuntu24_audit_dependency:
   repository: https://github.com/ansible-lockdown/UBUNTU24-CIS-Audit.git
   benchmark: v1.0.0
-  commit: 87efcc6d409d1a998a7cb809c5ce5a6afedf84c7
-  archive_sha256: 9320558d3bf195625399edfd57e6185cf70cce6d5505fa3c9f9924a369af7850
+  commit: 4eb9eb9e6d3924af7377fc9dd6d3c9f32c63114a
+  archive_sha256: 5bf5581304fe5639a5e59023393ea972a0e74d668019ff183dc4f8bd59302043
   license: MIT
 
 # Inventory entries must identify every deliberate control adjustment. The
