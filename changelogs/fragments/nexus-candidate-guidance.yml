@@ -1,0 +1,4 @@
+---
+minor_changes:
+  - Document Nexus candidates, exact-byte validated Galaxy promotion,
+    transition limitations, and per-Collection cutover evidence.
