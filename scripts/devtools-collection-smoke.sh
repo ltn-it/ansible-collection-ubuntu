@@ -41,6 +41,27 @@ bash scripts/wunder-devtools-ee.sh bash -c '
   export HOME="$(mktemp -d /tmp/collection-smoke-home.XXXXXX)"
   mkdir -p "${HOME}"
 
+  # Only this disposable package-install smoke opts into root + writable rootfs.
+  # The released Devtools image deliberately makes package output directories
+  # read-only. Restore owner-write on these two root-owned directories inside
+  # the container; the mounted repository and host filesystem stay read-only.
+  for package_directory in /usr/bin /usr/lib64; do
+    [ ! -L "${package_directory}" ] && [ -d "${package_directory}" ] &&
+      [ "$(stat -c %u "${package_directory}")" = 0 ] || exit 1
+    chmod u+w "${package_directory}"
+  done
+  # /run is an isolated tmpfs. Disabled-role prechecks still require this
+  # trusted standard Ubuntu lock parent, which is absent in the UBI image.
+  install -d -m 0755 /run/lock
+  # The hardened image starts with mode 000 on its disposable account databases.
+  # Root with all capabilities dropped cannot read those files implicitly.
+  # Enable only owner access inside this isolated smoke rootfs, never on the host.
+  for account_database in /etc/shadow /etc/gshadow /etc/shadow- /etc/gshadow-; do
+    [ ! -L "${account_database}" ] && [ -f "${account_database}" ] &&
+      [ "$(stat -c %u "${account_database}")" = 0 ] || exit 1
+    chmod 0600 "${account_database}"
+  done
+
   echo "Running collection smoke test for ${ns}.${name} with example playbook: ${example}"
 
   # -------------------------------------------------------------------
