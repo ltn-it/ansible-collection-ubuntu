@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": "ltn-it/ansible-collection-ubuntu",
+  "mode": "reference",
+  "quality": [
+    {
+      "workflow": ".github/workflows/collection-ci.yml",
+      "job": "Lint (ansible-lint via ee-wunder-devtools-ubi9)"
+    },
+    {
+      "workflow": ".github/workflows/collection-ci.yml",
+      "job": "Molecule (via devtools)"
+    },
+    {
+      "workflow": ".github/workflows/collection-ci.yml",
+      "job": "Build & install collection (via devtools smoke test)"
+    }
+  ],
+  "accepted_sources": [],
+  "distribution_sources": [],
+  "artifact_publication": true
+}

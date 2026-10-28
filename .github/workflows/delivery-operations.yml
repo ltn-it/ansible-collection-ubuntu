@@ -1,0 +1,22 @@
+# Consumer signal adapter; the immutable common receiver authenticates state.
+# No promotion, credential forwarding, candidate checkout or review request here.
+# yamllint disable rule:truthy
+---
+name: Protected delivery operations
+on:
+  pull_request_target:
+    types: [edited, labeled, unlabeled, ready_for_review, converted_to_draft]
+  workflow_run:
+    workflows: [Repository review events]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+jobs:
+  refresh:
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    uses: ltn-it/.github/.github/workflows/delivery-operations.yml@e4df45c87b6ea2d32124d13dc1cc9863f317dca5
