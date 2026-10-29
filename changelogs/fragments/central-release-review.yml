@@ -1,0 +1,5 @@
+---
+minor_changes:
+  - >-
+    Release preparation and back-sync rely on native central review events
+    instead of dispatching the retired local review workflow.
