@@ -1,12 +1,12 @@
 {
-  "base_sha": "bc2220bc14876795a1d08a77bd1cdf7525a4441a",
-  "next_version": "1.17.0",
+  "base_sha": "c989c67511eede773ed20aa279c2e5c16fdfbf3d",
+  "next_version": "1.18.0",
   "preparer": {
     "login": "lightning-it-release-automation[bot]"
   },
-  "repository": "lightning-it/ansible-collection-ubuntu",
+  "repository": "ltn-it/ansible-collection-ubuntu",
   "schema_version": 1,
   "workflow": {
-    "source_sha": "bc2220bc14876795a1d08a77bd1cdf7525a4441a"
+    "source_sha": "c989c67511eede773ed20aa279c2e5c16fdfbf3d"
   }
 }

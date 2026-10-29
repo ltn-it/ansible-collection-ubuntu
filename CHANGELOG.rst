@@ -4,6 +4,15 @@ Lightning IT Collection Release Notes Release Notes
 
 .. contents:: Topics
 
+v1.18.0
+=======
+
+Minor Changes
+-------------
+
+- Document Nexus candidates, exact-byte validated Galaxy promotion, transition limitations, and per-Collection cutover evidence.
+- Release preparation and back-sync rely on native central review events instead of dispatching the retired local review workflow.
+
 v1.17.0
 =======
 
