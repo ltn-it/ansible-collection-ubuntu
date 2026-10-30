@@ -51,8 +51,6 @@
   tags:
     - level1-server
     - level1-workstation
-    - level2-server
-    - level2-workstation
 
 - name: Preserve a traversable upstream audit log directory
   ansible.builtin.import_tasks: audit_log_directory.yml

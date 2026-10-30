@@ -14,6 +14,12 @@
     cis_ubuntu24_test_empty_fragment: |
       # Managed by lit.ubuntu.cis_ubuntu24; inventory-owned mutable data exclusions.
   tasks:
+    - name: Reject Level 2-only managed policy before target or package activity
+      ansible.builtin.include_tasks: tasks/reject_profile.yml
+      loop: [level2-server, level2-workstation]
+      loop_control:
+        loop_var: cis_ubuntu24_test_profile
+
     - name: Reject wrong OS, version, init system and missing target facts
       ansible.builtin.include_tasks: tasks/reject_target.yml
       loop:

@@ -103,6 +103,68 @@ class RootAuditAdmissionTests(unittest.TestCase):
                         VALIDATE_GIT(str(checkout))
                     path.unlink()
 
+    def test_level2_only_managed_aide_runs_stop_before_any_policy_or_package_change(self):
+        for profile in ("level2-server", "level2-workstation"):
+            for clearing in (False, True):
+                with self.subTest(profile=profile, clearing=clearing), tempfile.TemporaryDirectory(dir=os.environ["HOME"]) as directory:
+                    root = Path(directory)
+                    role = root / "roles/cis_ubuntu24"
+                    shutil.copytree(ROOT / "roles/cis_ubuntu24", role)
+                    aide = root / "aide"
+                    (aide / "aide.conf.d").mkdir(parents=True, mode=0o755)
+                    fragment = aide / "aide.conf.d/90_lit_mutable_data"
+                    database = root / "aide.db"
+                    if clearing:
+                        fragment.write_text("# Managed by lit.ubuntu.cis_ubuntu24; fixture.\n!/var/lib/example/data(/|$)\n")
+                        fragment.chmod(0o644)
+                        database.write_bytes(b"SYNTHETIC_EXISTING_DATABASE")
+                    previous = fragment.read_bytes() if fragment.exists() else None
+                    for path in (role / "tasks").glob("*.yml"):
+                        path.write_text(path.read_text().replace("/etc/aide", str(aide)))
+                    prepare = yaml.safe_load((role / "tasks/aide_prepare.yml").read_text())
+                    boundary = next(i for i, task in enumerate(prepare) if task["name"] ==
+                                    "Prevent package-triggered background AIDE initialization")
+                    marker = root / "package-transition"
+                    # Keep the real preflight/import/tag path. A private marker
+                    # replaces the package boundary; no apt/debconf is executed.
+                    prepare = prepare[:boundary] + [
+                        {"name": "Witness package transition", "ansible.builtin.copy": {
+                            "dest": str(marker), "content": "entered", "mode": "0600"}},
+                        {"ansible.builtin.fail": {"msg": "Stop before real package operations"}}]
+                    (role / "tasks/aide_prepare.yml").write_text(yaml.safe_dump(prepare))
+                    main = yaml.safe_load((role / "tasks/main.yml").read_text())
+                    selected = [task for task in main if task.get("name") in (
+                        "Detect an already managed AIDE policy even when requested exclusions are empty",
+                        "Prepare guarded AIDE exclusions before upstream initialization")]
+                    (role / "tasks/main.yml").write_text(yaml.safe_dump(selected))
+                    expected_empty = (role / "templates/aide-exclusions.conf.j2").read_text().split("{%", 1)[0]
+                    approval = ({"database_sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+                                 "exclusions_sha256": hashlib.sha256(expected_empty.encode()).hexdigest(),
+                                 "approval_reference": "https://example.test/reviewed"} if clearing else {})
+                    variables = {"ansible_facts": {"distribution": "Ubuntu", "distribution_major_version": "24",
+                                 "service_mgr": "systemd"}, "cis_ubuntu24_profile_tag": profile,
+                                 "cis_ubuntu24_execution_mode": "remediate", "ubtu24cis_config_aide": True,
+                                 "ubtu24cis_aide_db_file": str(database), "ubtu24cis_aide_db_recreate": True,
+                                 "cis_ubuntu24_aide_rebaseline": approval,
+                                 "cis_ubuntu24_aide_exclusions": [] if clearing else
+                                 [{"path": "/var/lib/example/data", "reason": "Mutable fixture data."}]}
+                    book = root / "case.yml"
+                    book.write_text(yaml.safe_dump([{"hosts": "all", "gather_facts": False,
+                                                   "vars": variables, "roles": ["cis_ubuntu24"]}]))
+                    config = root / "ansible.cfg"
+                    config.write_text("[defaults]\nroles_path=" + str(root / "roles") + "\n")
+                    env = {**os.environ, "ANSIBLE_CONFIG": str(config), "ANSIBLE_LOCAL_TEMP": str(root / "local"),
+                           "ANSIBLE_REMOTE_TEMP": str(root / "remote")}
+                    env.pop("ANSIBLE_VAULT_PASSWORD_FILE", None)
+                    done = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local", str(book),
+                                           "--tags", profile], env=env, capture_output=True, text=True, timeout=90)
+                    self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                    self.assertFalse(marker.exists(), done.stdout + done.stderr)
+                    self.assertIn("native Level 1", done.stdout)
+                    self.assertEqual(previous, fragment.read_bytes() if fragment.exists() else None)
+                    self.assertEqual(b"SYNTHETIC_EXISTING_DATABASE" if clearing else None,
+                                     database.read_bytes() if database.exists() else None)
+
     def test_clearing_existing_aide_exclusions_cannot_skip_the_rebaseline_gate(self):
         with tempfile.TemporaryDirectory(dir=os.environ["HOME"]) as directory:
             root = Path(directory)
@@ -134,6 +196,7 @@ class RootAuditAdmissionTests(unittest.TestCase):
                 "vars": {
                     "ansible_facts": {"distribution": "Ubuntu", "distribution_major_version": "24", "service_mgr": "systemd"},
                     "cis_ubuntu24_aide_exclusions": [], "cis_ubuntu24_aide_rebaseline": {},
+                    "cis_ubuntu24_profile_tag": "level1-server",
                     "ubtu24cis_config_aide": True, "ubtu24cis_aide_db_file": str(database),
                 }, "roles": ["cis_ubuntu24"],
             }]))

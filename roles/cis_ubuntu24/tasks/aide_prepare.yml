@@ -1,4 +1,11 @@
 ---
+- name: Require the native Level 1 initialization path for managed AIDE policy
+  ansible.builtin.assert:
+    that: cis_ubuntu24_profile_tag in ['level1-server', 'level1-workstation']
+    fail_msg: >-
+      Managed AIDE policy installation or clearing requires a native Level 1 remediation profile.
+      Level 2-only execution skips the pinned upstream initializer and must not change this policy.
+
 - name: Verify the native AIDE target before inspecting or changing its state
   ansible.builtin.import_tasks: aide_target_assert.yml
 

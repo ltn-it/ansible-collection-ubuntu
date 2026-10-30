@@ -4,3 +4,6 @@ bugfixes:
     cis_ubuntu24 - align the immutable CIS 1.0.0 audit producer with remediation
     role 1.8.0 so SSH and other audit checks use the supported variable contract
     without template repairs or suppressed controls.
+  - >-
+    Refuse managed AIDE policy changes in Level 2-only runs before mutation and align the scheduler wrapper
+    with the pinned native Level 1 initialization and scheduling tags.

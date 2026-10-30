@@ -113,6 +113,13 @@ and special objects are rejected before package changes. An empty list preserves
 upstream behavior when no managed fragment exists. Once the fragment is managed,
 an empty request renders its header-only policy and passes the same admission
 checks; it cannot leave old exclusions active or skip rebaseline approval.
+Managed policy installation and clearing require a `level1-server` or
+`level1-workstation` remediation run. The pinned vendor initializes the database
+only under those native tags. Level 2-only runs with requested exclusions or an
+existing managed fragment are rejected before target/package/policy changes;
+the scheduler wrapper likewise runs only with the native Level 1 controls.
+This prevents accepting a policy without its initialization path.
+
 Nonempty exclusions require enabled upstream AIDE and control 6.3.1. Their
 preparation rejects check mode: package and parser acceptance require a real
 isolated Ubuntu target.
