@@ -83,6 +83,7 @@ class RootAuditAdmissionTests(unittest.TestCase):
             for text in ('[include]\n\tpath = /tmp/untrusted\n',
                          '[includeIf "gitdir:/tmp/"]\n\tpath = /tmp/untrusted\n',
                          '[filter "untrusted"]\n\tclean = /tmp/command\n',
+                         '[filter.untrusted]\n\tclean = /tmp/command\n',
                          '[extensions]\n\tworktreeConfig = true\n'):
                 with self.subTest(text=text):
                     config.write_text(base + text)
@@ -92,6 +93,15 @@ class RootAuditAdmissionTests(unittest.TestCase):
             config.chmod(0o666)
             with self.assertRaisesRegex(ValueError, "Unprotected"):
                 VALIDATE_GIT(str(checkout))
+            config.chmod(0o644)
+            for name in ("commondir", "config.worktree", "objects/info/alternates", "objects/info/http-alternates"):
+                with self.subTest(redirect=name):
+                    path = metadata / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("/tmp/untrusted\n")
+                    with self.assertRaisesRegex(ValueError, "External audit Git metadata"):
+                        VALIDATE_GIT(str(checkout))
+                    path.unlink()
 
     def test_clearing_existing_aide_exclusions_cannot_skip_the_rebaseline_gate(self):
         with tempfile.TemporaryDirectory(dir=os.environ["HOME"]) as directory:
@@ -167,6 +177,7 @@ class RootAuditAdmissionTests(unittest.TestCase):
             (unchecked / "run_audit.sh").write_text("#!/bin/sh\ntouch '" + str(marker) + "'\n")
             (unchecked / "run_audit.sh").chmod(0o755)
             env.update(GIT_DIR=str(unchecked / "foreign.git"), GIT_WORK_TREE=str(unchecked),
+                       GIT_COMMON_DIR=str(unchecked / "foreign-common.git"),
                        GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.fsmonitor",
                        GIT_CONFIG_VALUE_0=str(unchecked / "command"))
             vendor = root / "vendor-defaults.yml"

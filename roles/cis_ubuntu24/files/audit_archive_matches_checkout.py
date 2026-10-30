@@ -1,11 +1,11 @@
 #!/usr/bin/python3
 """Compare an offline transport with an admitted checkout; never extract it."""
 
-import configparser
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import stat
+import subprocess
 import sys
 import tarfile
 
@@ -55,14 +55,30 @@ def validate_git(checkout):
             total += info.st_size
             if total > MAX_BYTES:
                 raise ValueError("Audit Git input exceeds its bound")
-    config = configparser.ConfigParser(interpolation=None, strict=False)
+    for name in ("commondir", "config.worktree", "objects/info/alternates", "objects/info/http-alternates"):
+        if os.path.lexists(metadata / name):
+            raise ValueError("External audit Git metadata")
+    if (metadata / "config").stat().st_size > 65536:
+        raise ValueError("Audit Git configuration exceeds its bound")
+    # Ask Git's own parser, without includes, index access or executable probes.
+    # Git accepts deprecated dotted sections that generic INI parsers misclassify.
+    environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1",
+                   "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                   "GIT_CONFIG_COUNT": "0", "GIT_CONFIG_PARAMETERS": "",
+                   "GIT_DIR": str(metadata), "GIT_COMMON_DIR": str(metadata)}
     try:
-        config.read_string((metadata / "config").read_text())
-    except (UnicodeError, configparser.Error) as error:
+        config = subprocess.run(["/usr/bin/git", "config", "--null", "--no-includes", "--file",
+                                 str(metadata / "config"), "--list"], env=environment, cwd=checkout,
+                                capture_output=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
         raise ValueError("Unsupported audit Git configuration") from error
-    if any(section.split()[0].lower() in {"include", "includeif", "filter", "extensions"}
-           for section in config.sections()):
-        raise ValueError("External or executable audit Git configuration")
+    if config.returncode or len(config.stdout) > MAX_BYTES:
+        raise ValueError("Unsupported audit Git configuration")
+    for record in config.stdout.split(b"\0"):
+        key = record.partition(b"\n")[0]
+        if key.split(b".", 1)[0].lower() in {b"include", b"includeif", b"filter", b"extensions"}:
+            raise ValueError("External or executable audit Git configuration")
+
 
 
 def verify(archive, checkout, expected_sha256):

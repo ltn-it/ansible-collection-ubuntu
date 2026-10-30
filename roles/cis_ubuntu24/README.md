@@ -304,3 +304,9 @@ audit checkout destinations accept only absolute paths whose components contain
 ASCII letters, digits, underscores, hyphens and periods. Dot/dot-dot components,
 whitespace and shell metacharacters are refused before any transport activity.
 This guard applies to Git and archive audit mode and the actual execution path.
+
+Git configuration is parsed by Git itself in read-only no-includes mode, so
+legacy dotted filter sections cannot evade the guard. Shared/worktree metadata
+and alternate object stores are refused for this in-place checkout. Each Git
+probe runs with a fresh explicit environment, independent of inherited Git
+configuration, common-directory, index, object-store or worktree settings.
