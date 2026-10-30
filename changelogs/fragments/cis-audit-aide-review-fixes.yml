@@ -4,3 +4,4 @@ bugfixes:
   - cis_ubuntu24 - keep generated audit variables in protected storage outside the source checkout.
   - cis_ubuntu24 - require guarded rebaseline admission when clearing an already managed AIDE exclusion policy.
   - cis_ubuntu24 - document the required AppArmor audit post-check in a subsequent play after vendor end-host.
+  - cis_ubuntu24 - reject vendor overrides that redirect archive execution, content mode or generated variables.

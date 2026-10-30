@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import runpy
@@ -133,7 +134,16 @@ class RootAuditAdmissionTests(unittest.TestCase):
             env = {**os.environ, "ANSIBLE_CONFIG": str(config), "ANSIBLE_LOCAL_TEMP": str(root / "local"),
                    "ANSIBLE_REMOTE_TEMP": str(root / "remote")}
             env.pop("ANSIBLE_VAULT_PASSWORD_FILE", None)
-            for attempt in range(3):
+            unchecked = root / "unchecked"
+            unchecked.mkdir()
+            marker = root / "unchecked-executed"
+            (unchecked / "run_audit.sh").write_text("#!/bin/sh\ntouch '" + str(marker) + "'\n")
+            (unchecked / "run_audit.sh").chmod(0o755)
+            vendor = root / "vendor-defaults.yml"
+            vendor.write_text(yaml.safe_dump({"audit_conf_dir": str(unchecked), "audit_content": "archive",
+                                              "audit_vars_path": str(unchecked / "vars.yml")}))
+            for attempt in range(6):
+                archive.write_bytes(original)
                 if attempt == 2:
                     with tarfile.open(archive, "w:gz") as stream:
                         replacement = b"#!/bin/sh\necho unexpected code\n"
@@ -148,19 +158,33 @@ class RootAuditAdmissionTests(unittest.TestCase):
                 tasks = [
                     {"ansible.builtin.include_role": {"name": "cis_ubuntu24", "tasks_from": "audit_archive"}},
                     {"ansible.builtin.include_role": {"name": "cis_ubuntu24", "tasks_from": "audit_variables"}},
+                    {"name": "Model vendor include-vars after admission", "ansible.builtin.include_vars": str(vendor)},
                     {"ansible.builtin.assert": {"that": ["audit_content == 'existing'",
+                        "audit_conf_dir == audit_conf_dest ~ '/UBUNTU24-CIS-Audit'",
                         "not audit_vars_path.startswith(audit_conf_dest ~ '/UBUNTU24-CIS-Audit/')"]}},
+                    {"name": "Model vendor execution at its actual admitted path",
+                     "ansible.builtin.command": {"argv": ["{{ audit_conf_dir }}/run_audit.sh"]},
+                     "changed_when": False},
                     {"name": "Model vendor generated variables at the actual bound path",
                      "ansible.builtin.copy": {"dest": "{{ audit_vars_path }}", "content": "fixture: true\n", "mode": "0600"}},
                 ]
                 book = root / "play.yml"
                 book.write_text(yaml.safe_dump([{"hosts": "all", "gather_facts": False, "vars": variables, "tasks": tasks}]))
-                result = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local", str(book)],
+                extra = ({"audit_conf_dir": str(unchecked)} if attempt == 3 else
+                         {"audit_content": "archive"} if attempt == 4 else
+                         {"audit_vars_path": str(unchecked / "vars.yml")} if attempt == 5 else {})
+                command = ["ansible-playbook", "-i", "localhost,", "-c", "local", str(book)]
+                if extra:
+                    command += ["--extra-vars", json.dumps(extra)]
+                result = subprocess.run(command,
                                         env=env, capture_output=True, text=True, timeout=90)
-                self.assertEqual(result.returncode, 2 if attempt == 2 else 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 2 if attempt >= 2 else 0, result.stdout + result.stderr)
                 if attempt == 2:
                     self.assertIn("Offline audit transport does not match", result.stdout)
                     self.assertNotIn("TASK [Model vendor generated", result.stdout)
+                if attempt >= 3:
+                    self.assertNotIn("TASK [Model vendor execution", result.stdout)
+                self.assertFalse(marker.exists())
                 self.assertEqual(subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"]), b"")
                 self.assertEqual(entry.read_text(), "#!/bin/sh\nexit 0\n")
                 if attempt < 2:

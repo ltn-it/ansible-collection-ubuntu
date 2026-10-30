@@ -52,3 +52,9 @@
   ansible.builtin.set_fact:
     audit_vars_path: >-  # noqa: var-naming[no-role-prefix] -- Upstream audit interface.
       /var/tmp/lit-cis-audit-vars/{{ inventory_hostname | hash('sha256') }}.yml
+
+- name: Require the actual vendor variable path to remain in protected external storage
+  ansible.builtin.assert:
+    that:
+      - audit_vars_path == '/var/tmp/lit-cis-audit-vars/' ~ (inventory_hostname | hash('sha256')) ~ '.yml'
+    fail_msg: Vendor overrides must not redirect generated audit variables.

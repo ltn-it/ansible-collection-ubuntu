@@ -283,6 +283,9 @@ in a full-checkout archive is never extracted. After comparison, the vendor uses
 the admitted existing checkout and does not extract again. Generated variables
 are bound to a protected host-specific file under `/var/tmp/lit-cis-audit-vars/`,
 outside the checkout, so unchanged repeated audits retain clean source state.
+The vendor's actual `audit_conf_dir` is bound to that same admitted checkout.
+Conflicting directory, content-mode or generated-variable overrides fail before
+vendor execution, including higher-precedence extra variables.
 Archive and destination facts survive vendor variable loading. Normal Git transport,
 profile tags, audit-only selection, independent evidence and exception controls
 remain unchanged. Missing digest, changed archive, dirty/foreign checkout or
