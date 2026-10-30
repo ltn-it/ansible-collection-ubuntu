@@ -1,0 +1,6 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 - compare offline audit files with authenticated pinned Git objects independently of index flags.
+  - cis_ubuntu24 - scope admitted transport parameters to one vendor invocation so later plays retain their own inputs.
+  - cis_ubuntu24 - reject writable, executable or foreign AIDE databases before accepting an existing baseline.

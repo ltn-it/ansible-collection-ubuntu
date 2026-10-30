@@ -149,6 +149,9 @@ entire host configuration. Policy changes additionally require upstream
 process; the wrapper does not grant it. Clear the one-time recreate input
 after acceptance. A stale database binding fails before package changes.
 Neither the default empty approval nor database age authorizes rebaselining.
+An existing database must also be a root-owned, root-group regular file with
+one link and mode `0600`, `0640` or `0644`. Writable, executable or foreign
+baselines are rejected before package or policy changes, even when fresh.
 
 The unmanaged `cis-ubuntu24-aide-inputs-basic` scenario tests input and
 admission assertions only. Real package post-installation behavior, AIDE
@@ -280,7 +283,10 @@ Audit mode accepts `audit_content: archive` only with an absolute controller
 `cis_ubuntu24_audit_transport_sha256`. The caller must first stage
 `UBUNTU24-CIS-Audit/` under that destination. The wrapper rechecks archive bytes,
 canonical target path, root ownership and executable modes, clean Git state,
-origin and the unchanged reviewed audit commit before vendor execution. The
+origin and the unchanged reviewed audit commit before vendor execution. Raw
+commit and tree object identities and every working file's Git blob identity
+and executable mode are verified independently of the Git index. Index flags,
+ignored extra files and substituted objects cannot authorize changed code. The
 transport checksum describes the authenticated delivery archive; it does not
 replace `cis_ubuntu24_audit_dependency.archive_sha256` or any source pin.
 
@@ -293,7 +299,9 @@ outside the checkout, so unchanged repeated audits retain clean source state.
 The vendor's actual `audit_conf_dir` is bound to that same admitted checkout.
 Conflicting directory, content-mode or generated-variable overrides fail before
 vendor execution, including higher-precedence extra variables.
-Archive and destination facts survive vendor variable loading. Normal Git transport,
+Admitted transport and variable paths are scoped to the vendor role invocation
+above its variable loading. Public transport host facts are not retained across
+plays, including the vendor's audit-only `end_host`. Normal Git transport,
 profile tags, audit-only selection, independent evidence and exception controls
 remain unchanged. Missing digest, changed archive, dirty/foreign checkout or
 unsafe ownership fails before the vendor audit. Other transports remain refused.

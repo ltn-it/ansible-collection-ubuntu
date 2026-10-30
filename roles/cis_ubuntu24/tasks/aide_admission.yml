@@ -31,6 +31,9 @@
           cis_ubuntu24_aide_database.stat.isreg | default(false)
           and not (cis_ubuntu24_aide_database.stat.islnk | default(false))
           and cis_ubuntu24_aide_database.stat.nlink == 1
+          and cis_ubuntu24_aide_database.stat.uid == 0
+          and cis_ubuntu24_aide_database.stat.gid == 0
+          and cis_ubuntu24_aide_database.stat.mode in ['0600', '0640', '0644']
         )
     fail_msg: Refusing a foreign or unsafe AIDE policy file or database.
 

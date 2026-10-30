@@ -11,6 +11,32 @@ ROOT=Path(__file__).resolve().parents[2]
 
 
 class AuditArchiveTests(unittest.TestCase):
+    def test_archive_binding_does_not_replace_inputs_of_a_following_play(self):
+        tasks=yaml.safe_load((ROOT/'roles/cis_ubuntu24/tasks/audit_archive.yml').read_text())
+        start=next(i for i,t in enumerate(tasks) if t['name'].startswith('Bind the verified existing checkout'))
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
+            root=Path(temporary)
+            variables={'audit_content':'archive','audit_conf_source':'/controller/first.tar',
+                       'audit_conf_dest':'/opt/first','audit_conf_dir':'/opt/first/UBUNTU24-CIS-Audit',
+                       'cis_ubuntu24_audit_archive_realpath':{'stdout':'/opt/first/UBUNTU24-CIS-Audit'},
+                       'cis_ubuntu24_audit_vendor_transport':{'content':'archive','source':'/controller/first.tar',
+                          'destination':'/opt/first','directory':'/opt/first/UBUNTU24-CIS-Audit'}}
+            book=root/'repeat.yml'
+            book.write_text(yaml.safe_dump([
+                {'hosts':'all','gather_facts':False,'vars':variables,
+                 'tasks':tasks[start:]+[{'ansible.builtin.meta':'end_host'}]},
+                {'hosts':'all','gather_facts':False,'vars':{'audit_content':'git',
+                   'audit_conf_source':'/controller/second.tar','audit_conf_dest':'/opt/second',
+                   'audit_conf_dir':'/opt/second/UBUNTU24-CIS-Audit'},'tasks':[
+                     {'ansible.builtin.assert':{'that':["audit_content == 'git'",
+                        "audit_conf_source == '/controller/second.tar'","audit_conf_dest == '/opt/second'",
+                        "audit_conf_dir == '/opt/second/UBUNTU24-CIS-Audit'"]}}]}]))
+            env=dict(os.environ,ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TEMP=str(root/'remote'))
+            env.pop('ANSIBLE_VAULT_PASSWORD_FILE',None)
+            done=subprocess.run(['ansible-playbook','-i','localhost,','-c','local',str(book)],
+                                env=env,capture_output=True,text=True,timeout=90)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+
     def test_apparmor_postcheck_runs_in_a_following_play_after_vendor_end_host(self):
         with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
             root=Path(temporary)

@@ -48,13 +48,24 @@
         )
     fail_msg: Existing generated audit variables must be a private root-owned regular file.
 
-- name: Bind external audit variables above upstream defaults and include-vars
+- name: Freeze this invocation's admitted vendor transport and external variable path
   ansible.builtin.set_fact:
-    audit_vars_path: >-  # noqa: var-naming[no-role-prefix] -- Upstream audit interface.
-      /var/tmp/lit-cis-audit-vars/{{ inventory_hostname | hash('sha256') }}.yml
+    cis_ubuntu24_audit_vendor_transport:
+      content: "{{ 'existing' if audit_content | default('git') == 'archive' else 'git' }}"
+      source: "{{ audit_conf_source | default('') }}"
+      destination: "{{ audit_conf_dest | default('/opt') }}"
+      directory: "{{ audit_conf_dest | default('/opt') }}/UBUNTU24-CIS-Audit"
+      variables: "/var/tmp/lit-cis-audit-vars/{{ inventory_hostname | hash('sha256') }}.yml"
 
-- name: Require the actual vendor variable path to remain in protected external storage
+- name: Require private bindings to match independently derived admitted inputs
   ansible.builtin.assert:
     that:
-      - audit_vars_path == '/var/tmp/lit-cis-audit-vars/' ~ (inventory_hostname | hash('sha256')) ~ '.yml'
-    fail_msg: Vendor overrides must not redirect generated audit variables.
+      - >-
+        cis_ubuntu24_audit_vendor_transport == {
+          'content': ('existing' if audit_content | default('git') == 'archive' else 'git'),
+          'source': audit_conf_source | default(''),
+          'destination': audit_conf_dest | default('/opt'),
+          'directory': (audit_conf_dest | default('/opt')) ~ '/UBUNTU24-CIS-Audit',
+          'variables': '/var/tmp/lit-cis-audit-vars/' ~ (inventory_hostname | hash('sha256')) ~ '.yml'
+        }
+    fail_msg: Private audit discovery overrides must not replace independently admitted vendor bindings.

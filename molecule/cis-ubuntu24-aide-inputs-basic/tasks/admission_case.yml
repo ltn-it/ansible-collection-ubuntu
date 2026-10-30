@@ -34,6 +34,9 @@
                 'isreg': true,
                 'islnk': cis_ubuntu24_test_case.database_link | default(false),
                 'nlink': 1,
+                'uid': cis_ubuntu24_test_case.database_uid | default(0),
+                'gid': cis_ubuntu24_test_case.database_gid | default(0),
+                'mode': cis_ubuntu24_test_case.database_mode | default('0600'),
                 'checksum': cis_ubuntu24_test_case.database_sha | default('b' * 64)
               }
             }}

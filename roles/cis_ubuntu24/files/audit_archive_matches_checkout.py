@@ -4,6 +4,7 @@
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import subprocess
 import sys
@@ -62,10 +63,7 @@ def validate_git(checkout):
         raise ValueError("Audit Git configuration exceeds its bound")
     # Ask Git's own parser, without includes, index access or executable probes.
     # Git accepts deprecated dotted sections that generic INI parsers misclassify.
-    environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1",
-                   "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
-                   "GIT_CONFIG_COUNT": "0", "GIT_CONFIG_PARAMETERS": "",
-                   "GIT_DIR": str(metadata), "GIT_COMMON_DIR": str(metadata)}
+    environment = git_environment(checkout)
     try:
         config = subprocess.run(["/usr/bin/git", "config", "--null", "--no-includes", "--file",
                                  str(metadata / "config"), "--list"], env=environment, cwd=checkout,
@@ -78,6 +76,89 @@ def validate_git(checkout):
         key = record.partition(b"\n")[0]
         if key.split(b".", 1)[0].lower() in {b"include", b"includeif", b"filter", b"extensions"}:
             raise ValueError("External or executable audit Git configuration")
+
+
+def git_environment(checkout):
+    metadata = Path(checkout) / ".git"
+    return {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1",
+                   "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                   "GIT_CONFIG_COUNT": "0", "GIT_CONFIG_PARAMETERS": "",
+                   "GIT_DIR": str(metadata), "GIT_COMMON_DIR": str(metadata),
+                   "GIT_OBJECT_DIRECTORY": str(metadata / "objects"),
+                   "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"}
+
+
+def validate_revision(checkout, revision):
+    """Bind every working file to raw authenticated Git trees, never to the index."""
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Unsupported audit commit identity")
+    checkout = Path(checkout)
+    environment = git_environment(checkout)
+    total = count = 0
+
+    def object_bytes(kind, identity):
+        nonlocal total, count
+        command = ["/usr/bin/git", "-c", "protocol.allow=never", "cat-file"]
+        try:
+            size = subprocess.run(command + ["-s", identity], env=environment, cwd=checkout,
+                                  capture_output=True, timeout=10, check=True)
+            size = int(size.stdout)
+            total += size
+            count += 1
+            if size < 0 or total > MAX_BYTES or count > MAX_FILES:
+                raise ValueError("Audit commit tree exceeds its bound")
+            result = subprocess.run(command + [kind, identity], env=environment, cwd=checkout,
+                                    capture_output=True, timeout=10, check=True).stdout
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError("Unreadable pinned audit object") from error
+        actual = hashlib.sha1(kind.encode() + b" " + str(len(result)).encode() + b"\0" + result).hexdigest()
+        if len(result) != size or actual != identity:
+            raise ValueError("Audit object does not match its immutable identity")
+        return result
+
+    commit = object_bytes("commit", revision)
+    tree = commit.partition(b"\n")[0]
+    if not re.fullmatch(rb"tree [0-9a-f]{40}", tree):
+        raise ValueError("Malformed pinned audit commit")
+    expected = {}
+    pending = [(tree[5:].decode("ascii"), "")]
+    while pending:
+        identity, prefix = pending.pop()
+        raw = object_bytes("tree", identity)
+        while raw:
+            header, separator, remainder = raw.partition(b"\0")
+            mode, space, name = header.partition(b" ")
+            if (not separator or not space or len(remainder) < 20 or not name or b"/" in name
+                    or name in (b".", b"..", b".git")):
+                raise ValueError("Malformed pinned audit tree")
+            path = prefix + name.decode("utf-8")
+            identity, raw = remainder[:20].hex(), remainder[20:]
+            if mode == b"40000":
+                pending.append((identity, path + "/"))
+            elif mode in (b"100644", b"100755") and path not in expected:
+                expected[path] = identity, mode == b"100755"
+                if len(expected) > MAX_FILES:
+                    raise ValueError("Audit commit tree exceeds its bound")
+            else:
+                raise ValueError("Unsupported pinned audit tree entry")
+    actual = {}
+    total = 0
+    for directory, directories, files in os.walk(checkout, followlinks=False):
+        if Path(directory) == checkout:
+            directories[:] = [name for name in directories if name != ".git"]
+        for name in files:
+            path = Path(directory) / name
+            info = path.lstat()
+            total += info.st_size
+            if total > MAX_BYTES or len(actual) >= MAX_FILES:
+                raise ValueError("Audit working tree exceeds its bound")
+            value = hashlib.sha1(b"blob " + str(info.st_size).encode() + b"\0")
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    value.update(block)
+            actual[path.relative_to(checkout).as_posix()] = value.hexdigest(), bool(info.st_mode & 0o111)
+    if actual != expected or "run_audit.sh" not in expected:
+        raise ValueError("Audit working tree differs from the pinned commit")
 
 
 
@@ -156,6 +237,7 @@ if __name__ == "__main__":
     try:
         if sys.argv[1:2] == ["--git-inputs"]:
             validate_git(sys.argv[2])
+            validate_revision(sys.argv[2], sys.argv[3])
         else:
             verify(*sys.argv[1:])
     except (OSError, ValueError, tarfile.TarError):

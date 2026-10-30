@@ -108,6 +108,10 @@
           allowed: true
         - {name: foreign file owner, uid: 1000, allowed: false}
         - {name: linked database, database_link: true, allowed: false}
+        - {name: foreign database owner, database_uid: 1000, allowed: false}
+        - {name: foreign database group, database_gid: 1000, allowed: false}
+        - {name: writable database, database_mode: '0666', allowed: false}
+        - {name: executable database, database_mode: '0755', allowed: false}
         - name: stale approval after database changed
           database_sha: "{{ 'e' * 64 }}"
           approval: "{{ cis_ubuntu24_test_approval }}"

@@ -55,6 +55,7 @@
     cmd: >-
       {{ role_path }}/files/audit_archive_matches_checkout.py --git-inputs
       {{ (audit_conf_dest ~ '/UBUNTU24-CIS-Audit') | quote }}
+      {{ cis_ubuntu24_audit_dependency.commit | quote }}
     executable: /usr/bin/python3
   changed_when: false
 
@@ -118,16 +119,10 @@
 
 - name: Bind the verified existing checkout above upstream variable loading
   ansible.builtin.set_fact:
-    # Upstream explicitly supports an existing checkout through non-fetch
-    # content modes. It must never extract a second time after admission.
-    audit_content: existing  # noqa: var-naming[no-role-prefix] -- Upstream audit interface.
-    audit_conf_source: '{{ audit_conf_source }}'  # noqa: var-naming[no-role-prefix]
-    audit_conf_dest: '{{ audit_conf_dest }}'  # noqa: var-naming[no-role-prefix]
-    audit_conf_dir: '{{ cis_ubuntu24_audit_archive_realpath.stdout }}'  # noqa: var-naming[no-role-prefix]
-
-- name: Require the actual vendor content and execution directory bindings
-  ansible.builtin.assert:
-    that:
-      - audit_content == 'existing'
-      - audit_conf_dir == cis_ubuntu24_audit_archive_realpath.stdout
-    fail_msg: Vendor overrides must not replace the admitted content mode or execution directory.
+    # Private discovery only. Public host facts would outlive vendor end_host
+    # and override the caller's transport choices in subsequent plays.
+    cis_ubuntu24_audit_vendor_transport:
+      content: existing
+      source: '{{ audit_conf_source }}'
+      destination: '{{ audit_conf_dest }}'
+      directory: '{{ cis_ubuntu24_audit_archive_realpath.stdout }}'
