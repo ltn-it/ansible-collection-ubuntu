@@ -38,7 +38,7 @@
         cis_ubuntu24_apparmor_preserved_profiles | map(attribute='name') | unique | length
         == cis_ubuntu24_apparmor_preserved_profiles | length
       - cis_ubuntu24_profile_tag is match('^level1-')
-      - not (ubtu24cis_rule_1_3_1_3 | default(true) | bool)
+      - ubtu24cis_rule_1_3_1_3 | default(true) is sameas false
     fail_msg: >-
       Preserved AppArmor attachments require an explicit Level 1 exception
       with upstream 1.3.1.3 disabled. The reference records existing approval;

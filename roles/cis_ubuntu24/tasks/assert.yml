@@ -1,4 +1,7 @@
 ---
+- name: Validate effective native switch types before any mutation
+  ansible.builtin.import_tasks: native_boolean_assert.yml
+
 - name: Validate optional AIDE policy inputs before any mutation
   ansible.builtin.import_tasks: aide_assert.yml
 

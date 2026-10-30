@@ -43,6 +43,18 @@
           profile: level2-server
           enabled: false
           registry: "{{ fixture_registry }}"
+        - name: string-false-is-still-truthy-upstream
+          profile: level1-server
+          enabled: 'false'
+          registry: "{{ fixture_registry }}"
+        - name: string-no-is-still-truthy-upstream
+          profile: level1-server
+          enabled: 'no'
+          registry: "{{ fixture_registry }}"
+        - name: string-zero-is-still-truthy-upstream
+          profile: level1-server
+          enabled: '0'
+          registry: "{{ fixture_registry }}"
         - name: absent-audit-exception
           profile: level1-server
           enabled: false

@@ -1,0 +1,35 @@
+---
+- name: Require actual booleans for the native switches consumed by this wrapper
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.vars', cis_ubuntu24_native_boolean_name, default=false) is boolean
+    fail_msg: >-
+      Native switch {{ cis_ubuntu24_native_boolean_name }} must be an actual Boolean.
+      Supply typed YAML or JSON values, not string-coerced command-line values.
+  loop:
+    - ubtu24cis_level_1
+    - ubtu24cis_level_2
+    - setup_audit
+    - run_audit
+    - audit_only
+    - fetch_audit_output
+    - ubtu24cis_section1
+    - ubtu24cis_section3
+    - ubtu24cis_section6
+    - ubtu24cis_config_aide
+    - ubtu24cis_rule_6_3_1
+    - ubtu24cis_rule_6_3_2
+    - ubtu24cis_aide_db_recreate
+    - ubtu24cis_rule_1_3_1_3
+    - ubtu24cis_rule_1_3_1_4
+    - ubtu24cis_apparmor_disable
+    - ubtu24cis_rule_6_2_4_1
+    - ubtu24cis_rule_6_2_4_4
+    - ubtu24cis_rule_3_3_5
+    - ubtu24cis_rule_3_3_8
+    - ubtu24cis_rule_3_3_9
+    - ubtu24cis_rule_3_3_11
+    - ubtu24cis_is_router
+    - ubtu24cis_ipv6_required
+  loop_control:
+    loop_var: cis_ubuntu24_native_boolean_name

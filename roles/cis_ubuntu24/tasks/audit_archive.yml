@@ -53,7 +53,7 @@
 - name: Validate checkout ancestry and all Git metadata before invoking Git
   ansible.builtin.script:
     cmd: >-
-      {{ role_path }}/files/audit_archive_matches_checkout.py --git-inputs
+      {{ (role_path ~ '/files/audit_archive_matches_checkout.py') | quote }} --git-inputs
       {{ (audit_conf_dest ~ '/UBUNTU24-CIS-Audit') | quote }}
       {{ cis_ubuntu24_audit_dependency.commit | quote }}
     executable: /usr/bin/python3
@@ -104,7 +104,7 @@
     - name: Require exact transported bytes and the same complete audit working tree
       ansible.builtin.script:
         cmd: >-
-          {{ role_path }}/files/audit_archive_matches_checkout.py
+          {{ (role_path ~ '/files/audit_archive_matches_checkout.py') | quote }}
           {{ (cis_ubuntu24_audit_transport_scratch.path ~ '/transport.tar') | quote }}
           {{ (audit_conf_dest ~ '/UBUNTU24-CIS-Audit') | quote }}
           {{ cis_ubuntu24_audit_transport_sha256 | quote }}

@@ -114,6 +114,61 @@ class AuditTransportTests(unittest.TestCase):
 
 @unittest.skipUnless(os.geteuid() == 0, "Requires an isolated root-target Devtools witness")
 class RootAuditAdmissionTests(unittest.TestCase):
+    def test_archive_script_paths_preserve_spaces_in_the_installed_collection(self):
+        with tempfile.TemporaryDirectory(dir=os.environ["HOME"]) as directory:
+            root = Path(directory)
+            roles = root / "installed collection/roles"
+            role = roles / "cis_ubuntu24"
+            shutil.copytree(ROOT / "roles/cis_ubuntu24", role)
+            marker = root / "wrong-controller-script"
+            # An unquoted script path selects this existing prefix instead of
+            # the collection's helper. It is harmless and confined to this test.
+            (root / "installed").write_text("from pathlib import Path\nPath(" + repr(str(marker)) +
+                                            ").write_text('wrong script')\n")
+            checkout = root / "target/UBUNTU24-CIS-Audit"
+            checkout.mkdir(parents=True)
+            entry = checkout / "run_audit.sh"
+            entry.write_text("#!/bin/sh\nexit 0\n")
+            entry.chmod(0o755)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(checkout), *args]).strip()
+            git("init", "-q")
+            git("add", ".")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+            revision = git("rev-parse", "HEAD").decode()
+            archive = root / "transport.tar"
+            with tarfile.open(archive, "w") as stream:
+                stream.add(entry, arcname=checkout.name + "/run_audit.sh")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            source = yaml.safe_load((role / "tasks/audit_archive.yml").read_text())
+            scripts = [task for task in source if "ansible.builtin.script" in task]
+            scripts += [task for parent in source for task in parent.get("block", [])
+                        if "ansible.builtin.script" in task]
+            self.assertEqual(len(scripts), 2)
+            config = root / "ansible.cfg"
+            config.write_text("[defaults]\nroles_path=" + str(roles) + "\n")
+            env = {**os.environ, "ANSIBLE_CONFIG": str(config), "ANSIBLE_LOCAL_TEMP": str(root / "local"),
+                   "ANSIBLE_REMOTE_TEMP": str(root / "remote")}
+            env.pop("ANSIBLE_VAULT_PASSWORD_FILE", None)
+            for script in scripts:
+                with self.subTest(boundary=script["name"]):
+                    marker.unlink(missing_ok=True)
+                    # Execute the exact production Script task, with the real
+                    # helper and real Git/tar inputs, through include_role.
+                    (role / "tasks/path_probe.yml").write_text(yaml.safe_dump([script]))
+                    book = root / "case.yml"
+                    book.write_text(yaml.safe_dump([{"hosts": "all", "gather_facts": False, "vars": {
+                        "audit_conf_dest": str(checkout.parent),
+                        "cis_ubuntu24_audit_dependency": {"commit": revision},
+                        "cis_ubuntu24_audit_transport_scratch": {"path": str(root)},
+                        "cis_ubuntu24_audit_transport_sha256": digest}, "tasks": [{
+                            "ansible.builtin.include_role": {"name": "cis_ubuntu24", "tasks_from": "path_probe"}}]}]))
+                    done = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local", str(book)],
+                                          env=env, capture_output=True, text=True, timeout=90)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertFalse(marker.exists(), done.stdout + done.stderr)
+
     def test_aide_rejects_untrusted_databases_before_baseline_admission(self):
         for mode in (0o666, 0o664, 0o755):
             with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory(dir=os.environ["HOME"]) as directory:

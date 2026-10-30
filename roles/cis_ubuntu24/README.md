@@ -25,6 +25,13 @@ remediation tasks. Audit mode additionally requires `setup_audit`, `run_audit`,
 Git audit source. Configure other upstream variables such as
 `ubtu24cis_disruption_high` through inventory.
 
+Native switches examined by the wrapper require actual Boolean values, including
+profile/audit flags and the related AppArmor, AIDE and network controls. Use typed
+YAML or JSON for caller overrides. The type check reads effective values before
+mutation, including higher-precedence extra variables. Wrapper scheduler and
+audit-directory helpers follow native section 6; its network helper follows
+section 3, so disabling those sections also skips the corresponding helper.
+
 `cis_ubuntu24_exceptions` is the inventory-owned exception registry. Each item
 records control IDs, scope, reason, compensating control, effective upstream
 variables, and audit visibility. Omitted controls remain exceptions and must
@@ -36,7 +43,9 @@ exactly `name`, `executable`, `sha256`, `reason`, and `approval_reference`.
 The reference must bind an existing accepted intentional exception for control
 1.3.1.3 in `cis_ubuntu24_exceptions`; declaring metadata does not grant approval.
 This interface supports Level 1 only and requires the conflicting upstream
-`ubtu24cis_rule_1_3_1_3: false`. An empty list retains upstream behavior.
+`ubtu24cis_rule_1_3_1_3: false` as an actual Boolean. Strings such as `"false"`,
+`"no"` and `"0"` remain truthy in the native control and are rejected before
+remediation can rewrite preserved attachments. An empty list retains upstream behavior.
 
 Before upstream execution and after remediation, a read-only guard
 requires enabled AppArmor and the unprivileged-usernamespace restriction. It
@@ -153,11 +162,16 @@ entire host configuration. Policy changes additionally require upstream
 process; the wrapper does not grant it. Clear the one-time recreate input
 after acceptance. A stale database binding fails before package changes.
 Neither the default empty approval nor database age authorizes rebaselining.
-For managed policy, the native initializer uses the age decision captured by
-that invocation's admission. A database crossing its age threshold during later
+For managed policy, the native initializer uses the presence and age decisions
+captured by that invocation's admission. A database crossing its age threshold during later
 tasks cannot add an unapproved initialization. The vendor still runs its native
 controls; an aged database on the next invocation requires its reviewed binding.
 This decision is scoped to the vendor role call rather than public host facts.
+The wrapper rechecks actual baseline presence, protected metadata and bound bytes
+before that call. Afterward it requires a protected baseline and, when no
+initialization was admitted, the original bytes. Unexpected disappearance,
+appearance or byte changes cause a stop without authorizing recovery. Native
+register variables cannot replace the admitted initialization decision.
 An existing database must also be a root-owned, root-group regular file with
 one link and mode `0600`, `0640` or `0644`. Writable, executable or foreign
 baselines are rejected before package or policy changes, even when fresh.

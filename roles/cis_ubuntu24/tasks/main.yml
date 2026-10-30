@@ -48,12 +48,14 @@
 
 - name: Normalize the upstream AIDE scheduler integration
   ansible.builtin.import_tasks: aide_scheduler.yml
+  when: ubtu24cis_section6 | default(true) is sameas true
   tags:
     - level1-server
     - level1-workstation
 
 - name: Preserve a traversable upstream audit log directory
   ansible.builtin.import_tasks: audit_log_directory.yml
+  when: ubtu24cis_section6 | default(true) is sameas true
   tags:
     - level1-server
     - level1-workstation
@@ -62,6 +64,7 @@
 
 - name: Persist the network kernel controls audited independently
   ansible.builtin.import_tasks: network_sysctl_persistence.yml
+  when: ubtu24cis_section3 | default(true) is sameas true
   tags:
     - level1-server
     - level1-workstation
@@ -113,6 +116,8 @@
         discovered_aide_db_age: '{{ _cis_ubuntu24_aide_age }}'  # noqa: var-naming[no-role-prefix]
         _cis_ubuntu24_aide_age: >-
           {{ {'files': cis_ubuntu24_aide_aged.files | default([])} }}
+        discovered_aide_db_file: '{{ _cis_ubuntu24_aide_database }}'  # noqa: var-naming[no-role-prefix]
+        _cis_ubuntu24_aide_database: '{{ cis_ubuntu24_aide_database }}'
       when:
         - cis_ubuntu24_execution_mode == 'remediate'
         - cis_ubuntu24_aide_exclusions | length > 0 or cis_ubuntu24_aide_owned_policy.stat.exists | default(false)

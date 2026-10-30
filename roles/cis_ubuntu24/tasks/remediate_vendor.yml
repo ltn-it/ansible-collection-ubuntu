@@ -2,8 +2,37 @@
 - name: Require the native AIDE age predicate admitted for this invocation
   ansible.builtin.assert:
     that:
-      - discovered_aide_db_age == {'files': cis_ubuntu24_aide_aged.files | default([])}
+      - >-
+        discovered_aide_db_age == {'files': cis_ubuntu24_aide_aged.files | default([])}
+      - discovered_aide_db_file == cis_ubuntu24_aide_database
     fail_msg: Native AIDE age bindings must retain the current guarded admission decision.
+  tags: always
+
+- name: Read the actual baseline immediately before native remediation
+  ansible.builtin.stat:
+    path: "{{ ubtu24cis_aide_db_file | default('/var/lib/aide/aide.db') }}"
+    follow: false
+    checksum_algorithm: sha256
+  register: cis_ubuntu24_aide_current_database
+  tags: always
+
+- name: Stop when the admitted baseline changed before native remediation
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_aide_current_database.stat.exists == cis_ubuntu24_aide_database.stat.exists
+      - >-
+        not cis_ubuntu24_aide_database.stat.exists
+        or
+        (
+          cis_ubuntu24_aide_current_database.stat.isreg | default(false)
+          and not (cis_ubuntu24_aide_current_database.stat.islnk | default(false))
+          and cis_ubuntu24_aide_current_database.stat.nlink == 1
+          and cis_ubuntu24_aide_current_database.stat.uid == 0
+          and cis_ubuntu24_aide_current_database.stat.gid == 0
+          and cis_ubuntu24_aide_current_database.stat.mode in ['0600', '0640', '0644']
+          and cis_ubuntu24_aide_current_database.stat.checksum == cis_ubuntu24_aide_database.stat.checksum
+        )
+    fail_msg: AIDE baseline changed after admission; stop without accepting or initializing another baseline.
   tags: always
 
 - name: Apply the pinned native controls with the admitted initialization decision
@@ -13,3 +42,30 @@
   vars:
     audit_file_git: '{{ cis_ubuntu24_audit_dependency.repository }}'  # noqa: var-naming[no-role-prefix]
     audit_git_version: '{{ cis_ubuntu24_audit_dependency.commit }}'  # noqa: var-naming[no-role-prefix]
+
+- name: Read the baseline after the native controls return
+  ansible.builtin.stat:
+    path: "{{ ubtu24cis_aide_db_file | default('/var/lib/aide/aide.db') }}"
+    follow: false
+    checksum_algorithm: sha256
+  register: cis_ubuntu24_aide_current_database
+  tags: always
+
+- name: Require the expected protected baseline after native remediation
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_aide_current_database.stat.exists
+      - cis_ubuntu24_aide_current_database.stat.isreg | default(false)
+      - not (cis_ubuntu24_aide_current_database.stat.islnk | default(false))
+      - cis_ubuntu24_aide_current_database.stat.nlink == 1
+      - cis_ubuntu24_aide_current_database.stat.uid == 0
+      - cis_ubuntu24_aide_current_database.stat.gid == 0
+      - cis_ubuntu24_aide_current_database.stat.mode in ['0600', '0640', '0644']
+      - cis_ubuntu24_aide_current_database.stat.size > 0
+      - >-
+        not cis_ubuntu24_aide_database.stat.exists
+        or (cis_ubuntu24_aide_aged.files | default([]) | length > 0)
+        or (ubtu24cis_aide_db_recreate | default(false) is sameas true)
+        or cis_ubuntu24_aide_current_database.stat.checksum == cis_ubuntu24_aide_database.stat.checksum
+    fail_msg: Native remediation did not retain the expected protected AIDE baseline; no recovery is authorized.
+  tags: always
