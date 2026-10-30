@@ -104,6 +104,20 @@
       when: cis_ubuntu24_execution_mode == 'audit'
       tags: always
 
+    - name: Apply native remediation with the admitted AIDE age decision
+      ansible.builtin.include_role:
+        name: cis_ubuntu24
+        tasks_from: remediate_vendor.yml
+      vars:
+        # Existing pinned vendor register name; scoped to this invocation.
+        discovered_aide_db_age: '{{ _cis_ubuntu24_aide_age }}'  # noqa: var-naming[no-role-prefix]
+        _cis_ubuntu24_aide_age: >-
+          {{ {'files': cis_ubuntu24_aide_aged.files | default([])} }}
+      when:
+        - cis_ubuntu24_execution_mode == 'remediate'
+        - cis_ubuntu24_aide_exclusions | length > 0 or cis_ubuntu24_aide_owned_policy.stat.exists | default(false)
+      tags: always
+
     - name: Apply ansible-lockdown Ubuntu 24 CIS role
       # Keep the import untagged to retain native upstream profile filtering.
       ansible.builtin.import_role:
@@ -111,7 +125,12 @@
       vars:
         audit_file_git: "{{ cis_ubuntu24_audit_dependency.repository }}"  # noqa: var-naming[no-role-prefix]
         audit_git_version: "{{ cis_ubuntu24_audit_dependency.commit }}"  # noqa: var-naming[no-role-prefix]
-      when: cis_ubuntu24_execution_mode != 'audit'
+      when:
+        - cis_ubuntu24_execution_mode != 'audit'
+        - >-
+          not (cis_ubuntu24_execution_mode == 'remediate' and
+               (cis_ubuntu24_aide_exclusions | length > 0 or
+                cis_ubuntu24_aide_owned_policy.stat.exists | default(false)))
 
 - name: Verify effective unused filesystem protection after upstream execution
   ansible.builtin.import_tasks: filesystem_modules_verify.yml

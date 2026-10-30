@@ -153,6 +153,11 @@ entire host configuration. Policy changes additionally require upstream
 process; the wrapper does not grant it. Clear the one-time recreate input
 after acceptance. A stale database binding fails before package changes.
 Neither the default empty approval nor database age authorizes rebaselining.
+For managed policy, the native initializer uses the age decision captured by
+that invocation's admission. A database crossing its age threshold during later
+tasks cannot add an unapproved initialization. The vendor still runs its native
+controls; an aged database on the next invocation requires its reviewed binding.
+This decision is scoped to the vendor role call rather than public host facts.
 An existing database must also be a root-owned, root-group regular file with
 one link and mode `0600`, `0640` or `0644`. Writable, executable or foreign
 baselines are rejected before package or policy changes, even when fresh.

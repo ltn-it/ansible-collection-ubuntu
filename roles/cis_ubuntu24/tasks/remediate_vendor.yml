@@ -1,0 +1,15 @@
+---
+- name: Require the native AIDE age predicate admitted for this invocation
+  ansible.builtin.assert:
+    that:
+      - discovered_aide_db_age == {'files': cis_ubuntu24_aide_aged.files | default([])}
+    fail_msg: Native AIDE age bindings must retain the current guarded admission decision.
+  tags: always
+
+- name: Apply the pinned native controls with the admitted initialization decision
+  # Preserve the upstream's native control/profile tags on every imported task.
+  ansible.builtin.import_role:
+    name: ansible-lockdown.ubuntu24_cis  # noqa syntax-check[specific] -- EE-installed dependency
+  vars:
+    audit_file_git: '{{ cis_ubuntu24_audit_dependency.repository }}'  # noqa: var-naming[no-role-prefix]
+    audit_git_version: '{{ cis_ubuntu24_audit_dependency.commit }}'  # noqa: var-naming[no-role-prefix]
