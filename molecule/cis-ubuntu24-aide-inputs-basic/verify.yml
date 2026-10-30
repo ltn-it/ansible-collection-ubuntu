@@ -11,6 +11,8 @@
       database_sha256: "{{ 'b' * 64 }}"
       exclusions_sha256: "{{ cis_ubuntu24_test_fragment | hash('sha256') }}"
       approval_reference: https://example.test/reviewed-change
+    cis_ubuntu24_test_empty_fragment: |
+      # Managed by lit.ubuntu.cis_ubuntu24; inventory-owned mutable data exclusions.
   tasks:
     - name: Reject wrong OS, version, init system and missing target facts
       ansible.builtin.include_tasks: tasks/reject_target.yml
@@ -64,6 +66,18 @@
         - {name: aged baseline without approval, aged: true, allowed: false}
         - {name: explicit recreation without approval, recreate: true, allowed: false}
         - {name: changed policy without approval, previous_sha: "{{ 'c' * 64 }}", allowed: false}
+        - {name: clearing exclusions without approval, exclusions: [], allowed: false}
+        - name: reviewed clearing with explicit recreation
+          exclusions: []
+          approval: >-
+            {{ cis_ubuntu24_test_approval
+               | combine({'exclusions_sha256': cis_ubuntu24_test_empty_fragment | hash('sha256')}) }}
+          recreate: true
+          allowed: true
+        - name: already cleared fresh baseline
+          exclusions: []
+          previous_sha: "{{ cis_ubuntu24_test_empty_fragment | hash('sha256') }}"
+          allowed: true
         - name: reviewed aged baseline
           aged: true
           approval: "{{ cis_ubuntu24_test_approval }}"

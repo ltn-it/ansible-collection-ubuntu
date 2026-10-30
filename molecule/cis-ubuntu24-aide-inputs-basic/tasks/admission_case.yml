@@ -6,9 +6,9 @@
         name: lit.ubuntu.cis_ubuntu24
         tasks_from: aide_admission.yml
       vars:
-        cis_ubuntu24_aide_exclusions:
-          - path: /var/lib/example/overlay
-            reason: Mutable overlay data.
+        cis_ubuntu24_aide_exclusions: >-
+          {{ cis_ubuntu24_test_case.exclusions
+             | default([{'path': '/var/lib/example/overlay', 'reason': 'Mutable overlay data.'}]) }}
         cis_ubuntu24_aide_previous:
           stat: >-
             {{

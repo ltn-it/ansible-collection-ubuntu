@@ -38,7 +38,7 @@ The reference must bind an existing accepted intentional exception for control
 This interface supports Level 1 only and requires the conflicting upstream
 `ubtu24cis_rule_1_3_1_3: false`. An empty list retains upstream behavior.
 
-Before and after upstream execution, including audit setup, a read-only guard
+Before upstream execution and after remediation, a read-only guard
 requires enabled AppArmor and the unprivileged-usernamespace restriction. It
 verifies AppArmor package ownership, root-owned non-writable directory
 boundaries, root-owned mode-0644 single-link regular files, exact hashes,
@@ -47,6 +47,12 @@ profiles may be loaded as unconfined; every other loaded profile must enforce.
 Missing profiles, unknown non-enforcing modes, unsafe files, changed packages
 or policy drift require review and stop the run. No profile is rewritten,
 reloaded or downgraded by this guard. Check mode performs these read-only checks.
+
+The pinned vendor's audit-only path ends the host's current play. Audit callers
+must invoke the existing `apparmor_guard.yml` role task entrypoint in a subsequent
+play before accepting audit evidence when preserved profiles are declared. The
+coordinated Automation audit runbook performs that post-check; a task placed
+after the vendor in the same play cannot provide it.
 
 Retain the accepted exception and its approval reference in independent audit
 evidence; it remains an exception, not a benchmark pass. Kernel container-process
@@ -103,8 +109,10 @@ Optional `cis_ubuntu24_aide_exclusions` entries contain exactly `path` and
 `reason`. They declare mutable data directories outside system trees; paths
 must be normalized, contain at least three components, and resolve without
 symlink redirection. Existing exclusion objects must be directories; files
-and special objects are rejected before package changes. An empty list
-preserves the existing upstream behavior.
+and special objects are rejected before package changes. An empty list preserves
+upstream behavior when no managed fragment exists. Once the fragment is managed,
+an empty request renders its header-only policy and passes the same admission
+checks; it cannot leave old exclusions active or skip rebaseline approval.
 Nonempty exclusions require enabled upstream AIDE and control 6.3.1. Their
 preparation rejects check mode: package and parser acceptance require a real
 isolated Ubuntu target.
@@ -124,7 +132,7 @@ control omission requires its own visible exception. Exclusions replace
 neither application backups nor image integrity verification.
 
 The pinned upstream can delete an aged database before initializing again.
-With exclusions enabled, an existing database therefore requires a reviewed
+With an existing managed fragment or requested exclusions, an existing database requires a reviewed
 `cis_ubuntu24_aide_rebaseline` binding before age-triggered recreation,
 explicit recreation, or a policy change. Its exact keys are
 `database_sha256`, `exclusions_sha256`, and `approval_reference`. The hashes
@@ -269,8 +277,13 @@ origin and the unchanged reviewed audit commit before vendor execution. The
 transport checksum describes the authenticated delivery archive; it does not
 replace `cis_ubuntu24_audit_dependency.archive_sha256` or any source pin.
 
-Archive and destination facts survive vendor variable loading. Scoped module
-defaults keep repeated upstream extraction root-owned. Normal Git transport,
+Every transported working-tree file must match that clean checkout's bytes and
+executable mode. Linked, missing, extra or changed members fail; Git metadata
+in a full-checkout archive is never extracted. After comparison, the vendor uses
+the admitted existing checkout and does not extract again. Generated variables
+are bound to a protected host-specific file under `/var/tmp/lit-cis-audit-vars/`,
+outside the checkout, so unchanged repeated audits retain clean source state.
+Archive and destination facts survive vendor variable loading. Normal Git transport,
 profile tags, audit-only selection, independent evidence and exception controls
 remain unchanged. Missing digest, changed archive, dirty/foreign checkout or
 unsafe ownership fails before the vendor audit. Other transports remain refused.

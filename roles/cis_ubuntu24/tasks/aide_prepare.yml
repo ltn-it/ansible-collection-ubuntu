@@ -2,6 +2,11 @@
 - name: Verify the native AIDE target before inspecting or changing its state
   ansible.builtin.import_tasks: aide_target_assert.yml
 
+- name: Require a real apply for every managed AIDE policy transition
+  ansible.builtin.assert:
+    that: not ansible_check_mode
+    fail_msg: Managed AIDE policy changes, including clearing exclusions, require a real guarded apply.
+
 - name: Inspect existing AIDE configuration directory boundaries
   ansible.builtin.stat:
     path: "{{ item }}"

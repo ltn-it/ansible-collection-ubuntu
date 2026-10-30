@@ -65,8 +65,40 @@
       - cis_ubuntu24_audit_archive_git.results[2].stdout | trim | length == 0
     fail_msg: Offline transport does not relax the reviewed audit provenance.
 
-- name: Bind admitted archive transport above upstream variable loading
+- name: Compare the transport with the admitted checkout without extracting over it
+  block:
+    - name: Allocate private managed-side transport verification scratch
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: lit-cis-audit-transport-
+      register: cis_ubuntu24_audit_transport_scratch
+
+    - name: Transfer only the bound archive into private scratch
+      ansible.builtin.copy:
+        src: '{{ audit_conf_source }}'
+        dest: '{{ cis_ubuntu24_audit_transport_scratch.path }}/transport.tar'
+        mode: '0600'
+
+    - name: Require exact transported bytes and the same complete audit working tree
+      ansible.builtin.script:
+        cmd: >-
+          {{ role_path }}/files/audit_archive_matches_checkout.py
+          {{ (cis_ubuntu24_audit_transport_scratch.path ~ '/transport.tar') | quote }}
+          {{ (audit_conf_dest ~ '/UBUNTU24-CIS-Audit') | quote }}
+          {{ cis_ubuntu24_audit_transport_sha256 | quote }}
+        executable: /usr/bin/python3
+      changed_when: false
+  always:
+    - name: Remove only owned transport verification scratch
+      ansible.builtin.file:
+        path: '{{ cis_ubuntu24_audit_transport_scratch.path }}'
+        state: absent
+      when: cis_ubuntu24_audit_transport_scratch.path is defined
+
+- name: Bind the verified existing checkout above upstream variable loading
   ansible.builtin.set_fact:
-    audit_content: archive  # noqa: var-naming[no-role-prefix] -- Upstream audit interface.
+    # Upstream explicitly supports an existing checkout through non-fetch
+    # content modes. It must never extract a second time after admission.
+    audit_content: existing  # noqa: var-naming[no-role-prefix] -- Upstream audit interface.
     audit_conf_source: '{{ audit_conf_source }}'  # noqa: var-naming[no-role-prefix]
     audit_conf_dest: '{{ audit_conf_dest }}'  # noqa: var-naming[no-role-prefix]

@@ -22,11 +22,24 @@
     - level2-server
     - level2-workstation
 
+- name: Detect an already managed AIDE policy even when requested exclusions are empty
+  ansible.builtin.stat:
+    path: /etc/aide/aide.conf.d/90_lit_mutable_data
+    follow: false
+    get_checksum: false
+  register: cis_ubuntu24_aide_owned_policy
+  when: cis_ubuntu24_execution_mode == 'remediate'
+  tags:
+    - level1-server
+    - level1-workstation
+    - level2-server
+    - level2-workstation
+
 - name: Prepare guarded AIDE exclusions before upstream initialization
   ansible.builtin.import_tasks: aide_prepare.yml
   when:
     - cis_ubuntu24_execution_mode == 'remediate'
-    - cis_ubuntu24_aide_exclusions | length > 0
+    - cis_ubuntu24_aide_exclusions | length > 0 or cis_ubuntu24_aide_owned_policy.stat.exists | default(false)
   tags:
     - level1-server
     - level1-workstation
@@ -69,6 +82,11 @@
     - audit_content | default('git') == 'archive'
   tags: always
 
+- name: Keep generated audit variables outside the reviewed checkout
+  ansible.builtin.import_tasks: audit_variables.yml
+  when: cis_ubuntu24_execution_mode == 'audit'
+  tags: always
+
 - name: Preserve root ownership across upstream audit extraction
   module_defaults:
     ansible.builtin.unarchive:
@@ -95,6 +113,8 @@
     - level2-workstation
 
 - name: Verify the accepted AppArmor attachment boundary after upstream execution
+  # Upstream audit_only ends this host. Audit callers must run this existing
+  # task entrypoint in a subsequent play before accepting their evidence.
   ansible.builtin.import_tasks: apparmor_guard.yml
   when: cis_ubuntu24_apparmor_preserved_profiles | length > 0
   tags:

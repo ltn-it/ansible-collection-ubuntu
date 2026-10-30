@@ -1,0 +1,54 @@
+---
+- name: Inspect the private audit variable directory without following links
+  ansible.builtin.stat:
+    path: /var/tmp/lit-cis-audit-vars
+    follow: false
+  register: cis_ubuntu24_audit_variables_directory
+
+- name: Reject foreign or redirected audit variable storage
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cis_ubuntu24_audit_variables_directory.stat.exists
+        or (
+          cis_ubuntu24_audit_variables_directory.stat.isdir | default(false)
+          and not (cis_ubuntu24_audit_variables_directory.stat.islnk | default(false))
+          and cis_ubuntu24_audit_variables_directory.stat.uid == 0
+          and cis_ubuntu24_audit_variables_directory.stat.gid == 0
+          and cis_ubuntu24_audit_variables_directory.stat.mode == '0700'
+        )
+    fail_msg: Generated audit variables require a private root-owned directory outside the source checkout.
+
+- name: Prepare the private root-owned audit variable directory
+  ansible.builtin.file:
+    path: /var/tmp/lit-cis-audit-vars
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Inspect the host-bound audit variable file without following links
+  ansible.builtin.stat:
+    path: '/var/tmp/lit-cis-audit-vars/{{ inventory_hostname | hash("sha256") }}.yml'
+    follow: false
+  register: cis_ubuntu24_audit_variables_file
+
+- name: Reject redirected or unprotected existing audit variable files
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cis_ubuntu24_audit_variables_file.stat.exists
+        or (
+          cis_ubuntu24_audit_variables_file.stat.isreg | default(false)
+          and not (cis_ubuntu24_audit_variables_file.stat.islnk | default(false))
+          and cis_ubuntu24_audit_variables_file.stat.nlink == 1
+          and cis_ubuntu24_audit_variables_file.stat.uid == 0
+          and cis_ubuntu24_audit_variables_file.stat.gid == 0
+          and cis_ubuntu24_audit_variables_file.stat.mode == '0600'
+        )
+    fail_msg: Existing generated audit variables must be a private root-owned regular file.
+
+- name: Bind external audit variables above upstream defaults and include-vars
+  ansible.builtin.set_fact:
+    audit_vars_path: >-  # noqa: var-naming[no-role-prefix] -- Upstream audit interface.
+      /var/tmp/lit-cis-audit-vars/{{ inventory_hostname | hash('sha256') }}.yml

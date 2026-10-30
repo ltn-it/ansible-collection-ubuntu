@@ -11,6 +11,30 @@ ROOT=Path(__file__).resolve().parents[2]
 
 
 class AuditArchiveTests(unittest.TestCase):
+    def test_apparmor_postcheck_runs_in_a_following_play_after_vendor_end_host(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
+            root=Path(temporary)
+            play=[{'hosts':'all','gather_facts':False,'tasks':[
+                {'name':'Model the pinned vendor audit-only termination','ansible.builtin.meta':'end_host'},
+                {'ansible.builtin.fail':{'msg':'End-host must skip this task'}}]},
+                {'hosts':'all','gather_facts':False,'vars':{'ansible_facts':{
+                    'distribution':'Debian','distribution_major_version':'24'}},'tasks':[
+                    {'block':[{'ansible.builtin.include_role':{'name':'cis_ubuntu24',
+                              'tasks_from':'apparmor_guard.yml'}}],
+                     'rescue':[{'ansible.builtin.assert':{'that':[
+                         "ansible_failed_task.name == 'Require the native Ubuntu 24 AppArmor target'",
+                         "ansible_failed_task.action == 'ansible.builtin.assert'"]}},
+                         {'ansible.builtin.set_fact':{'postcheck_reached':True}}]},
+                    {'ansible.builtin.assert':{'that':'postcheck_reached | default(false)'}}]}]
+            book=root/'postcheck.yml';book.write_text(yaml.safe_dump(play))
+            config=root/'ansible.cfg';config.write_text('[defaults]\nroles_path='+str(ROOT/'roles')+'\n')
+            env=dict(os.environ,ANSIBLE_CONFIG=str(config),ANSIBLE_LOCAL_TEMP=str(root/'local'),
+                     ANSIBLE_REMOTE_TEMP=str(root/'remote'))
+            env.pop('ANSIBLE_VAULT_PASSWORD_FILE',None)
+            done=subprocess.run(['ansible-playbook','-i','localhost,','-c','local',str(book)],
+                                env=env,capture_output=True,text=True,timeout=90)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+
     def run_role(self,root,tasks,variables):
         book=root/'case.yml'
         book.write_text(yaml.safe_dump([{'hosts':'all','gather_facts':False,'vars':variables,'tasks':[{
