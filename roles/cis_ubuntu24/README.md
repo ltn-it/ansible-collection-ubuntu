@@ -290,3 +290,11 @@ Archive and destination facts survive vendor variable loading. Normal Git transp
 profile tags, audit-only selection, independent evidence and exception controls
 remain unchanged. Missing digest, changed archive, dirty/foreign checkout or
 unsafe ownership fails before the vendor audit. Other transports remain refused.
+
+Before the first archive-mode Git probe, the wrapper checks checkout ancestry
+and every working-tree and Git-metadata path for ownership, writable permissions,
+links, special files and size limits. Git probes also disable filesystem-monitor
+commands, hooks and external system/global configuration. A redirected or writable
+Git configuration is rejected before Git runs. The effective auditor copy method,
+controller source, target path and fixed release/checksums must match admission;
+conflicting higher-precedence variables fail before vendor execution.

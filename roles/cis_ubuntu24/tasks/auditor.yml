@@ -23,6 +23,17 @@
          cis_ubuntu24_auditor_cache_directory ~ '/' ~
          cis_ubuntu24_auditor_dependency.checksums[ansible_facts.machine] }}
 
+- name: Require selected auditor facts to match the independently fixed release
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_auditor_sha256 == cis_ubuntu24_auditor_dependency.checksums[ansible_facts.machine]
+      - >-
+        cis_ubuntu24_auditor_controller_file ==
+        (cis_ubuntu24_auditor_source if cis_ubuntu24_auditor_source | length > 0 else
+         cis_ubuntu24_auditor_cache_directory ~ '/' ~
+         cis_ubuntu24_auditor_dependency.checksums[ansible_facts.machine])
+    fail_msg: Higher-precedence inputs must not replace the selected auditor release or source.
+
 - name: Create the private controller auditor cache when no offline file is supplied
   ansible.builtin.file:
     path: '{{ cis_ubuntu24_auditor_cache_directory }}'
@@ -78,3 +89,17 @@
         release: '{{ cis_ubuntu24_auditor_dependency.version }}'
         AMD64_checksum: 'sha256:{{ cis_ubuntu24_auditor_dependency.checksums.x86_64 }}'
         ARM64_checksum: 'sha256:{{ cis_ubuntu24_auditor_dependency.checksums.aarch64 }}'
+
+- name: Require effective vendor auditor bindings before upstream execution
+  ansible.builtin.assert:
+    that:
+      - get_audit_binary_method == 'copy'
+      - audit_bin_copy_location == cis_ubuntu24_auditor_controller_file
+      - audit_bin_path == '/usr/local/bin/'
+      - audit_bin == '/usr/local/bin/goss'
+      - >-
+        audit_bin_version ==
+        {'release': cis_ubuntu24_auditor_dependency.version,
+         'AMD64_checksum': 'sha256:' ~ cis_ubuntu24_auditor_dependency.checksums.x86_64,
+         'ARM64_checksum': 'sha256:' ~ cis_ubuntu24_auditor_dependency.checksums.aarch64}
+    fail_msg: Vendor overrides must not replace the admitted auditor method, source, destination or release.

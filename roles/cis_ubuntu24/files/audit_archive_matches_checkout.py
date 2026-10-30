@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Compare an offline transport with an admitted checkout; never extract it."""
 
+import configparser
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -24,6 +25,44 @@ def digest(stream):
         if size > MAX_BYTES:
             raise ValueError("Audit transport member exceeds its bound")
         value.update(block)
+
+
+def validate_git(checkout):
+    """Validate every Git input before any Git process reads local configuration."""
+    checkout = Path(checkout)
+    if str(checkout.resolve(strict=True)) != str(checkout):
+        raise ValueError("Audit checkout must be canonical")
+    for parent in (checkout, *checkout.parents):
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or (info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))):
+            raise ValueError("Unprotected audit checkout ancestry")
+    metadata = checkout / ".git"
+    info = metadata.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("Audit Git metadata must be an in-place directory")
+    total = count = 0
+    for directory, directories, files in os.walk(checkout, followlinks=False):
+        for path in (Path(directory), *(Path(directory) / name for name in [*directories, *files])):
+            info = path.lstat()
+            count += 1
+            if count > MAX_FILES or info.st_uid != os.geteuid() or info.st_mode & 0o7022:
+                raise ValueError("Unprotected audit Git input")
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("Linked or special audit Git input")
+            total += info.st_size
+            if total > MAX_BYTES:
+                raise ValueError("Audit Git input exceeds its bound")
+    config = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        config.read_string((metadata / "config").read_text())
+    except (UnicodeError, configparser.Error) as error:
+        raise ValueError("Unsupported audit Git configuration") from error
+    if any(section.split()[0].lower() in {"include", "includeif", "filter", "extensions"}
+           for section in config.sections()):
+        raise ValueError("External or executable audit Git configuration")
 
 
 def verify(archive, checkout, expected_sha256):
@@ -99,7 +138,10 @@ def verify(archive, checkout, expected_sha256):
 
 if __name__ == "__main__":
     try:
-        verify(*sys.argv[1:])
+        if sys.argv[1:2] == ["--git-inputs"]:
+            validate_git(sys.argv[2])
+        else:
+            verify(*sys.argv[1:])
     except (OSError, ValueError, tarfile.TarError):
         sys.exit("Offline audit transport does not match the admitted checkout")
     print("Offline audit transport matches the complete admitted working tree")

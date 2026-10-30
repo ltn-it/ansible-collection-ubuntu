@@ -17,7 +17,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "roles/cis_ubuntu24/files/audit_archive_matches_checkout.py"
-VERIFY = runpy.run_path(str(HELPER))["verify"]
+HELPERS = runpy.run_path(str(HELPER))
+VERIFY = HELPERS["verify"]
+VALIDATE_GIT = HELPERS["validate_git"]
 
 
 class AuditTransportTests(unittest.TestCase):
@@ -66,6 +68,31 @@ class AuditTransportTests(unittest.TestCase):
 
 @unittest.skipUnless(os.geteuid() == 0, "Requires an isolated root-target Devtools witness")
 class RootAuditAdmissionTests(unittest.TestCase):
+    def test_git_metadata_cannot_link_to_untrusted_or_executable_configuration(self):
+        with tempfile.TemporaryDirectory(dir=os.environ["HOME"]) as directory:
+            checkout = Path(directory) / "checkout"
+            checkout.mkdir()
+            metadata = checkout / ".git"
+            metadata.mkdir()
+            config = metadata / "config"
+            base = "[core]\n\tbare = false\n"
+            config.write_text(base)
+            # This helper boundary runs for the actual effective target uid.
+            # Root execution of the complete Ansible path is tested separately.
+            VALIDATE_GIT(str(checkout))
+            for text in ('[include]\n\tpath = /tmp/untrusted\n',
+                         '[includeIf "gitdir:/tmp/"]\n\tpath = /tmp/untrusted\n',
+                         '[filter "untrusted"]\n\tclean = /tmp/command\n',
+                         '[extensions]\n\tworktreeConfig = true\n'):
+                with self.subTest(text=text):
+                    config.write_text(base + text)
+                    with self.assertRaisesRegex(ValueError, "External or executable"):
+                        VALIDATE_GIT(str(checkout))
+            config.write_text(base)
+            config.chmod(0o666)
+            with self.assertRaisesRegex(ValueError, "Unprotected"):
+                VALIDATE_GIT(str(checkout))
+
     def test_clearing_existing_aide_exclusions_cannot_skip_the_rebaseline_gate(self):
         with tempfile.TemporaryDirectory(dir=os.environ["HOME"]) as directory:
             root = Path(directory)
@@ -139,11 +166,23 @@ class RootAuditAdmissionTests(unittest.TestCase):
             marker = root / "unchecked-executed"
             (unchecked / "run_audit.sh").write_text("#!/bin/sh\ntouch '" + str(marker) + "'\n")
             (unchecked / "run_audit.sh").chmod(0o755)
+            env.update(GIT_DIR=str(unchecked / "foreign.git"), GIT_WORK_TREE=str(unchecked),
+                       GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.fsmonitor",
+                       GIT_CONFIG_VALUE_0=str(unchecked / "command"))
             vendor = root / "vendor-defaults.yml"
             vendor.write_text(yaml.safe_dump({"audit_conf_dir": str(unchecked), "audit_content": "archive",
                                               "audit_vars_path": str(unchecked / "vars.yml")}))
-            for attempt in range(6):
+            for attempt in range(8):
                 archive.write_bytes(original)
+                git_config = checkout / ".git/config"
+                original_config = git_config.read_text()
+                if attempt >= 6:
+                    fsmonitor = root / "hostile-fsmonitor"
+                    fsmonitor.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\nprintf 'fixture\\0'\n")
+                    fsmonitor.chmod(0o755)
+                    git_config.write_text(original_config + "\n[core]\n\tfsmonitor = " + str(fsmonitor) + "\n")
+                    if attempt == 6:
+                        git_config.chmod(0o666)
                 if attempt == 2:
                     with tarfile.open(archive, "w:gz") as stream:
                         replacement = b"#!/bin/sh\necho unexpected code\n"
@@ -178,13 +217,17 @@ class RootAuditAdmissionTests(unittest.TestCase):
                     command += ["--extra-vars", json.dumps(extra)]
                 result = subprocess.run(command,
                                         env=env, capture_output=True, text=True, timeout=90)
-                self.assertEqual(result.returncode, 2 if attempt >= 2 else 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0 if attempt in (0, 1, 7) else 2, result.stdout + result.stderr)
                 if attempt == 2:
                     self.assertIn("Offline audit transport does not match", result.stdout)
                     self.assertNotIn("TASK [Model vendor generated", result.stdout)
-                if attempt >= 3:
+                if attempt in (3, 4, 5, 6):
                     self.assertNotIn("TASK [Model vendor execution", result.stdout)
+                if attempt == 6:
+                    self.assertNotIn("TASK [cis_ubuntu24 : Read actual staged commit", result.stdout)
                 self.assertFalse(marker.exists())
+                git_config.chmod(0o644)
+                git_config.write_text(original_config)
                 self.assertEqual(subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"]), b"")
                 self.assertEqual(entry.read_text(), "#!/bin/sh\nexit 0\n")
                 if attempt < 2:

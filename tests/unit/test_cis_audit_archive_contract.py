@@ -128,7 +128,7 @@ class AuditArchiveTests(unittest.TestCase):
                 'audit_bin_version':{'release':'v0.5.0'},'audit_bin':'/foreign/goss'}))
             book=root/'bind.yml';book.write_text(yaml.safe_dump([{'hosts':'all','gather_facts':False,
                 'vars':{**defaults,'cis_ubuntu24_auditor_controller_file':str(root/'admitted-goss')},
-                'tasks':[tasks[-1],{'ansible.builtin.include_vars':str(vendor)},
+                'tasks':[tasks[-2],{'ansible.builtin.include_vars':str(vendor)},tasks[-1],
                     {'ansible.builtin.assert':{'that':["get_audit_binary_method == 'copy'",
                       "audit_bin_version.release == 'v0.4.8'", "audit_bin == '/usr/local/bin/goss'",
                       'audit_bin_copy_location == cis_ubuntu24_auditor_controller_file',
@@ -139,6 +139,39 @@ class AuditArchiveTests(unittest.TestCase):
             done=subprocess.run(['ansible-playbook','-i','localhost,','-c','local',str(book)],
                 env=env,capture_output=True,text=True,timeout=90)
             self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+
+    def test_conflicting_extra_vars_cannot_replace_effective_auditor_bindings(self):
+        # Exercise real selection/binding/assert tasks. No fixture is represented
+        # as an accepted release binary; real checksum rejection is tested above.
+        tasks=yaml.safe_load((ROOT/'roles/cis_ubuntu24/tasks/auditor.yml').read_text())
+        defaults=yaml.safe_load((ROOT/'roles/cis_ubuntu24/defaults/main.yml').read_text())
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
+            root=Path(temporary)
+            selected=[task for task in tasks if task['name'] in (
+                'Select the exact architecture-bound controller auditor input',
+                'Require selected auditor facts to match the independently fixed release',
+                'Bind the admitted auditor above upstream variable loading',
+                'Require effective vendor auditor bindings before upstream execution')]
+            book=root/'binding.yml'
+            book.write_text(yaml.safe_dump([{'hosts':'all','gather_facts':False,
+                'vars':{**defaults,'ansible_facts':{'machine':'x86_64'},
+                        'cis_ubuntu24_auditor_source':str(root/'admitted-goss')},
+                'tasks':selected+[{'name':'Vendor execution must not be reached on conflicting inputs',
+                    'ansible.builtin.debug':{'msg':'admitted'}}]}]))
+            env=dict(os.environ,ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TEMP=str(root/'remote'))
+            env.pop('ANSIBLE_VAULT_PASSWORD_FILE',None)
+            for extra in [{}, {'get_audit_binary_method':'download'},
+                    {'audit_bin_copy_location':'/controller/unchecked-goss'},
+                    {'audit_bin_path':'/tmp/'}, {'audit_bin':'/tmp/goss'},
+                    {'audit_bin_version':{'release':'v0.5.0'}},
+                    {'cis_ubuntu24_auditor_sha256':'0'*64},
+                    {'cis_ubuntu24_auditor_controller_file':'/controller/unchecked-goss'}]:
+                with self.subTest(extra=extra):
+                    done=subprocess.run(['ansible-playbook','-i','localhost,','-c','local',str(book),
+                        '--extra-vars',__import__('json').dumps(extra)], env=env,capture_output=True,text=True,timeout=90)
+                    self.assertEqual(done.returncode,2 if extra else 0,done.stdout+done.stderr)
+                    if extra:
+                        self.assertNotIn('TASK [Vendor execution',done.stdout)
 
 
 if __name__=='__main__':unittest.main()
