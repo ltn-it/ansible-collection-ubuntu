@@ -298,3 +298,9 @@ commands, hooks and external system/global configuration. A redirected or writab
 Git configuration is rejected before Git runs. The effective auditor copy method,
 controller source, target path and fixed release/checksums must match admission;
 conflicting higher-precedence variables fail before vendor execution.
+
+Because the pinned vendor invokes its audit entrypoint without shell quoting,
+audit checkout destinations accept only absolute paths whose components contain
+ASCII letters, digits, underscores, hyphens and periods. Dot/dot-dot components,
+whitespace and shell metacharacters are refused before any transport activity.
+This guard applies to Git and archive audit mode and the actual execution path.

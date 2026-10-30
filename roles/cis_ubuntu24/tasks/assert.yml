@@ -200,3 +200,7 @@
     }}
   loop_control:
     label: "{{ item.1.name | default('<missing name>') }}"
+
+- name: Validate the vendor execution path for each admitted audit transport
+  ansible.builtin.import_tasks: audit_execution_path.yml
+  when: cis_ubuntu24_execution_mode == 'audit'

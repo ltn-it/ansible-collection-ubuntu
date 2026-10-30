@@ -56,10 +56,29 @@ class AuditArchiveTests(unittest.TestCase):
             root=Path(temporary)
             for mode,extra,expected in [('git',{},0),('archive',{},2),('archive',bound,0),
                     ('archive',{**bound,'cis_ubuntu24_audit_transport_sha256':''},2),
-                    ('archive',{**bound,'audit_conf_source':'relative.tar.gz'},2),('copy',bound,2)]:
+                    ('archive',{**bound,'audit_conf_source':'relative.tar.gz'},2),('copy',bound,2),
+                    ('git',{'audit_conf_dest':'/opt/space dir'},2),
+                    ('git',{'audit_conf_dest':'/opt/path\n'},2),
+                    ('git',{'audit_conf_dir':'/opt/unchecked'},2)]:
                 with self.subTest(mode=mode,extra=extra):
                     done=self.run_role(root,'assert.yml',{**base,**extra,'audit_content':mode})
                     self.assertEqual(done.returncode,expected,done.stdout+done.stderr)
+
+    def test_unsafe_vendor_checkout_paths_fail_before_transport_or_vendor_execution(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:
+            root=Path(temporary)
+            for path in ['/opt/space dir', '/opt/path;touch marker', '/opt/$(touch marker)',
+                         '/opt/`touch marker`', '/opt/path\ncommand', '/opt/path\n', '/opt/../foreign', '/opt/./audit']:
+                with self.subTest(path=path):
+                    done=self.run_role(root,'audit_archive.yml',{'audit_conf_dest':path})
+                    self.assertEqual(done.returncode,2,done.stdout+done.stderr)
+                    self.assertIn('shell metacharacters or whitespace',done.stdout)
+                    self.assertNotIn('TASK [cis_ubuntu24 : Read the exact controller',done.stdout)
+            for path in ['/opt', '/opt/reviewed_checkout-1.2']:
+                with self.subTest(path=path):
+                    done=self.run_role(root,'audit_execution_path.yml',{'audit_conf_dest':path,
+                        'audit_conf_dir':path+'/UBUNTU24-CIS-Audit'})
+                    self.assertEqual(done.returncode,0,done.stdout+done.stderr)
 
     def test_changed_or_linked_archive_stops_before_checkout_or_vendor_access(self):
         with tempfile.TemporaryDirectory(dir=os.environ['HOME']) as temporary:

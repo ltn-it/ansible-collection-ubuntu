@@ -1,9 +1,6 @@
 ---
-- name: Reject conflicting vendor audit execution directory overrides
-  ansible.builtin.assert:
-    that:
-      - audit_conf_dir is not defined or audit_conf_dir == audit_conf_dest ~ '/UBUNTU24-CIS-Audit'
-    fail_msg: Archive audit execution must use the exact admitted checkout directory.
+- name: Validate the vendor execution path before archive admission
+  ansible.builtin.import_tasks: audit_execution_path.yml
 
 - name: Read the exact controller audit archive without following links
   ansible.builtin.stat:

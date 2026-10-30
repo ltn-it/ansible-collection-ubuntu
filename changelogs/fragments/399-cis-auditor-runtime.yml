@@ -7,3 +7,6 @@ bugfixes:
   - >-
     Validate complete checkout and Git metadata before root Git probes, disable executable Git features
     and reject conflicting effective auditor bindings.
+  - >-
+    Refuse whitespace, shell metacharacters and relative components in vendor audit execution paths
+    before Git or archive transport activity.
