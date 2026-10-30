@@ -58,6 +58,17 @@
   become: false
   when: cis_ubuntu24_auditor_source | length == 0
 
+- name: Validate protected controller auditor bytes before vendor use
+  ansible.builtin.script:
+    cmd: >-
+      {{ (role_path ~ '/files/auditor_source_guard.py') | quote }}
+      {{ cis_ubuntu24_auditor_controller_file | quote }}
+      {{ cis_ubuntu24_auditor_sha256 | quote }}
+    executable: '{{ ansible_playbook_python }}'
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
 - name: Inspect actual auditor bytes without following a supplied link
   ansible.builtin.stat:
     path: '{{ cis_ubuntu24_auditor_controller_file }}'

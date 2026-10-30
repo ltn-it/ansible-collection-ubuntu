@@ -2,10 +2,14 @@
 - name: Require explicit AIDE configuration and native install control
   ansible.builtin.assert:
     that:
-      - ubtu24cis_config_aide | default(false) | bool
-      - ubtu24cis_rule_6_3_1 | default(true) | bool
+      - ubtu24cis_config_aide | default(false) is sameas true
+      - ubtu24cis_section6 | default(true) is sameas true
+      - ubtu24cis_rule_6_3_1 | default(true) is sameas true
+      - ubtu24cis_aide_db_recreate | default(false) is boolean
       - ubtu24cis_aide_scan | default('cron') in ['cron', 'timer']
-    fail_msg: Custom AIDE exclusions require enabled upstream AIDE installation and an explicit supported scheduler.
+    fail_msg: >-
+      Custom AIDE exclusions require the enabled native section and install control,
+      a boolean recreate input and an explicit supported scheduler.
 
 - name: Reject unsafe or foreign AIDE exclusion files
   ansible.builtin.assert:

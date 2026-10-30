@@ -120,7 +120,11 @@ existing managed fragment are rejected before target/package/policy changes;
 the scheduler wrapper likewise runs only with the native Level 1 controls.
 This prevents accepting a policy without its initialization path.
 
-Nonempty exclusions require enabled upstream AIDE and control 6.3.1. Their
+Nonempty exclusions require enabled upstream AIDE, section 6 and control 6.3.1. The
+upstream recreate input must be a Boolean; strings such as `"false"` are rejected
+because the native initializer treats them as truthy. Managed exclusions are
+rejected for the vendor's container targets and Docker connections, where its
+later container overrides disable the required initializer. Their
 preparation rejects check mode: package and parser acceptance require a real
 isolated Ubuntu target.
 
@@ -231,8 +235,14 @@ checksum verification into its private, checksum-addressed
 `cis_ubuntu24_auditor_cache_directory`. For offline execution, supply the absolute
 controller path `cis_ubuntu24_auditor_source` to those same public release bytes.
 The offline input is checked against the fixed architecture checksum, never a
-caller-supplied replacement hash. Missing, linked, changed or unsupported inputs
-fail before vendor execution. The binary is not executed on the controller.
+caller-supplied replacement hash. The source must be a canonical regular file
+with one link, owned by root or the controller user, with protected ancestry and
+no group/other write permission or special mode bits. A bounded descriptor read
+checks stable metadata and the fixed checksum before vendor execution. This
+prevents other controller users changing admitted bytes before the vendor copy;
+the controller account and root remain trusted. Missing, linked, changed or
+unsupported inputs fail before vendor execution. The binary is not executed on
+the controller.
 
 The admitted input uses the vendor-supported `copy` interface and fixed
 `/usr/local/bin/goss` destination. Host facts preserve the version, checksums,

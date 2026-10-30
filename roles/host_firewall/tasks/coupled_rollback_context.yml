@@ -19,16 +19,3 @@
         host_firewall_active_context.owned_tables
         == [[host_firewall_table_family, host_firewall_table_name],
             ['bridge', host_firewall_container_ssh_guard_table_name]]
-
-- name: Bind rollback to the protected original candidate rather than live application state
-  ansible.builtin.set_fact:
-    host_firewall_candidate_sha256: '{{ host_firewall_active_context.candidate_sha256 }}'
-    host_firewall_approved_readback_sha256: '{{ host_firewall_active_context.approved_readback_sha256 }}'
-    host_firewall_policy_fingerprint: '{{ host_firewall_active_context.policy_fingerprint }}'
-    host_firewall_change_id: '{{ host_firewall_active_context.change_id }}'
-    host_firewall_mode: '{{ host_firewall_active_context.mode }}'
-    host_firewall_egress_policy_sha256: '{{ host_firewall_active_context.egress_policy_sha256 }}'
-    host_firewall_egress_status: '{{ host_firewall_active_context.egress_status }}'
-
-- name: Build the rollback request using its existing authorization boundary
-  ansible.builtin.import_tasks: transaction_request.yml

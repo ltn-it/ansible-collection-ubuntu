@@ -1,0 +1,105 @@
+---
+- name: Build request from invocation-scoped coupled rollback bindings
+  ansible.builtin.import_tasks: transaction_request.yml
+  when:
+    - host_firewall_container_ssh_guard_managed
+    - host_firewall_action == 'rollback'
+    - not ansible_check_mode
+
+- name: Build candidate-bound controller confirmation
+  ansible.builtin.include_tasks: controller_confirmation.yml
+  when:
+    - host_firewall_authorization_mode == 'controller_confirmation'
+    - host_firewall_action in ['apply', 'confirm', 'rollback']
+    - not ansible_check_mode
+
+- name: Provision candidate confirmation verifier
+  ansible.builtin.include_tasks: controller_verifier_setup.yml
+  when:
+    - host_firewall_authorization_mode == 'controller_confirmation'
+    - host_firewall_action in ['apply', 'confirm', 'rollback']
+    - not ansible_check_mode
+
+- name: Validate productive authorization boundary
+  ansible.builtin.include_tasks: authorization.yml
+  when:
+    - host_firewall_action in ['apply', 'confirm', 'rollback']
+    - not ansible_check_mode
+
+- name: Derive structured readback in an isolated namespace
+  ansible.builtin.include_tasks: preview.yml
+  when: host_firewall_action == 'preview'
+
+- name: Verify nftables boot persistence service and include boundary
+  ansible.builtin.include_tasks: persistence_preflight.yml
+  when:
+    - host_firewall_action in ['apply', 'confirm', 'rollback']
+    - not ansible_check_mode
+
+- name: Check host firewall candidate without applying it
+  ansible.builtin.include_tasks: check.yml
+  when: host_firewall_action in ['check', 'apply', 'confirm']
+
+- name: Install static host firewall transaction runtime
+  ansible.builtin.include_tasks: setup.yml
+  when:
+    - host_firewall_action == 'apply'
+    - not ansible_check_mode
+
+- name: Validate existing static host firewall transaction runtime
+  ansible.builtin.include_tasks: runtime_preflight.yml
+  when:
+    - host_firewall_action in ['confirm', 'rollback']
+    - not ansible_check_mode
+
+- name: Apply host firewall transaction
+  ansible.builtin.include_tasks: apply.yml
+  when:
+    - host_firewall_action == 'apply'
+    - not ansible_check_mode
+
+- name: Report check-mode apply hold
+  ansible.builtin.debug:
+    msg: >-
+      Check mode validated the candidate only. No firewall, watchdog, state, or persistent configuration was changed.
+  when:
+    - host_firewall_action == 'apply'
+    - ansible_check_mode
+
+- name: Confirm host firewall transaction
+  ansible.builtin.include_tasks: confirm.yml
+  when:
+    - host_firewall_action == 'confirm'
+    - not ansible_check_mode
+
+- name: Report check-mode confirmation hold
+  ansible.builtin.debug:
+    msg: "Check mode did not persist or confirm the pending firewall transaction."
+  when:
+    - host_firewall_action == 'confirm'
+    - ansible_check_mode
+
+- name: Roll back host firewall transaction
+  ansible.builtin.include_tasks: rollback.yml
+  when:
+    - host_firewall_action == 'rollback'
+    - not ansible_check_mode
+
+- name: Report check-mode rollback hold
+  ansible.builtin.debug:
+    msg: "Check mode did not execute the rollback service or alter persistent configuration."
+  when:
+    - host_firewall_action == 'rollback'
+    - ansible_check_mode
+
+- name: Read back current host firewall table
+  ansible.builtin.include_tasks: readback.yml
+  when:
+    - host_firewall_action == 'readback'
+    - not host_firewall_container_ssh_guard_managed
+
+- name: Read back the complete coupled host firewall policy
+  ansible.builtin.include_tasks: coupled_readback.yml
+  when:
+    - host_firewall_action == 'readback'
+    - host_firewall_container_ssh_guard_managed

@@ -26,6 +26,8 @@
         - {distribution: Debian, distribution_major_version: '24', service_mgr: systemd}
         - {distribution: Ubuntu, distribution_major_version: '22', service_mgr: systemd}
         - {distribution: Ubuntu, distribution_major_version: '24', service_mgr: sysvinit}
+        - {distribution: Ubuntu, distribution_major_version: '24', service_mgr: systemd, virtualization_type: lxc}
+        - {distribution: Ubuntu, distribution_major_version: '24', service_mgr: systemd, virtualization_type: docker}
         - {}
       loop_control:
         loop_var: cis_ubuntu24_test_target
@@ -69,6 +71,9 @@
       ansible.builtin.include_tasks: tasks/admission_case.yml
       loop:
         - {name: unchanged fresh baseline, allowed: true}
+        - {name: disabled native section, section6: false, allowed: false}
+        - {name: string false recreate input, recreate: 'false', allowed: false}
+        - {name: string no recreate input, recreate: 'no', allowed: false}
         - {name: aged baseline without approval, aged: true, allowed: false}
         - {name: explicit recreation without approval, recreate: true, allowed: false}
         - {name: changed policy without approval, previous_sha: "{{ 'c' * 64 }}", allowed: false}

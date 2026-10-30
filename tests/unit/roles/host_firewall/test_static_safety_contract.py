@@ -121,10 +121,12 @@ class HostFirewallStaticSafetyTests(unittest.TestCase):
     def test_global_check_mode_forces_real_nft_validation_without_setup(self) -> None:
         check = (ROLE_ROOT / "tasks" / "check.yml").read_text()
         main = (ROLE_ROOT / "tasks" / "main.yml").read_text()
+        execute = (ROLE_ROOT / "tasks" / "transaction_execute.yml").read_text()
         self.assertIn("check_mode: false", check)
         self.assertIn("host_firewall_check_result.skipped", check)
-        self.assertIn("host_firewall_action == 'apply'", main)
-        self.assertIn("not ansible_check_mode", main)
+        self.assertIn("ansible.builtin.include_tasks: transaction_execute.yml", main)
+        self.assertIn("host_firewall_action == 'apply'", execute)
+        self.assertIn("not ansible_check_mode", execute)
 
     def test_egress_is_default_drop_and_every_capability_is_separate(self) -> None:
         policy = (ROLE_ROOT / "templates" / "host-firewall.nft.j2").read_text()

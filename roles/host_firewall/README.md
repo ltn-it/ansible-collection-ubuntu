@@ -131,7 +131,10 @@ Coupled confirmation requires both tables to match the approved canonical
 digest. Rollback restores both prior tables in one nft batch, including mixed
 present/absent states. Explicit rollback and readback do not require a running
 application container; rollback reads its protected original transaction
-context. The existing signing/confirmation boundary remains required. The
+context. Recovered bindings apply only within that rollback invocation, including
+its request, confirmation and authorization. They do not override inputs or
+derived policy fingerprints in subsequent plays. The existing signing/confirmation
+boundary remains required. The
 [interface-index data type](https://netfilter.org/projects/nftables/manpage.html)
 can still be printed as a live interface name with `--numeric` on nft 1.0.9.
 Bridge snapshots therefore resolve scalar `iif`/`oif`/`sdif` equality operands
