@@ -1,0 +1,21 @@
+---
+- name: Read immutable active transaction context under the existing lock
+  ansible.builtin.command:
+    argv: '{{ host_firewall_transaction_program_argv + ["describe-active"] }}'
+  register: host_firewall_active_context_command
+  changed_when: false
+  check_mode: false
+
+- name: Parse only public active rollback bindings
+  ansible.builtin.set_fact:
+    host_firewall_active_context: '{{ host_firewall_active_context_command.stdout | from_json }}'
+
+- name: Require the original target and complete coupled table scope
+  ansible.builtin.assert:
+    that:
+      - host_firewall_active_context.schema == 'lit.host_firewall.active-context/v1'
+      - host_firewall_active_context.target == host_firewall_expected_inventory_hostname
+      - >-
+        host_firewall_active_context.owned_tables
+        == [[host_firewall_table_family, host_firewall_table_name],
+            ['bridge', host_firewall_container_ssh_guard_table_name]]

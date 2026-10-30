@@ -1,0 +1,20 @@
+---
+- name: Require rejection before any package action on an unsupported target
+  block:
+    - name: Exercise the actual native target guard
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: aide_target_assert.yml
+      vars:
+        ansible_facts: "{{ cis_ubuntu24_test_target }}"
+
+    - name: Reject an accidentally accepted unsupported target
+      ansible.builtin.fail:
+        msg: Invalid AIDE target was unexpectedly accepted.
+  rescue:
+    - name: Verify the native target assertion caused the expected rejection
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_task.action == 'ansible.builtin.assert'
+          - ansible_failed_task.name.endswith('Require Ubuntu 24 and systemd before any AIDE preparation')
+          - ansible_failed_result.msg.startswith('Guarded AIDE preparation requires gathered Ubuntu 24 systemd facts')

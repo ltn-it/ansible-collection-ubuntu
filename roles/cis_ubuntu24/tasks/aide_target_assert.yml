@@ -1,0 +1,14 @@
+---
+- name: Require Ubuntu 24 and systemd before any AIDE preparation
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution | default('') == 'Ubuntu'
+      - ansible_facts.distribution_major_version | default('') == '24'
+      - ansible_facts.service_mgr | default('') == 'systemd'
+      - ansible_connection | default('ssh') not in ['docker', 'community.docker.docker']
+      - >-
+        ansible_facts.virtualization_type | default('')
+        not in ['docker', 'lxc', 'openvz', 'podman', 'container']
+    fail_msg: >-
+      Guarded AIDE preparation requires gathered Ubuntu 24 systemd facts and a native non-container initializer.
+      The pinned container override disables AIDE initialization; no managed policy may change before that skip.

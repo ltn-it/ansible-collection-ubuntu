@@ -1,4 +1,16 @@
 ---
+- name: Validate effective native switch types before any mutation
+  ansible.builtin.import_tasks: native_boolean_assert.yml
+
+- name: Validate optional AIDE policy inputs before any mutation
+  ansible.builtin.import_tasks: aide_assert.yml
+
+- name: Validate optional AppArmor preservation inputs before any mutation
+  ansible.builtin.import_tasks: apparmor_assert.yml
+
+- name: Validate optional unused filesystem module inputs before any mutation
+  ansible.builtin.import_tasks: filesystem_modules_assert.yml
+
 - name: Validate the Ubuntu 24 CIS execution profile and dependency pins
   ansible.builtin.assert:
     that:
@@ -75,7 +87,19 @@
           and
           (audit_format | default('json')) == 'json'
           and
-          (audit_content | default('git')) == 'git'
+          (
+            (audit_content | default('git')) == 'git'
+            or
+            (
+              (audit_content | default('git')) == 'archive'
+              and
+              (cis_ubuntu24_audit_transport_sha256 | default('')) is match('^[0-9a-f]{64}$')
+              and
+              (audit_conf_source | default('')) is match('^/[^\r\n]+$')
+              and
+              (audit_conf_dest | default('')) is match('^/[^\r\n]+$')
+            )
+          )
         )
       - >-
         cis_ubuntu24_execution_mode != 'remediate'
@@ -90,10 +114,10 @@
       - >-
         cis_ubuntu24_remediation_dependency.repository
         == 'https://github.com/ansible-lockdown/UBUNTU24-CIS'
-      - cis_ubuntu24_remediation_dependency.version == '1.6.0'
+      - cis_ubuntu24_remediation_dependency.version == '1.8.0'
       - >-
         cis_ubuntu24_remediation_dependency.commit
-        == 'c893ca6836fb32b1ea067d4a63c341e39693074b'
+        == '3a2f05b9a8040eb869fd14fdca882aae4f68733b'
       - cis_ubuntu24_remediation_dependency.license == 'MIT'
       - >-
         cis_ubuntu24_audit_dependency.repository
@@ -101,10 +125,10 @@
       - cis_ubuntu24_audit_dependency.benchmark == 'v1.0.0'
       - >-
         cis_ubuntu24_audit_dependency.commit
-        == '87efcc6d409d1a998a7cb809c5ce5a6afedf84c7'
+        == '4eb9eb9e6d3924af7377fc9dd6d3c9f32c63114a'
       - >-
         cis_ubuntu24_audit_dependency.archive_sha256
-        == '9320558d3bf195625399edfd57e6185cf70cce6d5505fa3c9f9924a369af7850'
+        == '5bf5581304fe5639a5e59023393ea972a0e74d668019ff183dc4f8bd59302043'
       - cis_ubuntu24_audit_dependency.license == 'MIT'
     fail_msg: >-
       Run remediation with exactly the inventory-declared native upstream
@@ -179,3 +203,7 @@
     }}
   loop_control:
     label: "{{ item.1.name | default('<missing name>') }}"
+
+- name: Validate the vendor execution path for each admitted audit transport
+  ansible.builtin.import_tasks: audit_execution_path.yml
+  when: cis_ubuntu24_execution_mode == 'audit'

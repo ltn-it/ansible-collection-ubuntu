@@ -15,3 +15,18 @@ automatic_updates_crontab_paths:
   - /bin/crontab
   - /usr/sbin/crontab
   - /sbin/crontab
+# Optional tasks_from=staged_verify; no automatic cache import or update bypass.
+automatic_updates_staged_bundle: ""
+automatic_updates_staged_request: ""
+automatic_updates_staged_action: none
+automatic_updates_staged_tool_directory: /usr/local/libexec/lit-staged-apt
+automatic_updates_staged_expected_machine_id: ""
+automatic_updates_staged_expected_collector_id: ""
+automatic_updates_staged_capture_directory: ""
+automatic_updates_staged_controller_directory: ""
+automatic_updates_staged_capture_sha256: ""
+automatic_updates_staged_acquisition_directory: ""
+automatic_updates_staged_acquisition_inputs_directory: ""
+automatic_updates_staged_delivery_directory: ""
+automatic_updates_staged_receive_directory: ""
+automatic_updates_staged_expected_archive_sha256: ""

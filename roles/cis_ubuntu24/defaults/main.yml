@@ -4,20 +4,48 @@ cis_ubuntu24_execution_mode: remediate
 cis_ubuntu24_audit_log_directory: /var/log/audit
 cis_ubuntu24_network_sysctl_file: /etc/sysctl.d/60-lit-cis-network.conf
 
+# Optional inventory-owned mutable data directories. Empty preserves the
+# upstream integration until a fragment is managed; clearing that fragment
+# uses the guarded rebaseline path. An entry requires both path and reason.
+cis_ubuntu24_aide_exclusions: []
+# A reviewed, one-use input binding for an existing database. Never infer
+# approval merely from database age or a requested policy change.
+cis_ubuntu24_aide_rebaseline: {}
+
+# Accepted, exact package-compatible usernamespace attachment profiles.
+# Nonempty entries require the conflicting upstream L1 rewrite disabled.
+cis_ubuntu24_apparmor_preserved_profiles: []
+# Explicit apparmor_restore.yml entrypoint only; never applied by the CIS wrapper.
+cis_ubuntu24_apparmor_restoration: {}
+
+# Additional reviewed filesystem modules; never unload a module automatically.
+cis_ubuntu24_disabled_filesystem_modules: []
+
 cis_ubuntu24_remediation_dependency:
   repository: https://github.com/ansible-lockdown/UBUNTU24-CIS
-  version: "1.6.0"
-  commit: c893ca6836fb32b1ea067d4a63c341e39693074b
+  version: "1.8.0"
+  commit: 3a2f05b9a8040eb869fd14fdca882aae4f68733b
   license: MIT
 
 cis_ubuntu24_audit_dependency:
   repository: https://github.com/ansible-lockdown/UBUNTU24-CIS-Audit.git
   benchmark: v1.0.0
-  commit: 87efcc6d409d1a998a7cb809c5ce5a6afedf84c7
-  archive_sha256: 9320558d3bf195625399edfd57e6185cf70cce6d5505fa3c9f9924a369af7850
+  commit: 4eb9eb9e6d3924af7377fc9dd6d3c9f32c63114a
+  archive_sha256: 5bf5581304fe5639a5e59023393ea972a0e74d668019ff183dc4f8bd59302043
   license: MIT
 
 # Inventory entries must identify every deliberate control adjustment. The
 # wrapper validates their schema; the independent audit reports them as
 # exceptions instead of treating an omitted check as a pass.
 cis_ubuntu24_exceptions: []
+
+# Auditor runtime is reviewed independently from remediation and benchmark content.
+# An offline file must contain these exact upstream release bytes; no target download.
+cis_ubuntu24_auditor_source: ""
+cis_ubuntu24_auditor_cache_directory: '{{ lookup("ansible.builtin.env", "HOME") }}/.cache/lit-ubuntu/cis-auditor'
+cis_ubuntu24_auditor_dependency:
+  repository: https://github.com/goss-org/goss
+  version: v0.4.8
+  checksums:
+    x86_64: 85d00b7bba5f175bec95de7dfe1f71f8f25204914aad4c6f03c8457868eb6e2f
+    aarch64: bca8c898bfd35b94c51455ece6193c95e2cd7b2b183ac2047b2d76291e73e47d

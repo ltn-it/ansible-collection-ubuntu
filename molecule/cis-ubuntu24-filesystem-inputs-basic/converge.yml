@@ -1,0 +1,9 @@
+---
+- name: Verify inactive default module policy inputs without changing the controller
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Validate the actual empty default interface
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: filesystem_modules_assert.yml

@@ -1,0 +1,6 @@
+---
+minor_changes:
+  - >-
+    cis_ubuntu24 - add opt-in unused filesystem module blocking with live
+    dependency checks, effective non-loading verification and owned-fragment
+    rollback; never unload a module or rebuild boot images automatically.

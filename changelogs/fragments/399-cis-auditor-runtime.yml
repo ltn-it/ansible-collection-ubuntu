@@ -1,0 +1,15 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 independently pins canonical Goss 0.4.8 and architecture checksums,
+    verifies controller-acquired or offline bytes, and uses the vendor copy interface
+    without requiring target Internet access.
+  - >-
+    Validate complete checkout and Git metadata before root Git probes, disable executable Git features
+    and reject conflicting effective auditor bindings.
+  - >-
+    Refuse whitespace, shell metacharacters and relative components in vendor audit execution paths
+    before Git or archive transport activity.
+  - >-
+    Use Git's own read-only configuration parser, reject redirected Git metadata and run admission probes
+    with a fresh environment so legacy filter syntax or inherited Git settings cannot bypass validation.

@@ -1,0 +1,11 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 - require native AIDE section/control admission and Boolean recreation inputs,
+    and reject container overrides that skip initialization.
+  - >-
+    cis_ubuntu24 - verify fixed auditor bytes through a bounded descriptor on a protected controller path
+    before vendor copying.
+  - >-
+    host_firewall - scope recovered coupled rollback bindings to one invocation so subsequent policy inputs
+    and fingerprints remain fresh.

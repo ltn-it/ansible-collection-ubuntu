@@ -1,0 +1,6 @@
+---
+minor_changes:
+  - cis_ubuntu24 - admit audit-only offline transport archives using an independent transport digest and staged
+    root-owned clean checkout at the same pinned commit and origin; retain all existing profile and dependency pins.
+  - cis_ubuntu24 - keep upstream repeated audit extraction root-owned and bind admitted transport variables above
+    vendor variable loading without changing normal Git mode or remediation selection.

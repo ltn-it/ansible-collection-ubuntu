@@ -1,0 +1,19 @@
+---
+- name: Require the effective invocation-scoped vendor bindings before audit execution
+  ansible.builtin.assert:
+    that:
+      - audit_content == cis_ubuntu24_audit_vendor_transport.content
+      - audit_conf_source == cis_ubuntu24_audit_vendor_transport.source
+      - audit_conf_dest == cis_ubuntu24_audit_vendor_transport.destination
+      - audit_conf_dir == cis_ubuntu24_audit_vendor_transport.directory
+      - audit_vars_path == cis_ubuntu24_audit_vendor_transport.variables
+    fail_msg: Vendor overrides must not replace admitted transport, execution or generated-variable paths.
+  tags: always
+
+- name: Run the pinned vendor with parameters scoped to this audit invocation
+  # Keep the import untagged to retain native upstream profile filtering.
+  ansible.builtin.import_role:
+    name: ansible-lockdown.ubuntu24_cis  # noqa syntax-check[specific] -- EE-installed dependency
+  vars:
+    audit_file_git: '{{ cis_ubuntu24_audit_dependency.repository }}'  # noqa: var-naming[no-role-prefix]
+    audit_git_version: '{{ cis_ubuntu24_audit_dependency.commit }}'  # noqa: var-naming[no-role-prefix]

@@ -1,0 +1,7 @@
+---
+- name: Hash canonical command bytes before Ansible can convert JSON into a mapping
+  ansible.builtin.set_fact:
+    host_firewall_preview_readback_sha256: >-
+      {{ (host_firewall_coupled_preview_raw.stdout
+          if host_firewall_container_ssh_guard_managed
+          else host_firewall_preview_canonical.stdout) | hash('sha256') }}

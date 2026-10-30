@@ -1,0 +1,5 @@
+# Managed by lit.ubuntu.cis_ubuntu24; inventory-owned mutable data exclusions.
+{% for exclusion in cis_ubuntu24_aide_exclusions | sort(attribute='path') %}
+# {{ exclusion.reason }}
+!{{ exclusion.path | regex_escape }}(/|$)
+{% endfor %}

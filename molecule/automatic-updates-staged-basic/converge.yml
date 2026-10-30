@@ -1,0 +1,96 @@
+---
+- name: Prove staged entrypoints reject absent authorization before mutation
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Check the explicit coupled cache lifecycle guard
+      block:
+        - name: Invoke coupled caches without an independently admitted target
+          ansible.builtin.include_role:
+            name: lit.ubuntu.automatic_updates
+            tasks_from: staged_cache
+        - name: Refuse unexpected coupled cache admission
+          ansible.builtin.fail:
+            msg: Missing cache authorization was accepted.
+      rescue:
+        - name: Require rejection before coupled helper installation
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Validate explicit coupled cache lifecycle and independent target identity'
+
+    - name: Check the default metadata verification guard
+      block:
+        - name: Invoke staged verification without admitted paths
+          ansible.builtin.include_role:
+            name: lit.ubuntu.automatic_updates
+            tasks_from: staged_verify
+        - name: Refuse an unexpected verification admission
+          ansible.builtin.fail:
+            msg: Missing bundle admission was accepted.
+      rescue:
+        - name: Require rejection at the side-effect-free verification guard
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Validate the staged metadata verification interface'
+
+    - name: Check the explicit transaction authorization guard
+      block:
+        - name: Invoke the transaction without an explicit action
+          ansible.builtin.include_role:
+            name: lit.ubuntu.automatic_updates
+            tasks_from: staged_transaction
+        - name: Refuse an unexpected transaction admission
+          ansible.builtin.fail:
+            msg: Missing transaction authorization was accepted.
+      rescue:
+        - name: Require rejection before helper installation or package locks
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Validate the explicit metadata-only transaction interface'
+
+    - name: Check the target capture authorization guard
+      block:
+        - name: Invoke capture without admitted target identity
+          ansible.builtin.include_role:
+            name: lit.ubuntu.automatic_updates
+            tasks_from: staged_capture
+        - name: Refuse unexpected capture admission
+          ansible.builtin.fail:
+            msg: Missing capture authorization was accepted.
+      rescue:
+        - name: Require rejection before target snapshot creation
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Validate explicit target capture identity and owned output paths'
+
+    - name: Check the collector authorization guard
+      block:
+        - name: Invoke acquisition without admitted collector or capture
+          ansible.builtin.include_role:
+            name: lit.ubuntu.automatic_updates
+            tasks_from: staged_acquire
+        - name: Refuse unexpected collector admission
+          ansible.builtin.fail:
+            msg: Missing collector authorization was accepted.
+      rescue:
+        - name: Require rejection before collector connection or private writes
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Validate independently selected collector and fresh unprivileged paths'
+
+    - name: Check the receiver authorization guard
+      block:
+        - name: Invoke reception without an admitted archive or target
+          ansible.builtin.include_role:
+            name: lit.ubuntu.automatic_updates
+            tasks_from: staged_receive
+        - name: Refuse unexpected receiver admission
+          ansible.builtin.fail:
+            msg: Missing receiver authorization was accepted.
+      rescue:
+        - name: Require rejection before archive transfer or receiver writes
+          ansible.builtin.assert:
+            that:
+              - >-
+                ansible_failed_task.name ==
+                'Validate independent receiver identity archive digest and fresh private destination'

@@ -53,29 +53,18 @@
         {{ 'configured' if host_firewall_authorization_verifier_binary | length > 0 else 'unavailable' }}
       persistent_change: "{{ host_firewall_action == 'confirm' and not ansible_check_mode }}"
 
-- name: Build exact host firewall transaction request
+- name: Describe the explicitly owned coupled policy scope
   ansible.builtin.set_fact:
-    host_firewall_transaction_request: >-
-      {{
-        {
-          'schema': 'lit.host_firewall.transaction-request/v3',
-          'target': host_firewall_expected_inventory_hostname,
-          'action': host_firewall_action,
-          'change_id': host_firewall_change_id,
-          'mode': host_firewall_mode,
-          'candidate_sha256': host_firewall_candidate_content | hash('sha256'),
-          'approved_readback_sha256': host_firewall_approved_readback_sha256,
-          'policy_fingerprint': host_firewall_policy_fingerprint,
-          'egress_policy_sha256': host_firewall_egress_policy_sha256,
-          'egress_status': host_firewall_egress_status,
-          'authorization': host_firewall_authorization_contract
-        }
-        | combine(
-          {'candidate_base64': host_firewall_candidate_content | b64encode}
-          if host_firewall_action == 'apply'
-          else {}
-        )
-      }}
+    host_firewall_plan: >-
+      {{ host_firewall_plan | combine({
+          'schema': 'lit.host_firewall.plan/v4',
+          'owned_tables': [[host_firewall_table_family, host_firewall_table_name],
+                           ['bridge', host_firewall_container_ssh_guard_table_name]],
+          'container_ssh_bindings': host_firewall_container_ssh_bindings}) }}
+  when: host_firewall_container_ssh_guard_managed
+
+- name: Build candidate-bound transaction request
+  ansible.builtin.import_tasks: transaction_request.yml
 
 - name: Report immutable host firewall plan
   ansible.builtin.debug:

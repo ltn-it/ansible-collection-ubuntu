@@ -3,16 +3,59 @@
   ansible.builtin.import_tasks: assert.yml
   tags: always
 
-- name: Normalize the upstream AIDE scheduler integration
-  ansible.builtin.import_tasks: aide_scheduler.yml
+- name: Verify the accepted AppArmor attachment boundary before remediation
+  ansible.builtin.import_tasks: apparmor_guard.yml
+  when: cis_ubuntu24_apparmor_preserved_profiles | length > 0
+  tags:
+    - level1-server
+    - level1-workstation
+    - setup_audit
+
+- name: Block explicitly unused filesystem modules without unloading them
+  ansible.builtin.import_tasks: filesystem_modules.yml
+  when:
+    - cis_ubuntu24_execution_mode == 'remediate'
+    - cis_ubuntu24_disabled_filesystem_modules | length > 0
   tags:
     - level1-server
     - level1-workstation
     - level2-server
     - level2-workstation
 
+- name: Detect an already managed AIDE policy even when requested exclusions are empty
+  ansible.builtin.stat:
+    path: /etc/aide/aide.conf.d/90_lit_mutable_data
+    follow: false
+    get_checksum: false
+  register: cis_ubuntu24_aide_owned_policy
+  when: cis_ubuntu24_execution_mode == 'remediate'
+  tags:
+    - level1-server
+    - level1-workstation
+    - level2-server
+    - level2-workstation
+
+- name: Prepare guarded AIDE exclusions before upstream initialization
+  ansible.builtin.import_tasks: aide_prepare.yml
+  when:
+    - cis_ubuntu24_execution_mode == 'remediate'
+    - cis_ubuntu24_aide_exclusions | length > 0 or cis_ubuntu24_aide_owned_policy.stat.exists | default(false)
+  tags:
+    - level1-server
+    - level1-workstation
+    - level2-server
+    - level2-workstation
+
+- name: Normalize the upstream AIDE scheduler integration
+  ansible.builtin.import_tasks: aide_scheduler.yml
+  when: ubtu24cis_section6 | default(true) is sameas true
+  tags:
+    - level1-server
+    - level1-workstation
+
 - name: Preserve a traversable upstream audit log directory
   ansible.builtin.import_tasks: audit_log_directory.yml
+  when: ubtu24cis_section6 | default(true) is sameas true
   tags:
     - level1-server
     - level1-workstation
@@ -21,18 +64,96 @@
 
 - name: Persist the network kernel controls audited independently
   ansible.builtin.import_tasks: network_sysctl_persistence.yml
+  when: ubtu24cis_section3 | default(true) is sameas true
   tags:
     - level1-server
     - level1-workstation
     - level2-server
     - level2-workstation
 
-- name: Apply ansible-lockdown Ubuntu 24 CIS role
-  # Keep this static import untagged so the upstream tasks retain their native
-  # profile and audit tag filtering. Tags here would propagate to every
-  # imported task and make non-matching upstream controls eligible to run.
-  ansible.builtin.import_role:
-    name: ansible-lockdown.ubuntu24_cis  # noqa syntax-check[specific] -- EE-installed dependency
-  vars:
-    audit_file_git: "{{ cis_ubuntu24_audit_dependency.repository }}"  # noqa: var-naming[no-role-prefix]
-    audit_git_version: "{{ cis_ubuntu24_audit_dependency.commit }}"  # noqa: var-naming[no-role-prefix]
+- name: Prepare the independently pinned auditor on the controller
+  ansible.builtin.import_tasks: auditor.yml
+  when: cis_ubuntu24_execution_mode == 'audit'
+  tags: always
+
+- name: Admit the independently bound offline audit archive before upstream execution
+  ansible.builtin.import_tasks: audit_archive.yml
+  when:
+    - cis_ubuntu24_execution_mode == 'audit'
+    - audit_content | default('git') == 'archive'
+  tags: always
+
+- name: Keep generated audit variables outside the reviewed checkout
+  ansible.builtin.import_tasks: audit_variables.yml
+  when: cis_ubuntu24_execution_mode == 'audit'
+  tags: always
+
+- name: Preserve root ownership across upstream audit extraction
+  module_defaults:
+    ansible.builtin.unarchive:
+      owner: root
+      group: root
+  block:
+    - name: Execute the audit with invocation-scoped admitted vendor parameters
+      ansible.builtin.include_role:
+        name: cis_ubuntu24
+        tasks_from: audit_vendor.yml
+      vars:
+        audit_content: '{{ cis_ubuntu24_audit_vendor_transport.content }}'  # noqa: var-naming[no-role-prefix]
+        audit_conf_source: '{{ cis_ubuntu24_audit_vendor_transport.source }}'  # noqa: var-naming[no-role-prefix]
+        audit_conf_dest: '{{ cis_ubuntu24_audit_vendor_transport.destination }}'  # noqa: var-naming[no-role-prefix]
+        audit_conf_dir: '{{ cis_ubuntu24_audit_vendor_transport.directory }}'  # noqa: var-naming[no-role-prefix]
+        audit_vars_path: '{{ cis_ubuntu24_audit_vendor_transport.variables }}'  # noqa: var-naming[no-role-prefix]
+      when: cis_ubuntu24_execution_mode == 'audit'
+      tags: always
+
+    - name: Apply native remediation with the admitted AIDE age decision
+      ansible.builtin.include_role:
+        name: cis_ubuntu24
+        tasks_from: remediate_vendor.yml
+      vars:
+        # Existing pinned vendor register name; scoped to this invocation.
+        discovered_aide_db_age: '{{ _cis_ubuntu24_aide_age }}'  # noqa: var-naming[no-role-prefix]
+        _cis_ubuntu24_aide_age: >-
+          {{ {'files': cis_ubuntu24_aide_aged.files | default([])} }}
+        discovered_aide_db_file: '{{ _cis_ubuntu24_aide_database }}'  # noqa: var-naming[no-role-prefix]
+        _cis_ubuntu24_aide_database: '{{ cis_ubuntu24_aide_database }}'
+      when:
+        - cis_ubuntu24_execution_mode == 'remediate'
+        - cis_ubuntu24_aide_exclusions | length > 0 or cis_ubuntu24_aide_owned_policy.stat.exists | default(false)
+      tags: always
+
+    - name: Apply ansible-lockdown Ubuntu 24 CIS role
+      # Keep the import untagged to retain native upstream profile filtering.
+      ansible.builtin.import_role:
+        name: ansible-lockdown.ubuntu24_cis  # noqa syntax-check[specific] -- EE-installed dependency
+      vars:
+        audit_file_git: "{{ cis_ubuntu24_audit_dependency.repository }}"  # noqa: var-naming[no-role-prefix]
+        audit_git_version: "{{ cis_ubuntu24_audit_dependency.commit }}"  # noqa: var-naming[no-role-prefix]
+      when:
+        - cis_ubuntu24_execution_mode != 'audit'
+        - >-
+          not (cis_ubuntu24_execution_mode == 'remediate' and
+               (cis_ubuntu24_aide_exclusions | length > 0 or
+                cis_ubuntu24_aide_owned_policy.stat.exists | default(false)))
+
+- name: Verify effective unused filesystem protection after upstream execution
+  ansible.builtin.import_tasks: filesystem_modules_verify.yml
+  when:
+    - cis_ubuntu24_execution_mode == 'remediate'
+    - cis_ubuntu24_disabled_filesystem_modules | length > 0
+  tags:
+    - level1-server
+    - level1-workstation
+    - level2-server
+    - level2-workstation
+
+- name: Verify the accepted AppArmor attachment boundary after upstream execution
+  # Upstream audit_only ends this host. Audit callers must run this existing
+  # task entrypoint in a subsequent play before accepting their evidence.
+  ansible.builtin.import_tasks: apparmor_guard.yml
+  when: cis_ubuntu24_apparmor_preserved_profiles | length > 0
+  tags:
+    - level1-server
+    - level1-workstation
+    - setup_audit

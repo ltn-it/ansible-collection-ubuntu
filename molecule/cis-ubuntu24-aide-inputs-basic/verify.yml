@@ -1,0 +1,127 @@
+---
+- name: Verify AIDE input and baseline admission boundaries
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cis_ubuntu24_test_fragment: |
+      # Managed by lit.ubuntu.cis_ubuntu24; inventory-owned mutable data exclusions.
+      # Mutable overlay data.
+      !/var/lib/example/overlay(/|$)
+    cis_ubuntu24_test_approval:
+      database_sha256: "{{ 'b' * 64 }}"
+      exclusions_sha256: "{{ cis_ubuntu24_test_fragment | hash('sha256') }}"
+      approval_reference: https://example.test/reviewed-change
+    cis_ubuntu24_test_empty_fragment: |
+      # Managed by lit.ubuntu.cis_ubuntu24; inventory-owned mutable data exclusions.
+  tasks:
+    - name: Reject Level 2-only managed policy before target or package activity
+      ansible.builtin.include_tasks: tasks/reject_profile.yml
+      loop: [level2-server, level2-workstation]
+      loop_control:
+        loop_var: cis_ubuntu24_test_profile
+
+    - name: Reject wrong OS, version, init system and missing target facts
+      ansible.builtin.include_tasks: tasks/reject_target.yml
+      loop:
+        - {distribution: Debian, distribution_major_version: '24', service_mgr: systemd}
+        - {distribution: Ubuntu, distribution_major_version: '22', service_mgr: systemd}
+        - {distribution: Ubuntu, distribution_major_version: '24', service_mgr: sysvinit}
+        - {distribution: Ubuntu, distribution_major_version: '24', service_mgr: systemd, virtualization_type: lxc}
+        - {distribution: Ubuntu, distribution_major_version: '24', service_mgr: systemd, virtualization_type: docker}
+        - {}
+      loop_control:
+        loop_var: cis_ubuntu24_test_target
+
+    - name: Reject invalid paths, schema and approval values
+      ansible.builtin.include_tasks: tasks/reject_input.yml
+      loop:
+        - name: mapping instead of exclusion list
+          exclusions: {path: /var/lib/example}
+        - name: string instead of exclusion list
+          exclusions: /var/lib/example
+        - name: broad tree
+          exclusions: [{path: /var/lib, reason: Invalid broad exclusion.}]
+        - name: critical system tree
+          exclusions: [{path: /etc/ssh/private, reason: Invalid system exclusion.}]
+        - name: traversal
+          exclusions: [{path: /var/lib/app/../private, reason: Invalid traversal.}]
+        - name: regexp injection
+          exclusions: [{path: /var/lib/app/.*, reason: Invalid expression.}]
+        - name: trailing slash
+          exclusions: [{path: /var/lib/app/data/, reason: Invalid trailing slash.}]
+        - name: empty reason
+          exclusions: [{path: /var/lib/app/data, reason: "  "}]
+        - name: multiline reason
+          exclusions: [{path: /var/lib/app/data, reason: "invalid\nconfiguration"}]
+        - name: unknown field
+          exclusions: [{path: /var/lib/app/data, reason: Invalid schema., extra: true}]
+        - name: duplicate paths
+          exclusions:
+            - {path: /var/lib/app/data, reason: First.}
+            - {path: /var/lib/app/data, reason: Duplicate.}
+        - name: malformed rebaseline hash
+          rebaseline: {database_sha256: wrong, exclusions_sha256: wrong, approval_reference: reviewed}
+        - name: missing approval reference
+          rebaseline: {database_sha256: "{{ 'b' * 64 }}", exclusions_sha256: "{{ 'c' * 64 }}"}
+      loop_control:
+        loop_var: cis_ubuntu24_test_case
+        label: "{{ cis_ubuntu24_test_case.name }}"
+
+    - name: Verify fresh, aged, changed-policy, foreign-file and replay admission
+      ansible.builtin.include_tasks: tasks/admission_case.yml
+      loop:
+        - {name: unchanged fresh baseline, allowed: true}
+        - {name: disabled native section, section6: false, allowed: false}
+        - {name: string false recreate input, recreate: 'false', allowed: false}
+        - {name: string no recreate input, recreate: 'no', allowed: false}
+        - {name: aged baseline without approval, aged: true, allowed: false}
+        - {name: explicit recreation without approval, recreate: true, allowed: false}
+        - {name: changed policy without approval, previous_sha: "{{ 'c' * 64 }}", allowed: false}
+        - {name: clearing exclusions without approval, exclusions: [], allowed: false}
+        - name: reviewed clearing with explicit recreation
+          exclusions: []
+          approval: >-
+            {{ cis_ubuntu24_test_approval
+               | combine({'exclusions_sha256': cis_ubuntu24_test_empty_fragment | hash('sha256')}) }}
+          recreate: true
+          allowed: true
+        - name: already cleared fresh baseline
+          exclusions: []
+          previous_sha: "{{ cis_ubuntu24_test_empty_fragment | hash('sha256') }}"
+          allowed: true
+        - name: reviewed aged baseline
+          aged: true
+          approval: "{{ cis_ubuntu24_test_approval }}"
+          allowed: true
+        - name: wrong database pin
+          aged: true
+          database_sha: "{{ 'd' * 64 }}"
+          approval: "{{ cis_ubuntu24_test_approval }}"
+          allowed: false
+        - name: wrong exclusion pin
+          aged: true
+          approval: "{{ cis_ubuntu24_test_approval | combine({'exclusions_sha256': 'c' * 64}) }}"
+          allowed: false
+        - name: reviewed policy change without recreate action
+          previous_sha: "{{ 'c' * 64 }}"
+          approval: "{{ cis_ubuntu24_test_approval }}"
+          allowed: false
+        - name: reviewed policy change with explicit recreation
+          previous_sha: "{{ 'c' * 64 }}"
+          approval: "{{ cis_ubuntu24_test_approval }}"
+          recreate: true
+          allowed: true
+        - {name: foreign file owner, uid: 1000, allowed: false}
+        - {name: linked database, database_link: true, allowed: false}
+        - {name: foreign database owner, database_uid: 1000, allowed: false}
+        - {name: foreign database group, database_gid: 1000, allowed: false}
+        - {name: writable database, database_mode: '0666', allowed: false}
+        - {name: executable database, database_mode: '0755', allowed: false}
+        - name: stale approval after database changed
+          database_sha: "{{ 'e' * 64 }}"
+          approval: "{{ cis_ubuntu24_test_approval }}"
+          recreate: true
+          allowed: false
+      loop_control:
+        loop_var: cis_ubuntu24_test_case
+        label: "{{ cis_ubuntu24_test_case.name }}"

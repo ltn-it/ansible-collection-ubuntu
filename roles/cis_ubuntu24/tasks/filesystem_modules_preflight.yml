@@ -1,0 +1,151 @@
+---
+- name: Require gathered native Ubuntu 24 systemd facts
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution | default('') == 'Ubuntu'
+      - ansible_facts.distribution_major_version | default('') == '24'
+      - ansible_facts.service_mgr | default('') == 'systemd'
+      - ansible_facts.kernel | default('') | length > 0
+
+- name: Inspect requested module presence in the running kernel
+  ansible.builtin.stat:
+    path: "/sys/module/{{ item.name }}"
+    get_checksum: false
+  loop: "{{ cis_ubuntu24_disabled_filesystem_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: cis_ubuntu24_filesystem_loaded
+
+- name: Refuse to block a loaded or built-in module
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists
+    fail_msg: A requested filesystem module is present in the running kernel; no automatic unload is allowed.
+  loop: "{{ cis_ubuntu24_filesystem_loaded.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Read active and declared filesystem types
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [/usr/bin/findmnt, --noheadings, --raw, --output, FSTYPE]
+    - [/usr/bin/findmnt, --fstab, --noheadings, --raw, --output, FSTYPE]
+    - [/usr/bin/systemctl, show, --all, --type=mount, --property=Type, --value]
+  register: cis_ubuntu24_filesystem_mounts
+  changed_when: false
+  failed_when: >-
+    cis_ubuntu24_filesystem_mounts.rc != 0
+    and not (item[1] == '--fstab' and cis_ubuntu24_filesystem_mounts.rc == 1)
+  check_mode: false
+
+- name: List declared systemd mount units including inactive files
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, list-unit-files, --type=mount, --no-legend, --no-pager]
+  register: cis_ubuntu24_filesystem_declared_mounts
+  changed_when: false
+  check_mode: false
+
+- name: Read declared systemd filesystem types without activating the units
+  when: cis_ubuntu24_filesystem_declared_mounts.stdout_lines | length > 0
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/bin/systemctl', 'show', '--property=Type', '--value', '--'] +
+         (cis_ubuntu24_filesystem_declared_mounts.stdout_lines | map('split') | map('first') | list) }}
+  register: cis_ubuntu24_filesystem_declared_types
+  changed_when: false
+  check_mode: false
+
+- name: Read real filesystem aliases from the selected module metadata
+  ansible.builtin.command:
+    argv: [/usr/sbin/modinfo, --field=alias, "{{ item.name }}"]
+  loop: "{{ cis_ubuntu24_disabled_filesystem_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: cis_ubuntu24_filesystem_aliases
+  changed_when: false
+  check_mode: false
+
+- name: Require an actual filesystem alias before declaring a module unused
+  ansible.builtin.assert:
+    that:
+      - item.stdout_lines | select('match', '^fs-[a-zA-Z0-9_.-]+$') | list | length > 0
+    fail_msg: The selected module does not declare a filesystem alias; directory names are not sufficient evidence.
+  loop: "{{ cis_ubuntu24_filesystem_aliases.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Refuse a module used by an active or configured filesystem alias
+  ansible.builtin.assert:
+    that:
+      - >-
+        ((cis_ubuntu24_filesystem_mounts.results | map(attribute='stdout_lines') | flatten) +
+         (cis_ubuntu24_filesystem_declared_types.stdout_lines | default([])))
+        | intersect(item.stdout_lines | select('match', '^fs-') | map('regex_replace', '^fs-', '') | list)
+        | length == 0
+    fail_msg: A requested filesystem module is required by an active or declared mount.
+  loop: "{{ cis_ubuntu24_filesystem_aliases.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Inspect automatic and module-specific filesystem services
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - show
+      - "{{ item }}"
+      - --property=LoadState,ActiveState,UnitFileState
+  loop: >-
+    {{
+      (['autofs.service'] +
+       (cis_ubuntu24_filesystem_module_services | dict2items
+        | selectattr('key', 'in', cis_ubuntu24_disabled_filesystem_modules | map(attribute='name') | list)
+        | map(attribute='value') | flatten)) | unique
+    }}
+  register: cis_ubuntu24_filesystem_services
+  changed_when: false
+  failed_when: >-
+    cis_ubuntu24_filesystem_services.rc not in [0, 1]
+    or 'LoadState=' not in cis_ubuntu24_filesystem_services.stdout
+    or 'ActiveState=' not in cis_ubuntu24_filesystem_services.stdout
+  check_mode: false
+
+- name: Refuse active or potentially activated filesystem services
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.stdout is search('(?m)^LoadState=not-found$')
+        or
+        (
+          item.stdout is search('(?m)^ActiveState=inactive$')
+          and item.stdout is search('(?m)^UnitFileState=(disabled|masked|masked-runtime)$')
+        )
+    fail_msg: >-
+      A filesystem service is active or configured for activation;
+      review its dependencies before blocking modules.
+  loop: "{{ cis_ubuntu24_filesystem_services.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Resolve each requested module from the running kernel filesystem tree
+  ansible.builtin.command:
+    argv: [/usr/sbin/modinfo, --field=filename, "{{ item.name }}"]
+  loop: "{{ cis_ubuntu24_disabled_filesystem_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: cis_ubuntu24_filesystem_filenames
+  changed_when: false
+  check_mode: false
+
+- name: Refuse built-in, redirected or non-filesystem module selections
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.stdout is match(
+          '^/(usr/)?lib/modules/' ~ (ansible_facts.kernel | regex_escape) ~ '/kernel/fs/'
+        )
+      - (item.stdout | basename) is match('^' ~ item.item.name ~ '[.]ko([.](xz|gz|zst))?$')
+    fail_msg: Requested modules must resolve to their own filesystem module in the running kernel tree.
+  loop: "{{ cis_ubuntu24_filesystem_filenames.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

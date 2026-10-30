@@ -1,0 +1,71 @@
+---
+- name: Inspect the private audit variable directory without following links
+  ansible.builtin.stat:
+    path: /var/tmp/lit-cis-audit-vars
+    follow: false
+  register: cis_ubuntu24_audit_variables_directory
+
+- name: Reject foreign or redirected audit variable storage
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cis_ubuntu24_audit_variables_directory.stat.exists
+        or (
+          cis_ubuntu24_audit_variables_directory.stat.isdir | default(false)
+          and not (cis_ubuntu24_audit_variables_directory.stat.islnk | default(false))
+          and cis_ubuntu24_audit_variables_directory.stat.uid == 0
+          and cis_ubuntu24_audit_variables_directory.stat.gid == 0
+          and cis_ubuntu24_audit_variables_directory.stat.mode == '0700'
+        )
+    fail_msg: Generated audit variables require a private root-owned directory outside the source checkout.
+
+- name: Prepare the private root-owned audit variable directory
+  ansible.builtin.file:
+    path: /var/tmp/lit-cis-audit-vars
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Inspect the host-bound audit variable file without following links
+  ansible.builtin.stat:
+    path: '/var/tmp/lit-cis-audit-vars/{{ inventory_hostname | hash("sha256") }}.yml'
+    follow: false
+  register: cis_ubuntu24_audit_variables_file
+
+- name: Reject redirected or unprotected existing audit variable files
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cis_ubuntu24_audit_variables_file.stat.exists
+        or (
+          cis_ubuntu24_audit_variables_file.stat.isreg | default(false)
+          and not (cis_ubuntu24_audit_variables_file.stat.islnk | default(false))
+          and cis_ubuntu24_audit_variables_file.stat.nlink == 1
+          and cis_ubuntu24_audit_variables_file.stat.uid == 0
+          and cis_ubuntu24_audit_variables_file.stat.gid == 0
+          and cis_ubuntu24_audit_variables_file.stat.mode == '0600'
+        )
+    fail_msg: Existing generated audit variables must be a private root-owned regular file.
+
+- name: Freeze this invocation's admitted vendor transport and external variable path
+  ansible.builtin.set_fact:
+    cis_ubuntu24_audit_vendor_transport:
+      content: "{{ 'existing' if audit_content | default('git') == 'archive' else 'git' }}"
+      source: "{{ audit_conf_source | default('') }}"
+      destination: "{{ audit_conf_dest | default('/opt') }}"
+      directory: "{{ audit_conf_dest | default('/opt') }}/UBUNTU24-CIS-Audit"
+      variables: "/var/tmp/lit-cis-audit-vars/{{ inventory_hostname | hash('sha256') }}.yml"
+
+- name: Require private bindings to match independently derived admitted inputs
+  ansible.builtin.assert:
+    that:
+      - >-
+        cis_ubuntu24_audit_vendor_transport == {
+          'content': ('existing' if audit_content | default('git') == 'archive' else 'git'),
+          'source': audit_conf_source | default(''),
+          'destination': audit_conf_dest | default('/opt'),
+          'directory': (audit_conf_dest | default('/opt')) ~ '/UBUNTU24-CIS-Audit',
+          'variables': '/var/tmp/lit-cis-audit-vars/' ~ (inventory_hostname | hash('sha256')) ~ '.yml'
+        }
+    fail_msg: Private audit discovery overrides must not replace independently admitted vendor bindings.

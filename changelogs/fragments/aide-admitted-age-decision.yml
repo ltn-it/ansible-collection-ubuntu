@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 - bind managed AIDE initialization to the admitted age decision so a later threshold crossing
+    cannot authorize an unapproved database replacement.

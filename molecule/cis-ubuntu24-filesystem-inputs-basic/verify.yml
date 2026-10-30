@@ -1,0 +1,46 @@
+---
+- name: Verify filesystem module input boundaries only
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Accept normalized module names pending native metadata validation
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: filesystem_modules_assert.yml
+      vars:
+        cis_ubuntu24_disabled_filesystem_modules:
+          - {name: ceph, reason: Synthetic unused filesystem.}
+          - {name: cifs, reason: Synthetic unused filesystem.}
+          - {name: exfat, reason: Synthetic unused filesystem.}
+          - {name: gfs2, reason: Synthetic unused filesystem.}
+          - {name: nfs, reason: Synthetic unused filesystem.}
+          - {name: nfsd, reason: Synthetic unused filesystem.}
+          - {name: kafs, reason: Synthetic module whose filesystem alias differs.}
+          - {name: 9p, reason: Synthetic normalized module with numeric prefix.}
+
+    - name: Reject invalid or dangerous policy inputs
+      ansible.builtin.include_tasks: tasks/invalid-case.yml
+      loop:
+        - {name: null-list, policy: null}
+        - {name: scalar-list, policy: nfs}
+        - {name: mapping-list, policy: {name: nfs, reason: fixture}}
+        - {name: scalar-entry, policy: [nfs]}
+        - name: boot-filesystem
+          policy: [{name: ext4, reason: forbidden}]
+        - name: container-overlay
+          policy: [{name: overlay, reason: forbidden}]
+        - name: container-fuse
+          policy: [{name: fuse, reason: forbidden}]
+        - name: path-traversal
+          policy: [{name: '../nfs', reason: forbidden}]
+        - name: unknown-field
+          policy: [{name: nfs, reason: fixture, extra: forbidden}]
+        - name: empty-reason
+          policy: [{name: nfs, reason: ''}]
+        - name: newline-injection
+          policy: [{name: nfs, reason: "bad\ninstall ext4 /bin/false"}]
+        - name: duplicates
+          policy: [{name: nfs, reason: first}, {name: nfs, reason: second}]
+      loop_control:
+        loop_var: module_case
+        label: "{{ module_case.name }}"

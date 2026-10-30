@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter
 import contextlib
 import contextvars
 import datetime as dt
@@ -14,6 +15,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -455,6 +457,102 @@ class NftTableState:
     canonical: bytes
 
 
+def numeric_bridge_document(raw: bytes) -> tuple[bytes, dict[str, int], Counter[tuple[str, int]]]:
+    """Bind explicit scalar interface-index matches before a peer disappears.
+
+    nft 1.0.9 still renders live iif/oif indices as names with --numeric.
+    The owned guard supports scalar equality only; other index expressions
+    fail before mutation rather than producing an incomplete rollback.
+    """
+    aliases: dict[str, int] = {}
+    matches: Counter[tuple[str, int]] = Counter()
+    selectors = {"iif", "oif", "sdif"}
+
+    def visit(value: Any) -> Any:
+        if isinstance(value, list):
+            return [visit(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        match = value.get("match")
+        if isinstance(match, dict):
+            left = match.get("left")
+            meta = left.get("meta") if isinstance(left, dict) else None
+            if isinstance(meta, dict) and meta.get("key") in selectors:
+                if (set(value) != {"match"} or set(match) != {"op", "left", "right"}
+                        or set(left) != {"meta"} or set(meta) != {"key"} or match["op"] != "=="):
+                    raise TransactionError("owned bridge interface indices require scalar equality")
+                index = match["right"]
+                if isinstance(index, str):
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}", index):
+                        raise TransactionError("invalid symbolic bridge interface index")
+                    if index not in aliases:
+                        if re.fullmatch(r"[0-9]+", index):
+                            # nft JSON renders a vanished index as decimal TEXT.
+                            # A real device with that numeric name must not
+                            # silently redirect an old index to another device.
+                            number = int(index)
+                            if str(number) != index:
+                                raise TransactionError("noncanonical numeric bridge interface index")
+                            try:
+                                named = socket.if_nametoindex(index)
+                            except OSError:
+                                named = number
+                            if named != number:
+                                raise TransactionError("ambiguous numeric bridge interface name")
+                            aliases[index] = number
+                        else:
+                            try:
+                                aliases[index] = socket.if_nametoindex(index)
+                            except OSError as exc:
+                                raise TransactionError("bridge interface disappeared during numeric snapshot") from exc
+                    index = aliases[index]
+                if type(index) is not int or not 0 < index < 2**31:
+                    raise TransactionError("owned bridge interface index must be a positive scalar")
+                matches[(meta["key"], index)] += 1
+                return {"match": {**match, "right": index}}
+        meta = value.get("meta")
+        if isinstance(meta, dict) and meta.get("key") in selectors:
+            raise TransactionError("unsupported owned bridge interface-index expression")
+        return {key: visit(item) for key, item in value.items()}
+
+    return canonical_json(visit(parse_json(raw, label="bridge numeric snapshot"))), aliases, matches
+
+
+def numeric_bridge_text(raw: bytes, aliases: dict[str, int], expected: Counter[tuple[str, int]]) -> bytes:
+    """Replace only index operands, preserving names, comments and other bytes."""
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise TransactionError("owned bridge snapshot is not UTF-8") from exc
+    tokens = list(re.finditer(r'"(?:[^"\\]|\\.)*"|\#[^\n]*|[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[^\s]', text))
+    matches: Counter[tuple[str, int]] = Counter()
+    replacements: list[tuple[int, int, str]] = []
+    for position, token in enumerate(tokens):
+        key = token.group()
+        if key not in {"iif", "oif", "sdif"}:
+            continue
+        if position + 1 == len(tokens):
+            raise TransactionError("incomplete bridge text interface-index match")
+        operand = tokens[position + 1]
+        value = operand.group()
+        if value.startswith('"'):
+            name = parse_json(value.encode(), label="bridge interface name")
+            if not isinstance(name, str) or name not in aliases:
+                raise TransactionError("bridge text/JSON interface identities differ")
+            index = aliases[name]
+            replacements.append((operand.start(), operand.end(), str(index)))
+        elif re.fullmatch(r"[0-9]+", value):
+            index = int(value)
+        else:
+            raise TransactionError("unsupported bridge text interface-index expression")
+        matches[(key, index)] += 1
+    if matches != expected:
+        raise TransactionError("bridge text/JSON interface-index matches differ")
+    for start, end, replacement in reversed(replacements):
+        text = text[:start] + replacement + text[end:]
+    return text.encode("utf-8")
+
+
 def read_nft_table_state(nft_binary: str, family: str, table: str) -> NftTableState:
     inventory_argv = [nft_binary, "--json", "list", "tables"]
     first_inventory = require_command(run_command(inventory_argv), label="nftables table inventory")
@@ -465,19 +563,28 @@ def read_nft_table_state(nft_binary: str, family: str, table: str) -> NftTableSt
             raise TransactionError("configured table appeared during absence classification")
         return NftTableState(False, b"", b"")
 
-    json_argv = [nft_binary, "--json", "list", "table", family, table]
-    text_argv = [nft_binary, "list", "table", family, table]
+    # --numeric alone does not suppress interface names on supported nft.
+    # Resolve explicit index operands in this actual network namespace and
+    # cross-check both JSON observations and the retained restore text.
+    numeric = ["--numeric"] if family == "bridge" else []
+    json_argv = [nft_binary, *numeric, "--json", "list", "table", family, table]
+    text_argv = [nft_binary, *numeric, "list", "table", family, table]
     first_json = require_command(run_command(json_argv), label="structured configured-table readback")
+    first_raw = first_json.stdout
+    if family == "bridge":
+        first_raw, aliases, index_matches = numeric_bridge_document(first_raw)
     text = require_command(run_command(text_argv), label="text configured-table snapshot")
+    restore_text = numeric_bridge_text(text.stdout, aliases, index_matches) if family == "bridge" else text.stdout
     second_json = require_command(run_command(json_argv), label="second structured configured-table readback")
-    first_canonical = canonicalize_nft_document(first_json.stdout, family, table)
-    second_canonical = canonicalize_nft_document(second_json.stdout, family, table)
+    second_raw = numeric_bridge_document(second_json.stdout)[0] if family == "bridge" else second_json.stdout
+    first_canonical = canonicalize_nft_document(first_raw, family, table)
+    second_canonical = canonicalize_nft_document(second_raw, family, table)
     if first_canonical != second_canonical:
         raise TransactionError("configured table changed while its snapshot was captured")
     second_inventory = require_command(run_command(inventory_argv), label="final nftables table inventory")
     if not parse_table_inventory(second_inventory.stdout, family, table):
         raise TransactionError("configured table disappeared while its snapshot was captured")
-    return NftTableState(True, text.stdout, first_canonical)
+    return NftTableState(True, restore_text, first_canonical)
 
 
 def path_components(path: Path) -> list[Path]:
@@ -552,6 +659,14 @@ class RuntimeConfig:
     nft_binary: str
     systemctl_binary: str
     verifier_binary: str
+    bridge_table_name: str = ""
+
+    def owned_tables(self) -> tuple[tuple[str, str], ...]:
+        primary = ((self.table_family, self.table_name),)
+        return primary + (("bridge", self.bridge_table_name),) if self.bridge_table_name else primary
+
+    def transaction_schema(self) -> str:
+        return "lit.host_firewall.transaction/v4" if self.bridge_table_name else "lit.host_firewall.transaction/v3"
 
     def configured_paths(self) -> list[Path]:
         paths = [
@@ -602,6 +717,10 @@ class RuntimeConfig:
             raise TransactionError("active pointer and lock must be direct children of the state directory")
         if self.table_family != "inet" or not re.fullmatch(r"[a-z][a-z0-9_]{2,31}", self.table_name):
             raise TransactionError("configured nftables family or table name is invalid")
+        if not isinstance(self.bridge_table_name, str) or (
+            self.bridge_table_name and not re.fullmatch(r"[a-z][a-z0-9_]{2,31}", self.bridge_table_name)
+        ):
+            raise TransactionError("configured bridge guard table name is invalid")
         require_sha256(self.expected_egress_policy_sha256, label="expected egress policy digest")
         if self.expected_egress_status not in {"draft", "approved"}:
             raise TransactionError("expected egress status must be draft or approved")
@@ -617,6 +736,8 @@ class RuntimeConfig:
             raise TransactionError("lock wait timeout must remain strictly below the watchdog timeout")
 
     def rollback_budget_seconds(self) -> int:
+        if self.bridge_table_name:
+            return max(self.command_timeout_seconds + 5, min(120, self.watchdog_timeout_seconds // 2))
         return max(self.command_timeout_seconds + 5, min(60, self.watchdog_timeout_seconds // 3))
 
     def transaction_budget_seconds(self, action: str) -> int:
@@ -1079,9 +1200,12 @@ def validate_metadata_and_assets(
     metadata_raw = read_secure_bytes(paths["metadata"])
     if sha256_bytes(metadata_raw) != active["metadata_sha256"]:
         raise TransactionError("active metadata digest has changed")
-    metadata = require_exact_mapping(parse_json(metadata_raw, label="transaction metadata"), METADATA_KEYS, label="transaction metadata")
-    if metadata["schema"] != "lit.host_firewall.transaction/v3":
+    metadata_keys = METADATA_KEYS | ({"owned_tables"} if config.bridge_table_name else set())
+    metadata = require_exact_mapping(parse_json(metadata_raw, label="transaction metadata"), metadata_keys, label="transaction metadata")
+    if metadata["schema"] != config.transaction_schema():
         raise TransactionError("transaction metadata schema is invalid")
+    if config.bridge_table_name and metadata["owned_tables"] != [list(identity) for identity in config.owned_tables()]:
+        raise TransactionError("transaction metadata owned-table scope differs from the configured policy")
     if metadata["action"] != "apply" or metadata["mode"] not in {"bootstrap", "hardened"}:
         raise TransactionError("transaction metadata action or mode is invalid")
     if metadata["egress_status"] not in {"draft", "approved"}:
@@ -1268,6 +1392,54 @@ def create_runtime_backup(state: NftTableState, family: str, table: str) -> byte
     return prefix + state.text.rstrip(b"\n") + b"\n"
 
 
+@dataclass(frozen=True)
+class NftPolicyState:
+    identities: tuple[tuple[str, str], ...]
+    tables: tuple[NftTableState, ...]
+
+    def __post_init__(self) -> None:
+        if not self.identities or len(self.identities) != len(self.tables) or len(set(self.identities)) != len(self.identities):
+            raise TransactionError("owned-table snapshot identities are empty, duplicated or incomplete")
+
+    @property
+    def present(self) -> bool:
+        return any(table.present for table in self.tables)
+
+    @property
+    def complete(self) -> bool:
+        return all(table.present for table in self.tables)
+
+    @property
+    def canonical(self) -> bytes:
+        # Preserve the exact existing single-table authorization representation.
+        if len(self.tables) == 1:
+            return self.tables[0].canonical
+        if not self.present:
+            return b""
+        return canonical_json({
+            "schema": "lit.host_firewall.owned-tables/v1",
+            "tables": [{"family": family, "name": name, "present": state.present,
+                        "policy": parse_json(state.canonical, label="owned-table policy") if state.present else None}
+                       for (family, name), state in zip(self.identities, self.tables)],
+        })
+
+    @property
+    def backup(self) -> bytes:
+        return b"".join(create_runtime_backup(state, family, name)
+                        for (family, name), state in zip(self.identities, self.tables))
+
+
+def read_nft_policy_state(config: RuntimeConfig) -> NftPolicyState:
+    identities = config.owned_tables()
+    states = tuple(read_nft_table_state(config.nft_binary, family, name) for family, name in identities)
+    if config.bridge_table_name:
+        repeated = tuple(read_nft_table_state(config.nft_binary, family, name) for family, name in identities)
+        if [(state.present, state.canonical) for state in states] != [
+                (state.present, state.canonical) for state in repeated]:
+            raise TransactionError("owned-table policy changed during the coupled snapshot")
+    return NftPolicyState(identities, states)
+
+
 def snapshot_persistent(config: RuntimeConfig) -> tuple[bytes, bytes]:
     if not os.path.lexists(config.persistent_include):
         raise TransactionError("a valid preprovisioned persistence include is required for rollback")
@@ -1287,14 +1459,14 @@ def apply_transaction(config: RuntimeConfig, request: dict[str, Any]) -> dict[st
             run_command([config.nft_binary, "--check", "--file", "-"], input_bytes=candidate),
             label="candidate nftables check",
         )
-        runtime_state = read_nft_table_state(config.nft_binary, config.table_family, config.table_name)
+        runtime_state = read_nft_policy_state(config)
         persistent_backup, persistent_state = snapshot_persistent(config)
 
         transaction_id = uuid.uuid4().hex
         transaction_directory = config.transactions_directory / transaction_id
         ensure_secure_directory(transaction_directory)
         paths = transaction_paths(transaction_directory)
-        runtime_backup = create_runtime_backup(runtime_state, config.table_family, config.table_name)
+        runtime_backup = runtime_state.backup
         runtime_marker = b"present\n" if runtime_state.present else b"absent\n"
         runtime_canonical = runtime_state.canonical
         for key, value in (
@@ -1310,7 +1482,7 @@ def apply_transaction(config: RuntimeConfig, request: dict[str, Any]) -> dict[st
             write_exclusive(paths[key], value)
 
         metadata = {
-            "schema": "lit.host_firewall.transaction/v3",
+            "schema": config.transaction_schema(),
             "transaction_id": transaction_id,
             "target": request["target"],
             "action": "apply",
@@ -1344,6 +1516,8 @@ def apply_transaction(config: RuntimeConfig, request: dict[str, Any]) -> dict[st
             "verifier_sha256": sha256_bytes(read_secure_bytes(Path(config.verifier_binary))),
             "created_at": format_utc(utc_now()),
         }
+        if config.bridge_table_name:
+            metadata["owned_tables"] = [list(identity) for identity in config.owned_tables()]
         metadata_raw = canonical_json(metadata)
         write_exclusive(paths["metadata"], metadata_raw)
         consume_claim(config, authorization, authorization_payload, verification_payload, transaction_id)
@@ -1355,8 +1529,8 @@ def apply_transaction(config: RuntimeConfig, request: dict[str, Any]) -> dict[st
                 run_command([config.nft_binary, "--file", "-"], input_bytes=candidate),
                 label="candidate nftables apply",
             )
-            applied = read_nft_table_state(config.nft_binary, config.table_family, config.table_name)
-            if not applied.present or sha256_bytes(applied.canonical) != request["approved_readback_sha256"]:
+            applied = read_nft_policy_state(config)
+            if not applied.complete or sha256_bytes(applied.canonical) != request["approved_readback_sha256"]:
                 raise TransactionError("applied structured readback differs from the independently approved digest")
         except Exception:
             with bounded_command_deadline(
@@ -1461,8 +1635,8 @@ def confirm_transaction(config: RuntimeConfig) -> dict[str, Any]:
             raise TransactionError("trusted confirmation verification receipt changed after staging")
         if metadata["egress_status"] != "approved":
             raise TransactionError("confirmation requires an approved egress policy")
-        current = read_nft_table_state(config.nft_binary, config.table_family, config.table_name)
-        if not current.present or sha256_bytes(current.canonical) != metadata["approved_readback_sha256"]:
+        current = read_nft_policy_state(config)
+        if not current.complete or sha256_bytes(current.canonical) != metadata["approved_readback_sha256"]:
             raise TransactionError("current structured readback differs from approved transaction metadata")
 
         # Hold the exact bytes validated above so no second path read can introduce a TOCTOU window.
@@ -1479,8 +1653,8 @@ def confirm_transaction(config: RuntimeConfig) -> dict[str, Any]:
             raise TransactionError("confirmation request changed while the watchdog was being stopped")
         if read_secure_bytes(paths["confirm_verification"]) != staged_verification:
             raise TransactionError("confirmation verification receipt changed while the watchdog was being stopped")
-        final_readback = read_nft_table_state(config.nft_binary, config.table_family, config.table_name)
-        if not final_readback.present or sha256_bytes(final_readback.canonical) != metadata["approved_readback_sha256"]:
+        final_readback = read_nft_policy_state(config)
+        if not final_readback.complete or sha256_bytes(final_readback.canonical) != metadata["approved_readback_sha256"]:
             raise TransactionError("structured runtime drifted after the watchdog was stopped")
         consume_claim(
             config,
@@ -1603,7 +1777,7 @@ def rollback_locked(
         run_command([config.nft_binary, "--file", "-"], input_bytes=runtime_backup),
         label="runtime rollback apply",
     )
-    restored = read_nft_table_state(config.nft_binary, config.table_family, config.table_name)
+    restored = read_nft_policy_state(config)
     runtime_state = read_secure_bytes(paths["runtime_state"])
     expected_canonical = read_secure_bytes(paths["runtime_canonical"])
     if runtime_state == b"present\n":
@@ -1659,6 +1833,21 @@ def rollback_transaction(
         return rollback_locked(config, explicit_request=explicit_request, watchdog=watchdog)
 
 
+def describe_active_transaction(config: RuntimeConfig) -> dict[str, Any]:
+    """Read immutable rollback context without requiring a running application."""
+    with transaction_scope(config, action="describe-active"):
+        config.validate()
+        loaded = load_active(config, required=True)
+        assert loaded is not None
+        active, _directory, paths = loaded
+        metadata = validate_metadata_and_assets(config, active, paths)
+        fields = ("target", "change_id", "mode", "candidate_sha256", "approved_readback_sha256",
+                  "policy_fingerprint", "egress_policy_sha256", "egress_status")
+        return {"schema": "lit.host_firewall.active-context/v1",
+                **{key: metadata[key] for key in fields},
+                "owned_tables": [list(identity) for identity in config.owned_tables()]}
+
+
 def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-directory", required=True)
     parser.add_argument("--transactions-directory", required=True)
@@ -1681,6 +1870,7 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--expected-egress-status", required=True)
     parser.add_argument("--table-family", required=True)
     parser.add_argument("--table-name", required=True)
+    parser.add_argument("--bridge-table-name", default="")
     parser.add_argument("--nft-binary", required=True)
     parser.add_argument("--systemctl-binary", required=True)
     parser.add_argument("--verifier-binary", default="")
@@ -1711,7 +1901,8 @@ def config_from_args(args: argparse.Namespace) -> RuntimeConfig:
         table_name=args.table_name,
         nft_binary=args.nft_binary,
         systemctl_binary=args.systemctl_binary,
-        verifier_binary=args.verifier_binary,
+        verifier_binary="" if args.verifier_binary == "-" else args.verifier_binary,
+        bridge_table_name="" if args.bridge_table_name == "-" else args.bridge_table_name,
     )
 
 
@@ -1730,6 +1921,8 @@ def build_parser() -> argparse.ArgumentParser:
     rollback_parser.add_argument("--watchdog", action="store_true")
     canonical_parser = subparsers.add_parser("canonicalize")
     canonical_parser.add_argument("--stdin-base64", action="store_true")
+    subparsers.add_parser("readback")
+    subparsers.add_parser("describe-active")
     normalization_parser = subparsers.add_parser("normalize-inputs")
     normalization_parser.add_argument("--stdin-base64", action="store_true")
     return parser
@@ -1759,6 +1952,13 @@ def main() -> int:
             raw = read_optional_base64(args.stdin_base64, label="nftables JSON")
             sys.stdout.buffer.write(canonicalize_nft_document(raw, config.table_family, config.table_name))
             return 0
+        elif args.command == "readback":
+            config.validate_shape()
+            state = read_nft_policy_state(config)
+            if not state.complete:
+                raise TransactionError("readback requires every configured owned table")
+            sys.stdout.buffer.write(state.canonical)
+            return 0
         elif args.command == "normalize-inputs":
             raw = read_optional_base64(args.stdin_base64, label="normalization input")
             result = normalize_firewall_inputs(parse_json(raw, label="normalization input"))
@@ -1777,6 +1977,8 @@ def main() -> int:
                 result = stage_confirmation(config, load_request_from_stdin())
             elif args.command == "confirm":
                 result = confirm_transaction(config)
+            elif args.command == "describe-active":
+                result = describe_active_transaction(config)
             elif args.command == "rollback":
                 request = None if args.watchdog else load_request_from_stdin()
                 result = rollback_transaction(config, explicit_request=request, watchdog=args.watchdog)
