@@ -484,7 +484,7 @@ class RootExecutorTests(unittest.TestCase):
         def observed(manifest, arguments, seconds=5):
             if arguments == ["info", "--format=json"]:
                 return 0, json.dumps(info).encode()
-            if arguments == ["image", "inspect", "--format=json", engine.IMAGE]:
+            if arguments == ["image", "inspect", "--format=json", engine.PODMAN_IMAGE]:
                 return 0, json.dumps([image]).encode()
             if arguments == ["container", "exists", self.details["runtime"]["name"]]:
                 return 1, b""

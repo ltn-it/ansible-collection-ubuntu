@@ -294,6 +294,15 @@ class RuntimeRPC:
                     require(self._config.heartbeat_lead_seconds < who.valid_until - int(time.time()),
                             "runtime-renewal-budget")
                 if operation == "run":
+                    # The client can renew 30 seconds before authorization expires.
+                    # Preparation holds the Root session, so reserve that lead
+                    # outside the full initial transition before admitting effects.
+                    initial_timeout = self._config.initial_transition_timeout_seconds
+                    # Leave one second for the session to unwind before renewal.
+                    preparation_deadline = who.valid_until - 31
+                    require(time.time() + initial_timeout < preparation_deadline
+                            and who.valid_until <= selected.deadline,
+                            "runtime-initial-authorization-budget")
                     lease_id = store.runtime_prepare(native.nonce, current_worker, who,
                         policy_sha256=selected.custody_policy_sha256, cell_sha256=selected.cell_sha256,
                         deadline=selected.deadline, identity_policy_sha256=identity.policy_digest(selected.identity))
@@ -303,16 +312,16 @@ class RuntimeRPC:
                         "lease_id": lease_id, "state": "preparing", "expires_at": record["expires_at"],
                         "authorization_expires_at": record["authorizations"][-1]["valid_until"]})
                     writing, accepted = False, True
-                    end = time.monotonic() + self._config.initial_transition_timeout_seconds
+                    end = time.monotonic() + initial_timeout
                     def budget():
                         self._check()
                         root_session._require_session(session)
                         latest = store.read(lease_id)
                         require(time.monotonic() < end and int(time.time()) < min(latest["expires_at"],
-                            latest["authorizations"][-1]["valid_until"]), "runtime-initial-budget")
+                            preparation_deadline), "runtime-initial-budget")
                     from . import runtime_entry
-                    with runtime_entry._initial_effects_deadline(self._config.initial_transition_timeout_seconds,
-                            min(record["expires_at"], record["authorizations"][-1]["valid_until"])):
+                    with runtime_entry._initial_effects_deadline(initial_timeout,
+                            min(record["expires_at"], preparation_deadline)):
                         budget()
                         receipt = preparation._prepare_locked(session, self._registry, selector, store, lease_id)
                         budget()

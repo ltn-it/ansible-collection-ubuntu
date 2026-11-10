@@ -25,6 +25,10 @@ from . import installation
 IMAGE_INDEX = "58955457d3410706520f34fa7ea9823d5650aa4844c562cd5c0107024d825711"
 IMAGE_CHILD = "dee06ca5ada0660589e58e10659e568b9f4797ff0c74379c34c9e7c22b29687a"
 IMAGE = "quay.io/l-it/ee-wunder-devtools-ubi9:v1.18.2@sha256:" + IMAGE_INDEX
+# Podman's containers/image transport rejects a simultaneous tag and digest.
+# Keep the versioned immutable provenance label above for the controller;
+# execute only this canonical reference to the exact same pinned index.
+PODMAN_IMAGE = "quay.io/l-it/ee-wunder-devtools-ubi9@sha256:" + IMAGE_INDEX
 ENGINE = "/usr/bin/podman"
 MAX_DESCRIPTOR = 4 * 1024 * 1024
 MAX_FILES = 20000
@@ -333,7 +337,7 @@ def _compile(data, descriptor_sha256, *, retained_output=None):
              "--mount", "type=bind,source=" + output["path"] + ",destination=/quality" + idmap]
     for key, value in sorted(env.items()):
         argv += ["--env", key + "=" + value]
-    argv += [IMAGE, "python3", "/controller/run-cell.py"]
+    argv += [PODMAN_IMAGE, "python3", "/controller/run-cell.py"]
     require(len(argv) <= MAX_ENGINE_ARGS and all(type(arg) is str and 0 < len(arg) <= 8192 for arg in argv)
             and sum(len(arg.encode("utf-8")) + 1 for arg in argv) <= MAX_ENGINE_ARG_BYTES, "engine-argv-limit")
     details = {"schema": 1, "image": image, "argv": argv, "environment": env, "archives": checked_archives,

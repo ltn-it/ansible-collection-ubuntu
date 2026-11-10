@@ -20,7 +20,7 @@ import test_github_runner_incus_mutation as mutation_fixtures
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
 from incus_lease_issuer import (cell_contract, context_materializer, context_publisher, identity, ledger,
-                                preparation, signed_context)  # noqa: E402
+                                preparation, signed_context, engine_executor)  # noqa: E402
 from incus_lease_issuer.identity import Denied  # noqa: E402
 
 
@@ -91,6 +91,12 @@ class RootPreparationTests(unittest.TestCase):
                       "host_api_fence_policy_path": str(self.host_api_policy),
                       "host_api_fence_policy_sha256": hashlib.sha256(self.host_api_policy.read_bytes()).hexdigest()}
         self.seal()
+        # This component fixture has no native Podman or quota grant. The
+        # dedicated image-provision tests replace this boundary with a real
+        # subprocess and explicit synthetic backend/quota observations.
+        image = mock.patch.object(engine_executor, "_provision_image")
+        self.image_provision = image.start()
+        self.addCleanup(image.stop)
 
     def seal(self):
         self.config.write_bytes(ledger.canonical(self.value))

@@ -231,7 +231,10 @@ class RootEngineCompilerTests(unittest.TestCase):
         for flag in ("--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private"):
             self.assertIn(flag, result.argv)
         self.assertEqual(result.argv[0], "/usr/bin/podman")
-        self.assertEqual(result.argv[-3:], (engine.IMAGE, "python3", "/controller/run-cell.py"))
+        self.assertEqual(result.argv[-3:], (engine.PODMAN_IMAGE, "python3", "/controller/run-cell.py"))
+        self.assertEqual(result.environment["QUALITY_DEVTOOLS_IMAGE"], engine.IMAGE)
+        self.assertEqual(engine.PODMAN_IMAGE.split("@", 1)[1], engine.IMAGE.split("@", 1)[1])
+        self.assertNotIn(":", engine.PODMAN_IMAGE.split("@", 1)[0])
         for value in ("--platform=linux/amd64", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges=true",
                       "--pids-limit=512", "--read-only-tmpfs=false", "--user=1000:1001", "--cpus=1.500", "--memory=2147483648"):
             self.assertIn(value, result.argv)
