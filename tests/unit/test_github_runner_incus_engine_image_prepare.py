@@ -221,7 +221,7 @@ else: raise AssertionError(command)
         self.assertEqual(self.commands, [])
         self.assertEqual(self.io.effect("engine-prepare")["state"], "unknown")
 
-    def test_retained_previous_lease_blocks_image_allocation(self):
+    def test_retained_previous_lease_blocks_public_preparation_before_effects(self):
         from incus_lease_issuer import ledger
         fixture = self.io.fixture
         selected = fixture.registry.select("approved")
@@ -233,10 +233,11 @@ else: raise AssertionError(command)
             "8" * 64, ledger.AUDIENCE + nonce, identity.policy_digest(selected.identity))
         fixture.store.prepare(nonce, worker, who, policy_sha256=selected.custody_policy_sha256,
             cell_sha256=selected.cell_sha256, deadline=selected.deadline)
-        with self.assertRaises(preparation.PreparationUnknown):
+        with self.assertRaises(preparation.PreparationDenied):
             self.io.run_prepare()
         self.assertEqual(self.commands, [])
-        self.assertEqual(self.io.effect("engine-prepare")["state"], "unknown")
+        self.assertEqual(self.io.writes(), [])
+        self.assertEqual(self.io.effects(), [])
 
     def test_no_remaining_full_budget_denies_before_pull(self):
         with (mock.patch.object(executor, "_start_budget", side_effect=Denied("engine-start-budget-expired")),

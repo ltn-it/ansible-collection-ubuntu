@@ -1622,6 +1622,25 @@ class IncusLedgerTests(unittest.TestCase):
                       cell_sha256=CELL, deadline=NOW + 120, identity_policy_sha256="d" * 64)
             self.assertEqual(store.read(lease)["identity"], asdict(who))
 
+    def test_runtime_and_legacy_admission_cannot_create_competing_leases(self):
+        other = replace(self.worker, uid=2102, runner_id=62, pid=12346)
+        with self.open() as store:
+            legacy, _, _, policy = self.prepare(store)
+            challenge = store.runtime_challenge(other, "run", CELL, "d" * 64)
+            who = synthetic_identity(challenge["audience"], policy_sha256="d" * 64,
+                service_uid=2102, runner_id=62, run_id=502, job_id=903,
+                check_run_id=732, token_id_sha256="c" * 64)
+            args = dict(policy_sha256=policy, cell_sha256=CELL, deadline=NOW + 120,
+                        identity_policy_sha256="d" * 64)
+            with self.assertRaisesRegex(Denied, "engine-other-pilot-lease-active"):
+                store.runtime_prepare(challenge["nonce"], other, who, **args)
+            self.assertEqual(store.read(legacy)["effects"], {})
+            store.close(legacy)
+            active = store.runtime_prepare(challenge["nonce"], other, who, **args)
+            with self.assertRaisesRegex(Denied, "engine-other-pilot-lease-active"):
+                self.prepare(store, identity_changes={"run_id": 503, "token_id_sha256": "e" * 64})
+            self.assertEqual(store.read(active)["effects"], {})
+
     def test_runtime_status_cancel_recover_consume_once_without_renewal_and_survive_restart(self):
         with self.open() as store:
             lease, policy = self.runtime_lease(store)

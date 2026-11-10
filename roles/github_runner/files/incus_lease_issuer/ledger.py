@@ -756,6 +756,17 @@ class Ledger:
                              and previous["check_run_id"] == identity.check_run_id), "invocation-replay")
                 require(lease["state"] == "closed" or (previous["runner_id"] != identity.runner_id
                         and previous["service_uid"] != identity.service_uid), "runner-lease-unsettled")
+            if runtime is not None:
+                self._require_exclusive_preparation(state)
+            else:
+                # A legacy admission must not create a competing lease after
+                # a runtime run has already acquired exclusive ownership.
+                require(not any(
+                    (challenge.get("runtime") or {}).get("operation") == "run"
+                    and challenge["state"] == "consumed"
+                    and state["leases"][challenge["lease_id"]]["state"] != "closed"
+                    for challenge in state["challenges"].values()
+                ), "engine-other-pilot-lease-active")
             identifier = secrets.token_hex(16)
             record["state"] = "consumed"
             record["lease_id"] = identifier
@@ -890,6 +901,16 @@ class Ledger:
     def read(self, identifier):
         with self._transaction() as state:
             return copy.deepcopy(self._lease(state, identifier))
+
+    @staticmethod
+    def _require_exclusive_preparation(state, identifier=None):
+        require(all(key == identifier or lease["state"] == "closed"
+                    for key, lease in state["leases"].items()), "engine-other-pilot-lease-active")
+
+    def require_exclusive_preparation(self, identifier):
+        with self._transaction() as state:
+            self._lease(state, identifier)
+            self._require_exclusive_preparation(state, identifier)
 
     def begin(self, identifier, operation, target):
         """Persist ONE intent before a Root executor acts; never run or retry it.

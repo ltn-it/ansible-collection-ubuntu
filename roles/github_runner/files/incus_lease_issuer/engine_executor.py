@@ -240,9 +240,7 @@ def _provision_image(config, prepared, store, manifest):
     from . import storage_quota
     preparation._fresh(config, prepared, store)
     details = identity.decode_json(manifest.canonical_bytes)
-    with store._transaction() as state:
-        require(all(key == prepared.lease_id or lease["state"] == "closed"
-                    for key, lease in state["leases"].items()), "engine-other-pilot-lease-active")
+    store.require_exclusive_preparation(prepared.lease_id)
     record = store.read(prepared.lease_id)
     effects = [row for row in record["effects"].values() if row["operation"] == "engine-prepare"]
     require(len(effects) == 1 and effects[0]["state"] == "intent"
@@ -580,9 +578,7 @@ def _preflight(config, prepared, store, manifest):
     details = identity.decode_json(manifest.canonical_bytes)
     # This operating scope admits ONE cell, not a fleet sharing mapped IDs.
     # Root subid/NSS reservations below additionally deny non-pilot allocation.
-    with store._transaction() as state:
-        require(all(key == prepared.lease_id or lease["state"] == "closed"
-                    for key, lease in state["leases"].items()), "engine-other-pilot-lease-active")
+    store.require_exclusive_preparation(prepared.lease_id)
     _reservations(details)
     _cgroup(details)
     with _namespace(details["network_namespace"]["path"]):

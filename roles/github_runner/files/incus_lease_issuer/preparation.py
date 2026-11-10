@@ -326,6 +326,7 @@ def _prepare_locked(session, registry, selector, store, lease_id):
                 and registry.sha256 == config.registry_sha256, "preparation-registry")
         prepared = cell_contract.prepare_cell(registry, selector, store, lease_id)
         require(not store.read(lease_id)["effects"], "preparation-previous-attempt")
+        store.require_exclusive_preparation(lease_id)
         descriptor = identity.decode_json(prepared.engine_descriptor_bytes)
         require(descriptor["limits"]["timeout_seconds"] <= prepared.expires_at - int(time.time()),
                 "preparation-engine-start-budget")
