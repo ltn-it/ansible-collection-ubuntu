@@ -198,7 +198,7 @@ def _pull_image(manifest, seconds):
             # invocation; any registry transport retries stay inside its
             # original process deadline and never replay the journal intent.
             proc = subprocess.Popen(_prefix(manifest) + ["pull", "--tls-verify=true",
-                "--platform=linux/amd64", engine.IMAGE], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                "--platform=linux/amd64", engine.PODMAN_IMAGE], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, env=_environment(manifest), close_fds=True,
                 start_new_session=True, umask=0o077)
         total = 0
@@ -289,7 +289,7 @@ def _backend(manifest, *, deadline=None):
             and store["runRoot"] == details["engine"]["runroot"], "engine-local-runtime-required")
     for key in ("ociRuntime", "conmon"):
         installation.trusted_file(engine._path(host[key]["path"]), max_bytes=128 * 1024 ** 2)
-    rc, raw = command(["image", "inspect", "--format=json", engine.IMAGE])
+    rc, raw = command(["image", "inspect", "--format=json", engine.PODMAN_IMAGE])
     images = __import__("json").loads(raw)
     require(rc == 0 and type(images) is list and len(images) == 1, "engine-image-inspect")
     image = images[0]

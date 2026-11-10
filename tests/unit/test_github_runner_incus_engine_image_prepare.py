@@ -111,7 +111,7 @@ elif command==["image","inspect","--format=json",image]:
 elif command[:2]==["container","exists"]: sys.exit(1)
 else: raise AssertionError(command)
 '''
-        source = ("MODE=" + repr(self.mode) + "\nIMAGE=" + repr(engine.IMAGE)
+        source = ("MODE=" + repr(self.mode) + "\nIMAGE=" + repr(engine.PODMAN_IMAGE)
                   + "\nINDEX=" + repr(engine.IMAGE_INDEX) + "\nCHILD=" + repr(engine.IMAGE_CHILD)
                   + "\nCONFIG=" + repr(executor.IMAGE_CONFIG) + "\n") + source
         return [sys.executable, "-I", "-B", "-c", source] + PREFIX(manifest)[1:]

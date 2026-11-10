@@ -487,7 +487,12 @@ retry reads within the same bounded process deadline. Root never replays the
 pull invocation or its journal intent. The exact existing
 index/child/config checks run before the context is signed; runtime execution
 retains `--pull=never`. No job image URL, credentials or host-global cache is used.
+Podman pull, inspection and execution use a canonical `repository@digest`
+reference. The controller retains the versioned provenance label with that same
+digest; neither the image content nor the admitted controller contract changes.
 Image transfer and extraction remain inside the existing private storage quota.
+Podman 4.9 limits the complete per-lease runroot to 50 bytes. Use a short path
+on the same project quota filesystem so temporary data remains within that quota.
 The pull has a 120-second maximum and consumes the original initial-transition,
 authorization and lease budgets; the complete engine execution budget must still
 remain afterward. Image footprint, transfer time and actual native storage/network
