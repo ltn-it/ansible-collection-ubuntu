@@ -1,0 +1,29 @@
+---
+- name: Exercise opt-in local alarm sender installer without a mail service
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Preserve disabled sender installation and activation
+      ansible.builtin.include_role:
+        name: lit.ubuntu.github_runner
+        tasks_from: ephemeral_worker_local_mail
+
+    - name: Require installation before sender activation
+      block:
+        - name: Reject activation alone through actual installer
+          ansible.builtin.include_role:
+            name: lit.ubuntu.github_runner
+            tasks_from: ephemeral_worker_local_mail
+          vars:
+            github_runner_ephemeral_local_mail_activate: true
+        - name: Reject an accepted uninstalled sender
+          ansible.builtin.fail:
+            msg: Uninstalled sender activation unexpectedly accepted.
+      rescue:
+        - name: Require the actual opt-in interface failure
+          ansible.builtin.assert:
+            that:
+              - >-
+                ansible_failed_result.msg ==
+                'Local mail installation and activation require explicit boolean inputs.'
+            quiet: true

@@ -1,0 +1,32 @@
+---
+- name: Validate local mail switches
+  ansible.builtin.assert:
+    that:
+      - local_mail_enabled is boolean
+      - local_mail_initialize is boolean
+      - local_mail_install_packages is boolean
+      - local_mail_manage_service is boolean
+    quiet: true
+
+- name: Require an explicit exact package version when enabled
+  ansible.builtin.assert:
+    that:
+      - local_mail_package_version is string
+      - local_mail_package_version is match('^[0-9][A-Za-z0-9.+:~_-]{0,120}$')
+      - local_mail_package_file is string
+      - local_mail_package_sha256 is string
+    fail_msg: Supply the exact approved Ubuntu Postfix version before enabling local mail.
+    quiet: true
+  when: local_mail_enabled
+
+- name: Require the prepared offline package identity when selected
+  ansible.builtin.assert:
+    that:
+      - local_mail_package_file.startswith('/')
+      - "'..' not in local_mail_package_file.split('/')"
+      - local_mail_package_file.endswith('.deb')
+      - local_mail_package_sha256 is match('^[0-9a-f]{64}$')
+    quiet: true
+  when:
+    - local_mail_enabled
+    - local_mail_package_file | length > 0

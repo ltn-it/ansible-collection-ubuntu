@@ -1,0 +1,138 @@
+---
+- name: Validate opt-in local mail installation interface
+  ansible.builtin.assert:
+    that:
+      - github_runner_ephemeral_local_mail_install is boolean
+      - github_runner_ephemeral_local_mail_activate is boolean
+      - not github_runner_ephemeral_local_mail_activate or github_runner_ephemeral_local_mail_install
+    fail_msg: Local mail installation and activation require explicit boolean inputs.
+  changed_when: false
+
+- name: Prepare explicitly selected Root local mail
+  when: github_runner_ephemeral_local_mail_install
+  vars:
+    github_runner_ephemeral_local_mail_modules:
+      - ephemeral_worker_admission.py
+      - ephemeral_worker_lease.py
+      - ephemeral_worker_incus.py
+      - ephemeral_worker_watchdog.py
+      - ephemeral_worker_alarm.py
+      - ephemeral_worker_local_mail.py
+      - ephemeral_worker_local_mail_entry.py
+    github_runner_ephemeral_local_mail_units:
+      lit-github-runner-ephemeral-worker-local-mail.service: >-
+        {{ lookup('ansible.builtin.template', 'ephemeral_worker_local_mail.service.j2') | hash('sha256') }}
+      lit-github-runner-ephemeral-worker-local-mail.timer: >-
+        {{ lookup('ansible.builtin.template', 'ephemeral_worker_local_mail.timer.j2') | hash('sha256') }}
+  block:
+    - name: Require complete immutable local mail source selection
+      ansible.builtin.assert:
+        that:
+          - github_runner_ephemeral_local_mail_module_sha256 is mapping
+          - >-
+            github_runner_ephemeral_local_mail_module_sha256.keys() | list | sort
+            == github_runner_ephemeral_local_mail_modules | sort
+          - github_runner_ephemeral_watchdog_machine_id is match('^[0-9a-f]{32}$')
+          - >-
+            github_runner_ephemeral_watchdog_boot_id
+            is match('^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+          - >-
+            github_runner_ephemeral_local_mail_program_directory
+            is match('^/usr/local/lib/[A-Za-z0-9_-]+$')
+          - >-
+            github_runner_ephemeral_watchdog_state_directory
+            is match('^/var/lib/lightning-it/[A-Za-z0-9_-]+$')
+        fail_msg: Local mail source inventory, live target identities and private paths must be explicit.
+      changed_when: false
+
+    - name: Verify local mail module bytes from selected collection
+      ansible.builtin.assert:
+        that:
+          - github_runner_ephemeral_local_mail_module_sha256[item] is match('^[0-9a-f]{64}$')
+          - >-
+            github_runner_ephemeral_local_mail_module_sha256[item]
+            == lookup('ansible.builtin.file', role_path ~ '/files/' ~ item, rstrip=false) | hash('sha256')
+        fail_msg: Local mail module bytes differ from the explicitly selected fresh collection.
+      loop: "{{ github_runner_ephemeral_local_mail_modules }}"
+      changed_when: false
+
+    - name: Inspect Root target and existing local mail assets before effects
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path ~ '/files/ephemeral_worker_local_mail_install_guard.py') }}"
+          - "{{ github_runner_ephemeral_watchdog_machine_id }}"
+          - "{{ github_runner_ephemeral_watchdog_boot_id }}"
+          - "{{ github_runner_ephemeral_local_mail_program_directory }}"
+          - "{{ github_runner_ephemeral_watchdog_state_directory }}"
+          - "{{ github_runner_ephemeral_local_mail_module_sha256 | to_json }}"
+          - "{{ github_runner_ephemeral_local_mail_units | to_json }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Create private local mail directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "{{ github_runner_ephemeral_local_mail_program_directory }}"
+        - "{{ github_runner_ephemeral_watchdog_state_directory }}"
+
+    - name: Install exact local mail modules
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ github_runner_ephemeral_local_mail_program_directory }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ github_runner_ephemeral_local_mail_modules }}"
+
+    - name: Install Root local mail service
+      ansible.builtin.template:
+        src: ephemeral_worker_local_mail.service.j2
+        dest: /etc/systemd/system/lit-github-runner-ephemeral-worker-local-mail.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: github_runner_ephemeral_local_mail_service_result
+
+    - name: Install Root local mail timer
+      ansible.builtin.template:
+        src: ephemeral_worker_local_mail.timer.j2
+        dest: /etc/systemd/system/lit-github-runner-ephemeral-worker-local-mail.timer
+        owner: root
+        group: root
+        mode: "0644"
+      register: github_runner_ephemeral_local_mail_timer_result
+
+    - name: Verify complete local mail unit files
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemd-analyze
+          - verify
+          - /etc/systemd/system/lit-github-runner-ephemeral-worker-local-mail.service
+          - /etc/systemd/system/lit-github-runner-ephemeral-worker-local-mail.timer
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Reload local mail units after changed definitions
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when:
+        - not ansible_check_mode
+        - >-
+          github_runner_ephemeral_local_mail_service_result.changed
+          or github_runner_ephemeral_local_mail_timer_result.changed
+
+    - name: Activate explicitly selected local mail timer
+      ansible.builtin.systemd_service:
+        name: lit-github-runner-ephemeral-worker-local-mail.timer
+        enabled: true
+        state: started
+      when: github_runner_ephemeral_local_mail_activate

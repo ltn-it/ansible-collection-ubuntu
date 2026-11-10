@@ -44,6 +44,15 @@ Each `incus_instance_items` entry supports:
 - `type`: `vm` or `container`.
 - `empty`: Create an empty instance instead of using an image.
 - `reconfigure`: Reapply config, limits, and devices when the instance already exists.
+- `create_only` (boolean, default: `false`): Require `state: present` and
+  `reconfigure: false`. A successful native inventory read must prove the exact
+  name absent; an existing instance is refused, even if its config appears to
+  match. Config values are included in the initial `incus init` request, so an
+  ownership marker is present from allocation rather than added afterwards.
+  A failed or interrupted allocation is never retried by the role. The external
+  controller must retain its write-ahead reservation and reconcile the native
+  resource before a later invocation. This option does not implement global
+  serialization, ownership authorization, cleanup or a running worker.
 - `project`, `profiles`, `config`, `devices`, `limits`.
 - `hostname`, `fqdn`, `ssh_user`, `ssh_public_keys`.
 - `cloud_init_enabled`, `cloud_init_user_data`, `cloud_init_network_config`.

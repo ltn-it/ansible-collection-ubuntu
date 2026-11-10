@@ -1,0 +1,184 @@
+---
+- name: Read the actual operating system
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", distribution]
+
+- name: Require the supported Ubuntu target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_major_version == '24'
+    quiet: true
+
+- name: Guard owned configuration or explicit empty inactive initialization
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/files/guard.py') }}"
+      - "{{ local_mail_initialize | ternary('initialize', 'managed') }}"
+  changed_when: false
+  check_mode: false
+
+- name: Inspect the selected prepared package
+  ansible.builtin.stat:
+    path: "{{ local_mail_package_file }}"
+    checksum_algorithm: sha256
+  register: local_mail_package_stat
+  when: local_mail_package_file | length > 0
+
+- name: Require trusted prepared package parent directories
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - -c
+      - >-
+        from pathlib import Path; import os,stat,sys;
+        assert os.geteuid()==0;
+        values=[p.lstat() for p in Path(sys.argv[1]).parents];
+        assert all(stat.S_ISDIR(v.st_mode) and v.st_uid==0 and
+        (not v.st_mode & 0o022 or v.st_mode & stat.S_ISVTX) for v in values)
+      - "{{ local_mail_package_file }}"
+  changed_when: false
+  check_mode: false
+  when: local_mail_package_file | length > 0
+
+- name: Require the exact Root-owned prepared package
+  ansible.builtin.assert:
+    that:
+      - local_mail_package_stat.stat.isreg | default(false)
+      - not local_mail_package_stat.stat.islnk | default(true)
+      - local_mail_package_stat.stat.uid == 0
+      - local_mail_package_stat.stat.nlink == 1
+      - local_mail_package_stat.stat.mode in ['0400', '0600', '0644']
+      - local_mail_package_stat.stat.checksum == local_mail_package_sha256
+    quiet: true
+  when: local_mail_package_file | length > 0
+
+- name: Read selected prepared package metadata
+  ansible.builtin.command:
+    argv: [dpkg-deb, -f, "{{ local_mail_package_file }}", Package, Version]
+  changed_when: false
+  check_mode: false
+  register: local_mail_prepared_package
+  when: local_mail_package_file | length > 0
+
+- name: Require the selected package name and version
+  ansible.builtin.assert:
+    that:
+      - >-
+        local_mail_prepared_package.stdout_lines ==
+        ['Package: postfix', 'Version: ' ~ local_mail_package_version]
+    quiet: true
+  when: local_mail_package_file | length > 0
+
+- name: Prepare noninteractive local-only package defaults
+  ansible.builtin.debconf:
+    name: postfix
+    question: "{{ local_mail_debconf.question }}"
+    value: "{{ local_mail_debconf.value }}"
+    vtype: "{{ local_mail_debconf.vtype }}"
+  loop:
+    - {question: postfix/main_mailer_type, value: Local only, vtype: select}
+    - {question: postfix/mailname, value: localhost, vtype: string}
+  loop_control:
+    loop_var: local_mail_debconf
+  when: local_mail_install_packages
+
+- name: Install the exact package without automatic service activation
+  ansible.builtin.apt:
+    name: "{{ 'postfix=' ~ local_mail_package_version if local_mail_package_file | length == 0 else omit }}"
+    deb: "{{ local_mail_package_file if local_mail_package_file | length > 0 else omit }}"
+    state: present
+    update_cache: false
+    install_recommends: false
+    policy_rc_d: 101
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: local_mail_package_result
+  when: local_mail_install_packages
+
+- name: Verify the actually installed package version
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, "-f=${Version}", postfix]
+  register: local_mail_installed_version
+  changed_when: false
+  check_mode: false
+
+- name: Require the exact installed package
+  ansible.builtin.assert:
+    that:
+      - local_mail_installed_version.stdout == local_mail_package_version
+    quiet: true
+
+- name: Configure only local mailbox delivery without network transports
+  ansible.builtin.template:
+    src: "{{ local_mail_configuration }}.j2"
+    dest: "/etc/postfix/{{ local_mail_configuration }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [main.cf, master.cf]
+  loop_control:
+    loop_var: local_mail_configuration
+  register: local_mail_configuration_result
+
+- name: Read actual fixed transport settings
+  ansible.builtin.command:
+    argv: [postconf, -h, inet_interfaces, inet_protocols, default_transport, relay_transport, forward_path, alias_maps]
+  register: local_mail_transport_settings
+  changed_when: false
+  check_mode: false
+
+- name: Require local transport and disabled forwarding
+  ansible.builtin.assert:
+    that:
+      - >-
+        local_mail_transport_settings.stdout_lines[:4] ==
+        ['127.0.0.1', 'ipv4', 'error:external delivery disabled', 'error:external delivery disabled']
+      - local_mail_transport_settings.stdout_lines[4:] | select('ne', '') | list | length == 0
+    quiet: true
+
+- name: Create private ownership receipt directory
+  ansible.builtin.file:
+    path: /var/lib/lit-local-mail
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Read installed configuration hashes
+  ansible.builtin.stat:
+    path: "/etc/postfix/{{ local_mail_configuration }}"
+    checksum_algorithm: sha256
+  loop: [main.cf, master.cf]
+  loop_control:
+    loop_var: local_mail_configuration
+  register: local_mail_configuration_hashes
+
+- name: Seal owned local mail configuration
+  ansible.builtin.copy:
+    dest: /var/lib/lit-local-mail/ownership.json
+    content: >-
+      {{ {'schema': 1,
+          'main_cf_sha256': local_mail_configuration_hashes.results[0].stat.checksum,
+          'master_cf_sha256': local_mail_configuration_hashes.results[1].stat.checksum}
+         | to_nice_json }}
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Start only the owned local mail service
+  ansible.builtin.systemd_service:
+    name: postfix.service
+    enabled: true
+    daemon_reload: "{{ local_mail_package_result.changed | default(false) }}"
+    state: >-
+      {{ 'restarted' if
+         (local_mail_configuration_result.changed or local_mail_package_result.changed | default(false))
+         else 'started' }}
+  when: local_mail_manage_service

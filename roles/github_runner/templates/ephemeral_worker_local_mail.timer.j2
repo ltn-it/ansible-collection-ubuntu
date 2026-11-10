@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule local Root alarm delivery checks independently
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=lit-github-runner-ephemeral-worker-local-mail.service
+
+[Install]
+WantedBy=timers.target

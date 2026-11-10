@@ -1,0 +1,454 @@
+{
+  "schema": 1,
+  "source_candidate_sha256": "1b7c0c2c6baeb0b3130f3156047dcf1f40db59e89345ea593e909472e5ed7500",
+  "source_simulation_sha256": "334011af35826fe5a335e2acf58933e374038c6121d01a451d00383f732d5f17",
+  "scope": "Nonsecret selected public package/control/path and ordered native plan data. Not a live authorization/backup/install receipt.",
+  "packages": [
+    {
+      "package": "aardvark-dns",
+      "version": "1.4.0-5",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/a/aardvark-dns/aardvark-dns_1.4.0-5_amd64.deb",
+      "size": 880932,
+      "sha256": "658b07957bd126eab07c0227b30fb833d9e1c9f70cdb2ca5dc5c53801324d3ed"
+    },
+    {
+      "package": "buildah",
+      "version": "1.33.7+ds1-1ubuntu0.24.04.3",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-containers-buildah/buildah_1.33.7+ds1-1ubuntu0.24.04.3_amd64.deb",
+      "size": 8147742,
+      "sha256": "a94382e24be71739da40350fddc896464692cd736d2fc2f5507d6d6961d34727"
+    },
+    {
+      "package": "catatonit",
+      "version": "0.1.7-1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/catatonit/catatonit_0.1.7-1_amd64.deb",
+      "size": 307442,
+      "sha256": "fb815ec9de328c7e36c7a98354882160693af92d9f00ecaf9028ce8862622d3d"
+    },
+    {
+      "package": "conmon",
+      "version": "2.1.10+ds1-1build2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/conmon/conmon_2.1.10+ds1-1build2_amd64.deb",
+      "size": 35178,
+      "sha256": "4bf1eebadfd32246d01e35ccd96d4c73af5103dfa4384a851b7b9b25401802db"
+    },
+    {
+      "package": "containernetworking-plugins",
+      "version": "1.1.1+ds1-3ubuntu0.24.04.3",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-containernetworking-plugins/containernetworking-plugins_1.1.1+ds1-3ubuntu0.24.04.3_amd64.deb",
+      "size": 7203442,
+      "sha256": "0ffc31ebfa430615d2e35ad7cea6b3717faa8fdbc02debd773625cad83fcdd65"
+    },
+    {
+      "package": "crun",
+      "version": "1.14.1-1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/c/crun/crun_1.14.1-1_amd64.deb",
+      "size": 405538,
+      "sha256": "2263368dabe3d126189dffd9da7cc31159d8766c9a9a2e3ca8231ad3fcc11109"
+    },
+    {
+      "package": "fuse-overlayfs",
+      "version": "1.13-1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/f/fuse-overlayfs/fuse-overlayfs_1.13-1_amd64.deb",
+      "size": 45714,
+      "sha256": "627033f1e3f6534165aba934f16fb5b1f25544ba9d79088c70087cde8b27cc42"
+    },
+    {
+      "package": "gnutls-bin",
+      "version": "3.8.3-1.1ubuntu3.6",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/gnutls28/gnutls-bin_3.8.3-1.1ubuntu3.6_amd64.deb",
+      "size": 269800,
+      "sha256": "f633ba0c03d495c4845cbe127c87d16a748b10f1e75fd629024b3a7c099bcc06"
+    },
+    {
+      "package": "golang-github-containers-common",
+      "version": "0.57.4+ds1-2ubuntu0.2",
+      "architecture": "all",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-containers-common/golang-github-containers-common_0.57.4+ds1-2ubuntu0.2_all.deb",
+      "size": 39936,
+      "sha256": "dae82b120f8a1b429c0a63a2ccd2ff3c91563f97e2188b1fbaf78ba76f7fb89c"
+    },
+    {
+      "package": "golang-github-containers-image",
+      "version": "5.29.2-2",
+      "architecture": "all",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-containers-image/golang-github-containers-image_5.29.2-2_all.deb",
+      "size": 33432,
+      "sha256": "2059cd3836a417d2e770b810c507b9d29aa4e32759650138c6c8704c24749772"
+    },
+    {
+      "package": "incus",
+      "version": "1:7.6-ubuntu24.04-202611021330",
+      "architecture": "amd64",
+      "url": "https://pkgs.zabbly.com/incus/stable/pool/main/i/incus/incus_7.6-ubuntu24.04-202611021330_amd64.deb",
+      "size": 95246946,
+      "sha256": "28665d4e5841f8be26227648de627e657983eb5220bfb6bd017ff8cf1efa2221"
+    },
+    {
+      "package": "incus-base",
+      "version": "1:7.6-ubuntu24.04-202611021330",
+      "architecture": "amd64",
+      "url": "https://pkgs.zabbly.com/incus/stable/pool/main/i/incus/incus-base_7.6-ubuntu24.04-202611021330_amd64.deb",
+      "size": 58265542,
+      "sha256": "07782c8c7689a0aca499defdaa92985faae730aef0f0a9561b702402e702f0d4"
+    },
+    {
+      "package": "incus-client",
+      "version": "1:7.6-ubuntu24.04-202611021330",
+      "architecture": "amd64",
+      "url": "https://pkgs.zabbly.com/incus/stable/pool/main/i/incus/incus-client_7.6-ubuntu24.04-202611021330_amd64.deb",
+      "size": 9005670,
+      "sha256": "f98469f1632c3a618c54166d7ab009037222d6e9d11deb6ad46e46c4b8c67ce9"
+    },
+    {
+      "package": "iw",
+      "version": "6.7-1build1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/i/iw/iw_6.7-1build1_amd64.deb",
+      "size": 113952,
+      "sha256": "0765ce9fbf01b421be44333926648bcef433003979fd6416dd51a649a6734fd0"
+    },
+    {
+      "package": "libboost-iostreams1.83.0",
+      "version": "1.83.0-2.1ubuntu3.2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/b/boost1.83/libboost-iostreams1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb",
+      "size": 259534,
+      "sha256": "614e516fc34d3a9f4b39149c79bde94160631b6486943d9782e264ab475fcdc3"
+    },
+    {
+      "package": "libboost-thread1.83.0",
+      "version": "1.83.0-2.1ubuntu3.2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/b/boost1.83/libboost-thread1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb",
+      "size": 275806,
+      "sha256": "d6b7411fd5368a49ffe88ad66d471bc57a43c2bb4eb105ee3f5fb921bfdf8924"
+    },
+    {
+      "package": "libbtrfs0t64",
+      "version": "6.6.3-1.1build2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/b/btrfs-progs/libbtrfs0t64_6.6.3-1.1build2_amd64.deb",
+      "size": 13288,
+      "sha256": "9e55efbdf46a64f7c78710f05cd5ccc21ffab16d6897b10e174db4ccf5ca4f63"
+    },
+    {
+      "package": "libevent-2.1-7t64",
+      "version": "2.1.12-stable-9ubuntu2.2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libe/libevent/libevent-2.1-7t64_2.1.12-stable-9ubuntu2.2_amd64.deb",
+      "size": 145930,
+      "sha256": "083ced6efb23476cb4de4e441b741af02db5653e67fa7fcd6cf7e5f7b78f6101"
+    },
+    {
+      "package": "libgnutls-dane0t64",
+      "version": "3.8.3-1.1ubuntu3.6",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gnutls28/libgnutls-dane0t64_3.8.3-1.1ubuntu3.6_amd64.deb",
+      "size": 23540,
+      "sha256": "1046a09befeb0a0913760ce28e46cd2b2758109325a30771a5f0c82a094a4631"
+    },
+    {
+      "package": "libgpgme11t64",
+      "version": "1.18.0-4.1ubuntu4",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gpgme1.0/libgpgme11t64_1.18.0-4.1ubuntu4_amd64.deb",
+      "size": 135618,
+      "sha256": "b3640068e8af3becf16faec886ff139880736ed23a7fc605c1f0cece405a5606"
+    },
+    {
+      "package": "libnet1",
+      "version": "1.1.6+dfsg-3.2build1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libn/libnet/libnet1_1.1.6+dfsg-3.2build1_amd64.deb",
+      "size": 44508,
+      "sha256": "86bbaba89b99841235e0196d21cd2121d6a9b69b122a6b926ae7c0ae8bb3365c"
+    },
+    {
+      "package": "libpmemobj1",
+      "version": "1.13.1-1.1ubuntu2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/p/pmdk/libpmemobj1_1.13.1-1.1ubuntu2_amd64.deb",
+      "size": 116124,
+      "sha256": "7b69c26f10fd5dde863660563b01ce1a62736684497b06ff4a6f57088f2a283f"
+    },
+    {
+      "package": "libprotobuf-c1",
+      "version": "1.4.1-1ubuntu4",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/p/protobuf-c/libprotobuf-c1_1.4.1-1ubuntu4_amd64.deb",
+      "size": 20790,
+      "sha256": "577b713651a61e82226e46c9c9e3c23cd16df9ee3c2b27b22b49c5abb2ef8f61"
+    },
+    {
+      "package": "librados2",
+      "version": "19.2.3-0ubuntu0.24.04.3",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/c/ceph/librados2_19.2.3-0ubuntu0.24.04.3_amd64.deb",
+      "size": 4041234,
+      "sha256": "5249ce3ad18e3230084fca92ecd548e094d0d1f7541badab40e64b1f00ca9da9"
+    },
+    {
+      "package": "librbd1",
+      "version": "19.2.3-0ubuntu0.24.04.3",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/c/ceph/librbd1_19.2.3-0ubuntu0.24.04.3_amd64.deb",
+      "size": 3412992,
+      "sha256": "ea5ee707c5182c3fca9b15f8f920b3c9e1609738bc560007c128870f41d98ca6"
+    },
+    {
+      "package": "libunbound8",
+      "version": "1.19.2-1ubuntu3.12",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/u/unbound/libunbound8_1.19.2-1ubuntu3.12_amd64.deb",
+      "size": 449758,
+      "sha256": "e1d2295698567b1dfadc940d7fd69a8bab9be617bb886de2fc8297de514df3b0"
+    },
+    {
+      "package": "netavark",
+      "version": "1.4.0-4",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/n/netavark/netavark_1.4.0-4_amd64.deb",
+      "size": 1666338,
+      "sha256": "108681d08b9e81122adc95bc102a797bbd2d622c5071f4b51b6cfe67fa258be1"
+    },
+    {
+      "package": "passt",
+      "version": "0.0~git20240220.1e6f92b-1",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/p/passt/passt_0.0~git20240220.1e6f92b-1_amd64.deb",
+      "size": 163224,
+      "sha256": "de07c44dcae84b58107cdf47e58f7d6ca2fdd466b193a10aea8a7115cf97bead"
+    },
+    {
+      "package": "podman",
+      "version": "4.9.3+ds1-1ubuntu0.2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/libp/libpod/podman_4.9.3+ds1-1ubuntu0.2_amd64.deb",
+      "size": 13408626,
+      "sha256": "e5c1c37e387ed14c352a744a75fbb79fb2f82573ca7bf36886e3b7333fc9ef1a"
+    },
+    {
+      "package": "slirp4netns",
+      "version": "1.2.1-1build2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/s/slirp4netns/slirp4netns_1.2.1-1build2_amd64.deb",
+      "size": 34894,
+      "sha256": "3fc72a72a376a3ad3b439434bc87d89d245f9d54a1d540e8a06b74d4e2385e0a"
+    },
+    {
+      "package": "sshfs",
+      "version": "3.7.3-1.1build3",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/s/sshfs-fuse/sshfs_3.7.3-1.1build3_amd64.deb",
+      "size": 45278,
+      "sha256": "9f61fe87df1cbb924b6a02b7f1a3b5bf8ad57076f25d691a1e29ae9e880f93bd"
+    },
+    {
+      "package": "xdelta3",
+      "version": "3.0.11-dfsg-1.2",
+      "architecture": "amd64",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/x/xdelta3/xdelta3_3.0.11-dfsg-1.2_amd64.deb",
+      "size": 73888,
+      "sha256": "211bf0fe07f1bb95870dd6da981f56c2e17237286b261f1fe2d77d34ff1f106e"
+    }
+  ],
+  "controls": {
+    "aardvark-dns": {
+      "Package": "aardvark-dns",
+      "Version": "1.4.0-5",
+      "Architecture": "amd64"
+    },
+    "buildah": {
+      "Package": "buildah",
+      "Version": "1.33.7+ds1-1ubuntu0.24.04.3",
+      "Architecture": "amd64"
+    },
+    "catatonit": {
+      "Package": "catatonit",
+      "Version": "0.1.7-1",
+      "Architecture": "amd64"
+    },
+    "conmon": {
+      "Package": "conmon",
+      "Version": "2.1.10+ds1-1build2",
+      "Architecture": "amd64"
+    },
+    "containernetworking-plugins": {
+      "Package": "containernetworking-plugins",
+      "Version": "1.1.1+ds1-3ubuntu0.24.04.3",
+      "Architecture": "amd64"
+    },
+    "crun": {
+      "Package": "crun",
+      "Version": "1.14.1-1",
+      "Architecture": "amd64"
+    },
+    "fuse-overlayfs": {
+      "Package": "fuse-overlayfs",
+      "Version": "1.13-1",
+      "Architecture": "amd64"
+    },
+    "gnutls-bin": {
+      "Package": "gnutls-bin",
+      "Version": "3.8.3-1.1ubuntu3.6",
+      "Architecture": "amd64",
+      "Multi-Arch": "foreign"
+    },
+    "golang-github-containers-common": {
+      "Package": "golang-github-containers-common",
+      "Version": "0.57.4+ds1-2ubuntu0.2",
+      "Architecture": "all"
+    },
+    "golang-github-containers-image": {
+      "Package": "golang-github-containers-image",
+      "Version": "5.29.2-2",
+      "Architecture": "all"
+    },
+    "incus": {
+      "Package": "incus",
+      "Version": "1:7.6-ubuntu24.04-202611021330",
+      "Architecture": "amd64"
+    },
+    "incus-base": {
+      "Package": "incus-base",
+      "Version": "1:7.6-ubuntu24.04-202611021330",
+      "Architecture": "amd64"
+    },
+    "incus-client": {
+      "Package": "incus-client",
+      "Version": "1:7.6-ubuntu24.04-202611021330",
+      "Architecture": "amd64"
+    },
+    "iw": {
+      "Package": "iw",
+      "Version": "6.7-1build1",
+      "Architecture": "amd64",
+      "Multi-Arch": "foreign"
+    },
+    "libboost-iostreams1.83.0": {
+      "Package": "libboost-iostreams1.83.0",
+      "Version": "1.83.0-2.1ubuntu3.2",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libboost-thread1.83.0": {
+      "Package": "libboost-thread1.83.0",
+      "Version": "1.83.0-2.1ubuntu3.2",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libbtrfs0t64": {
+      "Package": "libbtrfs0t64",
+      "Version": "6.6.3-1.1build2",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libevent-2.1-7t64": {
+      "Package": "libevent-2.1-7t64",
+      "Version": "2.1.12-stable-9ubuntu2.2",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libgnutls-dane0t64": {
+      "Package": "libgnutls-dane0t64",
+      "Version": "3.8.3-1.1ubuntu3.6",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libgpgme11t64": {
+      "Package": "libgpgme11t64",
+      "Version": "1.18.0-4.1ubuntu4",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libnet1": {
+      "Package": "libnet1",
+      "Version": "1.1.6+dfsg-3.2build1",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libpmemobj1": {
+      "Package": "libpmemobj1",
+      "Version": "1.13.1-1.1ubuntu2",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "libprotobuf-c1": {
+      "Package": "libprotobuf-c1",
+      "Version": "1.4.1-1ubuntu4",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "librados2": {
+      "Package": "librados2",
+      "Version": "19.2.3-0ubuntu0.24.04.3",
+      "Architecture": "amd64"
+    },
+    "librbd1": {
+      "Package": "librbd1",
+      "Version": "19.2.3-0ubuntu0.24.04.3",
+      "Architecture": "amd64"
+    },
+    "libunbound8": {
+      "Package": "libunbound8",
+      "Version": "1.19.2-1ubuntu3.12",
+      "Architecture": "amd64",
+      "Multi-Arch": "same"
+    },
+    "netavark": {
+      "Package": "netavark",
+      "Version": "1.4.0-4",
+      "Architecture": "amd64"
+    },
+    "passt": {
+      "Package": "passt",
+      "Version": "0.0~git20240220.1e6f92b-1",
+      "Architecture": "amd64",
+      "Multi-Arch": "foreign"
+    },
+    "podman": {
+      "Package": "podman",
+      "Version": "4.9.3+ds1-1ubuntu0.2",
+      "Architecture": "amd64"
+    },
+    "slirp4netns": {
+      "Package": "slirp4netns",
+      "Version": "1.2.1-1build2",
+      "Architecture": "amd64"
+    },
+    "sshfs": {
+      "Package": "sshfs",
+      "Version": "3.7.3-1.1build3",
+      "Architecture": "amd64"
+    },
+    "xdelta3": {
+      "Package": "xdelta3",
+      "Version": "3.0.11-dfsg-1.2",
+      "Architecture": "amd64"
+    }
+  },
+  "plan": "Inst netavark (1.4.0-4 Ubuntu:24.04/noble [amd64])\nInst aardvark-dns (1.4.0-5 Ubuntu:24.04/noble [amd64])\nInst containernetworking-plugins (1.1.1+ds1-3ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nInst golang-github-containers-image (5.29.2-2 Ubuntu:24.04/noble [all])\nInst golang-github-containers-common (0.57.4+ds1-2ubuntu0.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])\nInst libgpgme11t64 (1.18.0-4.1ubuntu4 Ubuntu:24.04/noble [amd64])\nInst buildah (1.33.7+ds1-1ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nInst catatonit (0.1.7-1 Ubuntu:24.04/noble [amd64])\nInst conmon (2.1.10+ds1-1build2 Ubuntu:24.04/noble, local-deb [amd64])\nInst crun (1.14.1-1 Ubuntu:24.04/noble, local-deb [amd64])\nInst fuse-overlayfs (1.13-1 Ubuntu:24.04/noble [amd64])\nInst libevent-2.1-7t64 (2.1.12-stable-9ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nInst libunbound8 (1.19.2-1ubuntu3.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nInst libgnutls-dane0t64 (3.8.3-1.1ubuntu3.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nInst gnutls-bin (3.8.3-1.1ubuntu3.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nInst incus [6.0.0-1ubuntu0.3] (1:7.6-ubuntu24.04-202611021330 local-deb [amd64]) []\nInst incus-client [6.0.0-1ubuntu0.3] (1:7.6-ubuntu24.04-202611021330 local-deb [amd64]) []\nInst iw (6.7-1build1 Ubuntu:24.04/noble [amd64]) []\nInst libbtrfs0t64 (6.6.3-1.1build2 Ubuntu:24.04/noble [amd64]) []\nInst libnet1 (1.1.6+dfsg-3.2build1 Ubuntu:24.04/noble [amd64]) []\nInst libprotobuf-c1 (1.4.1-1ubuntu4 Ubuntu:24.04/noble [amd64]) []\nInst xdelta3 (3.0.11-dfsg-1.2 Ubuntu:24.04/noble [amd64]) []\nInst incus-base (1:7.6-ubuntu24.04-202611021330 local-deb [amd64]) []\nInst libboost-iostreams1.83.0 (1.83.0-2.1ubuntu3.2 Ubuntu:24.04/noble-updates [amd64]) []\nInst libboost-thread1.83.0 (1.83.0-2.1ubuntu3.2 Ubuntu:24.04/noble-updates [amd64]) []\nInst librados2 (19.2.3-0ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []\nInst libpmemobj1 (1.13.1-1.1ubuntu2 Ubuntu:24.04/noble [amd64]) []\nInst librbd1 (19.2.3-0ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nInst passt (0.0~git20240220.1e6f92b-1 Ubuntu:24.04/noble [amd64])\nInst podman (4.9.3+ds1-1ubuntu0.2 Ubuntu:24.04/noble-updates, local-deb [amd64])\nInst slirp4netns (1.2.1-1build2 Ubuntu:24.04/noble [amd64])\nInst sshfs (3.7.3-1.1build3 Ubuntu:24.04/noble [amd64])\nConf netavark (1.4.0-4 Ubuntu:24.04/noble [amd64])\nConf aardvark-dns (1.4.0-5 Ubuntu:24.04/noble [amd64])\nConf containernetworking-plugins (1.1.1+ds1-3ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf golang-github-containers-image (5.29.2-2 Ubuntu:24.04/noble [all])\nConf golang-github-containers-common (0.57.4+ds1-2ubuntu0.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])\nConf libgpgme11t64 (1.18.0-4.1ubuntu4 Ubuntu:24.04/noble [amd64])\nConf buildah (1.33.7+ds1-1ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf catatonit (0.1.7-1 Ubuntu:24.04/noble [amd64])\nConf conmon (2.1.10+ds1-1build2 Ubuntu:24.04/noble, local-deb [amd64])\nConf crun (1.14.1-1 Ubuntu:24.04/noble, local-deb [amd64])\nConf fuse-overlayfs (1.13-1 Ubuntu:24.04/noble [amd64])\nConf libevent-2.1-7t64 (2.1.12-stable-9ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf libunbound8 (1.19.2-1ubuntu3.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf libgnutls-dane0t64 (3.8.3-1.1ubuntu3.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf gnutls-bin (3.8.3-1.1ubuntu3.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf incus (1:7.6-ubuntu24.04-202611021330 local-deb [amd64])\nConf incus-client (1:7.6-ubuntu24.04-202611021330 local-deb [amd64])\nConf iw (6.7-1build1 Ubuntu:24.04/noble [amd64])\nConf libbtrfs0t64 (6.6.3-1.1build2 Ubuntu:24.04/noble [amd64])\nConf libnet1 (1.1.6+dfsg-3.2build1 Ubuntu:24.04/noble [amd64])\nConf libprotobuf-c1 (1.4.1-1ubuntu4 Ubuntu:24.04/noble [amd64])\nConf xdelta3 (3.0.11-dfsg-1.2 Ubuntu:24.04/noble [amd64])\nConf incus-base (1:7.6-ubuntu24.04-202611021330 local-deb [amd64])\nConf libboost-iostreams1.83.0 (1.83.0-2.1ubuntu3.2 Ubuntu:24.04/noble-updates [amd64])\nConf libboost-thread1.83.0 (1.83.0-2.1ubuntu3.2 Ubuntu:24.04/noble-updates [amd64])\nConf librados2 (19.2.3-0ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf libpmemobj1 (1.13.1-1.1ubuntu2 Ubuntu:24.04/noble [amd64])\nConf librbd1 (19.2.3-0ubuntu0.24.04.3 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])\nConf passt (0.0~git20240220.1e6f92b-1 Ubuntu:24.04/noble [amd64])\nConf podman (4.9.3+ds1-1ubuntu0.2 Ubuntu:24.04/noble-updates, local-deb [amd64])\nConf slirp4netns (1.2.1-1build2 Ubuntu:24.04/noble [amd64])\nConf sshfs (3.7.3-1.1build3 Ubuntu:24.04/noble [amd64])\n",
+  "current_packages": {
+    "incus": {
+      "Package": "incus",
+      "Version": "6.0.0-1ubuntu0.3",
+      "Architecture": "amd64",
+      "Status": "install ok installed"
+    },
+    "incus-client": {
+      "Package": "incus-client",
+      "Version": "6.0.0-1ubuntu0.3",
+      "Architecture": "amd64",
+      "Status": "install ok installed"
+    }
+  }
+}

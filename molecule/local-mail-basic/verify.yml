@@ -1,0 +1,13 @@
+---
+- name: Verify that the disabled scenario did not create ownership state
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Inspect candidate ownership state
+      ansible.builtin.stat:
+        path: /var/lib/lit-local-mail
+      register: local_mail_basic_state
+    - name: Require no service preparation from default or invalid inputs
+      ansible.builtin.assert:
+        that: [not local_mail_basic_state.stat.exists]
+        quiet: true

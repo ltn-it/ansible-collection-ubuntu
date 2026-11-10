@@ -1,0 +1,136 @@
+---
+- name: Validate opt-in watchdog installation interface
+  ansible.builtin.assert:
+    that:
+      - github_runner_ephemeral_watchdog_install is boolean
+      - github_runner_ephemeral_watchdog_activate is boolean
+      - not github_runner_ephemeral_watchdog_activate or github_runner_ephemeral_watchdog_install
+    fail_msg: Watchdog installation and activation require explicit boolean inputs.
+  changed_when: false
+
+- name: Prepare explicitly selected Root watchdog
+  when: github_runner_ephemeral_watchdog_install
+  vars:
+    github_runner_ephemeral_watchdog_modules:
+      - ephemeral_worker_admission.py
+      - ephemeral_worker_lease.py
+      - ephemeral_worker_incus.py
+      - ephemeral_worker_watchdog.py
+      - ephemeral_worker_watchdog_entry.py
+    github_runner_ephemeral_watchdog_units:
+      lit-github-runner-ephemeral-worker-watchdog.service: >-
+        {{ lookup('ansible.builtin.template', 'ephemeral_worker_watchdog.service.j2') | hash('sha256') }}
+      lit-github-runner-ephemeral-worker-watchdog.timer: >-
+        {{ lookup('ansible.builtin.template', 'ephemeral_worker_watchdog.timer.j2') | hash('sha256') }}
+  block:
+    - name: Require complete immutable watchdog source selection
+      ansible.builtin.assert:
+        that:
+          - github_runner_ephemeral_watchdog_module_sha256 is mapping
+          - >-
+            github_runner_ephemeral_watchdog_module_sha256.keys() | list | sort
+            == github_runner_ephemeral_watchdog_modules | sort
+          - github_runner_ephemeral_watchdog_machine_id is match('^[0-9a-f]{32}$')
+          - >-
+            github_runner_ephemeral_watchdog_boot_id
+            is match('^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+          - >-
+            github_runner_ephemeral_watchdog_program_directory
+            is match('^/usr/local/lib/[A-Za-z0-9_-]+$')
+          - >-
+            github_runner_ephemeral_watchdog_state_directory
+            is match('^/var/lib/lightning-it/[A-Za-z0-9_-]+$')
+        fail_msg: Watchdog source inventory, live target identities and private paths must be explicit.
+      changed_when: false
+
+    - name: Verify watchdog module bytes from selected collection
+      ansible.builtin.assert:
+        that:
+          - github_runner_ephemeral_watchdog_module_sha256[item] is match('^[0-9a-f]{64}$')
+          - >-
+            github_runner_ephemeral_watchdog_module_sha256[item]
+            == lookup('ansible.builtin.file', role_path ~ '/files/' ~ item, rstrip=false) | hash('sha256')
+        fail_msg: Watchdog module bytes differ from the explicitly selected fresh collection.
+      loop: "{{ github_runner_ephemeral_watchdog_modules }}"
+      changed_when: false
+
+    - name: Inspect Root target and existing watchdog assets before effects
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path ~ '/files/ephemeral_worker_watchdog_install_guard.py') }}"
+          - "{{ github_runner_ephemeral_watchdog_machine_id }}"
+          - "{{ github_runner_ephemeral_watchdog_boot_id }}"
+          - "{{ github_runner_ephemeral_watchdog_program_directory }}"
+          - "{{ github_runner_ephemeral_watchdog_state_directory }}"
+          - "{{ github_runner_ephemeral_watchdog_module_sha256 | to_json }}"
+          - "{{ github_runner_ephemeral_watchdog_units | to_json }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Create private watchdog directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "{{ github_runner_ephemeral_watchdog_program_directory }}"
+        - "{{ github_runner_ephemeral_watchdog_state_directory }}"
+
+    - name: Install exact watchdog modules
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ github_runner_ephemeral_watchdog_program_directory }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ github_runner_ephemeral_watchdog_modules }}"
+
+    - name: Install Root watchdog service
+      ansible.builtin.template:
+        src: ephemeral_worker_watchdog.service.j2
+        dest: /etc/systemd/system/lit-github-runner-ephemeral-worker-watchdog.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: github_runner_ephemeral_watchdog_service_result
+
+    - name: Install Root watchdog timer
+      ansible.builtin.template:
+        src: ephemeral_worker_watchdog.timer.j2
+        dest: /etc/systemd/system/lit-github-runner-ephemeral-worker-watchdog.timer
+        owner: root
+        group: root
+        mode: "0644"
+      register: github_runner_ephemeral_watchdog_timer_result
+
+    - name: Verify complete watchdog unit files
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemd-analyze
+          - verify
+          - /etc/systemd/system/lit-github-runner-ephemeral-worker-watchdog.service
+          - /etc/systemd/system/lit-github-runner-ephemeral-worker-watchdog.timer
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Reload watchdog units after changed definitions
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when:
+        - not ansible_check_mode
+        - >-
+          github_runner_ephemeral_watchdog_service_result.changed
+          or github_runner_ephemeral_watchdog_timer_result.changed
+
+    - name: Activate explicitly selected watchdog timer
+      ansible.builtin.systemd_service:
+        name: lit-github-runner-ephemeral-worker-watchdog.timer
+        enabled: true
+        state: started
+      when: github_runner_ephemeral_watchdog_activate
