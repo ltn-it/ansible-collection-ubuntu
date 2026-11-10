@@ -22,6 +22,7 @@ import test_github_runner_incus_admission as admission_fixtures
 
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
+import incus_runtime_client
 from incus_lease_issuer import runtime_rpc, identity, ledger, preparation, engine_policy, root_session
 from incus_lease_issuer.identity import Denied
 
@@ -179,6 +180,22 @@ class RootRuntimeTests(unittest.TestCase):
         self.assertEqual(renewals[0]["host_api_authorization"]["authorization_sha256"],
                          ledger.digest(after["authorizations"][-1]))
         self.assertEqual(len(self.fixture.host_sends), 2)  # Maintenance baseline + paired actual grant.
+
+    def test_run_rejects_before_lease_when_first_heartbeat_can_overlap_preparation(self):
+        before = self.store.read(self.lease)
+        with mock.patch.object(ledger.Ledger, "runtime_prepare", autospec=True) as prepare:
+            result, replies = self.invoke("run", token_changes={"exp": int(time.time()) + 60})
+        prepare.assert_not_called()
+        self.assertEqual([reply["type"] for reply in replies], ["challenge", "failure"])
+        self.assertEqual(result["disposition"], "denied-before-intent")
+        self.assertEqual(self.store.read(self.lease), before)
+        with (mock.patch.object(incus_runtime_client, "_authenticate", return_value=(object(),)),
+              mock.patch.object(incus_runtime_client, "_authenticated_reply", return_value=result),
+              mock.patch.object(incus_runtime_client, "_close"),
+              mock.patch.object(incus_runtime_client, "operation") as renew):
+            with self.assertRaises(incus_runtime_client._BeforeIntent):
+                incus_runtime_client.run_cell("approved")
+        renew.assert_not_called()
 
     def test_run_cannot_reprepare_or_repeat_existing_native_invocation(self):
         before = self.store.read(self.lease)
