@@ -166,8 +166,116 @@ def _command(manifest, arguments, seconds=5):
         proc.stdout.close()
 
 
-def _backend(manifest):
-    rc, raw = _command(manifest, ["info", "--format=json"])
+def _pull_group_members(pid, deadline):
+    """The unreaped new-session leader pins its process-group identity."""
+    members = []
+    for entry in os.listdir("/proc"):
+        require(time.monotonic() < deadline, "engine-image-pull-timeout")
+        if not entry.isdecimal():
+            continue
+        try:
+            with open("/proc/" + entry + "/stat", "rb") as stream:
+                fields = stream.read(8192).rsplit(b") ", 1)[1].split()
+            if int(fields[2]) == pid and int(entry) != pid and fields[0] != b"Z":
+                members.append(int(entry))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return members
+
+
+def _pull_image(manifest, seconds):
+    """One fixed public image pull; no caller transport, authfile or retry."""
+    from . import runtime_entry
+    require(os.geteuid() == 0 and 0 < seconds <= 120, "engine-image-pull-budget")
+    require(signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL, "engine-image-child-owner-required")
+    proc = None
+    deadline = time.monotonic() + seconds
+    try:
+        # Do not poll/wait (reap) this leader before its entire new group is
+        # checked/signalled: the original unreaped child pins the PGID.
+        with runtime_entry._spawn_adoption():
+            proc = subprocess.Popen(_prefix(manifest) + ["pull", "--retry=0", "--tls-verify=true",
+                "--platform=linux/amd64", engine.IMAGE], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=_environment(manifest), close_fds=True,
+                start_new_session=True, umask=0o077)
+        total = 0
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                require(remaining > 0 and selector.select(remaining), "engine-image-pull-timeout")
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                require(total <= 2 * 1024 ** 2, "engine-image-pull-output-limit")
+        while True:
+            require(time.monotonic() < deadline, "engine-image-pull-timeout")
+            observed = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if observed is not None:
+                break
+            time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+        require(observed.si_code == os.CLD_EXITED and observed.si_status == 0,
+                "engine-image-pull-failed")
+        require(not _pull_group_members(proc.pid, deadline), "engine-image-pull-live-helper")
+    finally:
+        if proc is not None:
+            # This Popen child is still ours and unreaped, including when the
+            # initial-transition timer fired immediately after spawn adoption.
+            # Unknown/partial writes remain owned and are never deleted here.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=2)
+            if proc.stdout is not None:
+                proc.stdout.close()
+
+
+def _provision_image(config, prepared, store, manifest):
+    """Root preparation only, inside the fresh engine-prepare journal intent."""
+    from . import storage_quota
+    preparation._fresh(config, prepared, store)
+    details = identity.decode_json(manifest.canonical_bytes)
+    with store._transaction() as state:
+        require(all(key == prepared.lease_id or lease["state"] == "closed"
+                    for key, lease in state["leases"].items()), "engine-other-pilot-lease-active")
+    record = store.read(prepared.lease_id)
+    effects = [row for row in record["effects"].values() if row["operation"] == "engine-prepare"]
+    require(len(effects) == 1 and effects[0]["state"] == "intent"
+            and effects[0]["target"] == "engine:" + prepared.lease_id, "engine-image-fresh-intent")
+    _start_budget(prepared, manifest)
+    now = time.time()
+    runtime = details["limits"]["timeout_seconds"]
+    end = min(now + 120, prepared.expires_at - runtime)
+    if record.get("authorizations"):
+        end = min(end, record["authorizations"][-1]["valid_until"])
+    require(end > now, "engine-image-pull-budget")
+    # All transfer/extraction temporaries, image layers and engine state are
+    # on the original private bounded filesystem, never the global cache.
+    with storage_quota.acquire_existing_quota(config.storage_quota_policy_path,
+            config.storage_quota_policy_sha256, manifest):
+        seconds = min(120, end - time.time())
+        from . import runtime_entry
+        if runtime_entry._ACTIVE is not None:
+            remaining = signal.getitimer(signal.ITIMER_REAL)[0]
+            require(remaining > 0, "engine-image-initial-budget")
+            seconds = min(seconds, remaining)
+        phase_end = time.monotonic() + seconds
+        _pull_image(manifest, seconds)
+        preparation._fresh(config, prepared, store)
+        _backend(manifest, deadline=phase_end)  # Preserve exact image checks.
+        _start_budget(prepared, manifest)
+        require(time.time() < end and time.monotonic() < phase_end,
+                "engine-image-provision-budget-expired")
+
+
+def _backend(manifest, *, deadline=None):
+    def command(arguments):
+        seconds = 5 if deadline is None else min(5, deadline - time.monotonic())
+        require(seconds > 0, "engine-image-provision-budget-expired")
+        return _command(manifest, arguments, seconds=seconds)
+    rc, raw = command(["info", "--format=json"])
     require(rc == 0, "engine-info-failed")
     value = identity.decode_json(raw)
     host, store = value["host"], value["store"]
@@ -178,7 +286,7 @@ def _backend(manifest):
             and store["runRoot"] == details["engine"]["runroot"], "engine-local-runtime-required")
     for key in ("ociRuntime", "conmon"):
         installation.trusted_file(engine._path(host[key]["path"]), max_bytes=128 * 1024 ** 2)
-    rc, raw = _command(manifest, ["image", "inspect", "--format=json", engine.IMAGE])
+    rc, raw = command(["image", "inspect", "--format=json", engine.IMAGE])
     images = __import__("json").loads(raw)
     require(rc == 0 and type(images) is list and len(images) == 1, "engine-image-inspect")
     image = images[0]
@@ -187,7 +295,7 @@ def _backend(manifest):
     require(image["Digest"] in {"sha256:" + engine.IMAGE_INDEX, "sha256:" + engine.IMAGE_CHILD}
             and image["Id"].removeprefix("sha256:") == IMAGE_CONFIG
             and image["Architecture"] == "amd64" and image["Os"] == "linux", "engine-exact-image-required")
-    rc, _ = _command(manifest, ["container", "exists", details["runtime"]["name"]])
+    rc, _ = command(["container", "exists", details["runtime"]["name"]])
     require(rc == 1, "engine-runtime-name-not-absent")
 
 

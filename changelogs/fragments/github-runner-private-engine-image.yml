@@ -1,0 +1,3 @@
+---
+bugfixes:
+  - github_runner - populate each fresh private engine store with the pinned image before publishing the runtime context.

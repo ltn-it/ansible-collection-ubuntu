@@ -244,10 +244,17 @@ def _engine_directories(config, prepared, store):
                 receipts.append({"path": path, "device": proof.st_dev, "inode": proof.st_ino})
             finally:
                 os.close(child)
+        # A cold private graphroot must be populated before it can be signed
+        # or started with --pull=never. The existing intent owns every partial
+        # write; no retry or automatic prestart cleanup adopts an unknown pull.
+        from . import engine_executor
+        manifest = engine_policy.compile_engine_policy(prepared.engine_descriptor_path,
+                                                        prepared.engine_descriptor_sha256)
+        engine_executor._provision_image(config, prepared, store, manifest)
         _fresh(config, prepared, store)
         store.record(prepared.lease_id, effect, "verified", evidence_sha256=ledger.digest({
             "prepared": prepared.sha256, "directories": receipts}))
-    except Exception:
+    except BaseException:
         _unknown(store, prepared, effect, "engine-prepare")
         raise PreparationUnknown("preparation-unknown") from None
     finally:

@@ -477,6 +477,25 @@ missing-input behavior only. The unit tests also exercise a freshly copied
 private package through the isolated launcher; neither is a native service or
 VM acceptance claim. No executable live activation command is provided here.
 
+### Private runtime engine image preparation
+
+Each fresh admitted lease owns a separate private Podman graphroot and runroot.
+Root preparation populates that empty store once with the fixed Devtools image
+index for Linux amd64, using TLS verification and no retry. The exact existing
+index/child/config checks run before the context is signed; runtime execution
+retains `--pull=never`. No job image URL, credentials or host-global cache is used.
+Image transfer and extraction remain inside the existing private storage quota.
+The pull has a 120-second maximum and consumes the original initial-transition,
+authorization and lease budgets; the complete engine execution budget must still
+remain afterward. Image footprint, transfer time and actual native storage/network
+behavior require operating qualification before activation.
+
+Possible partial writes, timeouts or failed image readback retain an unknown
+`engine-prepare` effect, with no automatic retry or deletion. Root must reconcile
+that store before a later pilot lease may provision another image. Successful
+ordinary engine shutdown and cleanup remove only the recorded original private
+directory trees; prestart failure does not manufacture an engine-exit receipt.
+
 ### Offline Root generation publication
 
 `incus_lease_issuer.generation_publisher.RootGenerationPublisher` is the explicit
