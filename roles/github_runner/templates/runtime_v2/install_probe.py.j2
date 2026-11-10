@@ -1,0 +1,227 @@
+"""Read-only Root installation preflight/readback; no service activation."""
+import grp
+import hashlib
+import json
+import math
+import os
+from pathlib import PurePosixPath
+import pwd
+import re
+import stat
+import subprocess
+import sys
+
+PRIVATE = "/usr/local/lib/lit-incus-runtime-v2"
+PUBLIC = "/usr/libexec/lightning-it"
+SOCKET = "/run/lightning-it/incus-runtime-v2/socket"
+SHA = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def require(value):
+    if not value:
+        raise ValueError("runtime-v2-installation-denied")
+
+
+def pairs(values):
+    result = {}
+    for key, value in values:
+        require(key not in result)
+        result[key] = value
+    return result
+
+
+def finite(value):
+    result = float(value)
+    require(math.isfinite(result))
+    return result
+
+
+def decode(raw):
+    return json.loads(raw, object_pairs_hook=pairs, parse_float=finite,
+                      parse_constant=lambda _: require(False))
+
+
+def directory(path, missing=False):
+    require(type(path) is str and path.startswith("/") and str(PurePosixPath(path)) == path
+            and ".." not in PurePosixPath(path).parts)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for name in PurePosixPath(path).parts[1:]:
+            try:
+                following = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except FileNotFoundError:
+                require(missing)
+                return None
+            os.close(fd)
+            fd = following
+            info = os.fstat(fd)
+            require(info.st_uid == 0 and not info.st_mode & 0o022)
+        result, fd = fd, -1
+        return result
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def sealed(path, expected=None, private=True):
+    parent = directory(str(PurePosixPath(path).parent))
+    try:
+        fd = os.open(PurePosixPath(path).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            before = os.fstat(fd)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+                    and not before.st_mode & 0o022 and before.st_size <= 8*1024*1024
+                    and (not private or stat.S_IMODE(before.st_mode) == 0o600))
+            raw = bytearray()
+            while True:
+                part = os.read(fd, 65536)
+                if not part:
+                    break
+                raw.extend(part)
+                require(len(raw) <= 8*1024*1024)
+            after = os.fstat(fd)
+            require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)
+                    == (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns))
+            require(expected is None or SHA.fullmatch(expected) and hashlib.sha256(raw).hexdigest() == expected)
+            return bytes(raw)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+def state(unit):
+    result = subprocess.run(["/usr/bin/systemctl", "show", "--no-pager", unit,
+        "--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,DropInPaths"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={"PATH":"/usr/bin:/bin","LANG":"C"}, timeout=5, check=False)
+    require(result.returncode in {0,1} and len(result.stdout) <= 16384)
+    values = dict(line.split("=",1) for line in result.stdout.decode("utf-8").splitlines())
+    require(set(values) == {"LoadState","ActiveState","SubState","UnitFileState","FragmentPath","DropInPaths"})
+    require(values["DropInPaths"] == "" and values["ActiveState"] == "inactive" and values["SubState"] == "dead")
+    if values["LoadState"] == "not-found":
+        require(values["UnitFileState"] == values["FragmentPath"] == "")
+    else:
+        require(values["LoadState"] == "loaded" and values["UnitFileState"] in {"disabled","static"}
+                and values["FragmentPath"] == "/etc/systemd/system/"+unit)
+
+
+def inactive():
+    require(not os.path.lexists(SOCKET))  # Foreign/stale socket is never removed/adopted.
+    for unit in ("lit-incus-runtime-v2.socket","lit-incus-runtime-v2@.service"):
+        state(unit)
+    result = subprocess.run(["/usr/bin/systemctl","list-units","--all","--plain","--no-legend","--no-pager",
+        "lit-incus-runtime-v2@*.service"], stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+        env={"PATH":"/usr/bin:/bin","LANG":"C"},timeout=5,check=False)
+    require(result.returncode == 0 and len(result.stdout) <= 16384)
+    for line in result.stdout.decode().splitlines():
+        unit = line.split()[0]
+        require(unit.startswith("lit-incus-runtime-v2@") and unit.endswith(".service") and len(unit) <= 255)
+        state(unit)
+
+
+def configurations(path, digest, group):
+    runtime = decode(sealed(path,digest))
+    require(runtime["schema"] == 2 and type(runtime["schema"]) is int)
+    registry = decode(sealed(runtime["registry_path"],runtime["registry_sha256"]))
+    prep = decode(sealed(runtime["preparation_config_path"],runtime["preparation_config_sha256"]))
+    require(prep["registry_path"] == runtime["registry_path"] and prep["registry_sha256"] == runtime["registry_sha256"])
+    require(registry["api_read_token_path"] is None and 1 <= len(registry["cells"]) <= 2)
+    collector, service = registry["collector"], registry["collector"]["service"]
+    account, selected_group = pwd.getpwnam(service["service_user"]), grp.getgrnam(group)
+    require(account.pw_uid > 0 and selected_group.gr_gid > 0 and account.pw_gid == selected_group.gr_gid
+            and service["installation"]["service_uid"] == account.pw_uid)
+    require(not any(row.pw_name != account.pw_name and row.pw_gid == account.pw_gid for row in pwd.getpwall())
+            and set(selected_group.gr_mem) <= {account.pw_name})
+    memberships = set(os.getgrouplist(account.pw_name,account.pw_gid))
+    for forbidden in ("root","sudo","docker","incus","incus-admin"):
+        try:
+            require(grp.getgrnam(forbidden).gr_gid not in memberships)
+        except KeyError:
+            pass
+    for pathkey, hashkey in (("profile_path","profile_sha256"),("config_path","config_sha256")):
+        sealed(collector[pathkey],collector[hashkey],private=pathkey == "config_path")
+    sealed(service["fragment_path"],service["fragment_sha256"],private=False)
+    sealed(service["installation"]["manifest_path"])
+    for dropin in service["dropins"]:
+        sealed(dropin["path"],dropin["sha256"],private=False)
+    for cell in registry["cells"].values():
+        body = decode(sealed(cell["cell_config_path"],cell["cell_sha256"]))
+        pin = body["incus"]["server_certificate"]
+        sealed(pin["path"],pin["sha256"])
+    for key in ("network_fence_policy", "host_api_fence_policy", "storage_quota_policy"):
+        decode(sealed(prep[key+"_path"],prep[key+"_sha256"]))
+    sealed(prep["signing_key_path"])
+    lock = sealed(prep["lock_path"])
+    require(lock == b"")
+    store = registry["ledger_path"]
+    marker = decode(sealed(store+"/.initialized"))
+    state = decode(sealed(store+"/state.json"))
+    sealed(store+"/lock")
+    require(state["version"] == marker["version"] == 1 and state["store_id"] == marker["store_id"]
+            and type(state["leases"]) is dict and all(row["state"] == "closed" for row in state["leases"].values()))
+    original = {key:value for key,value in state.items() if key != "checksum"}
+    require(state["checksum"] == hashlib.sha256(json.dumps(original,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest())
+    return runtime
+
+
+def installed_files(module_pins, client_pins, desired, complete):
+    fd = directory(PRIVATE,missing=not complete)
+    if fd is not None:
+        try:
+            require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
+                    and set(os.listdir(fd)) <= {"incus_lease_issuer","runtime_v2_entry.py"})
+        finally:
+            os.close(fd)
+    package = PRIVATE+"/incus_lease_issuer"
+    fd = directory(package,missing=not complete)
+    if fd is not None:
+        try:
+            require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700 and set(os.listdir(fd)) == set(module_pins))
+        finally:
+            os.close(fd)
+        for name,digest in module_pins.items():
+            require(re.fullmatch(r"[_a-z][_a-z0-9]*\.py",name))
+            sealed(package+"/"+name,digest)
+    for name,digest in client_pins.items():
+        target = PUBLIC+"/"+name
+        if complete or os.path.lexists(target):
+            sealed(target,digest,private=False)
+    for target,digest in desired.items():
+        if complete or os.path.lexists(target):
+            sealed(target,digest,private=target.startswith(PRIVATE) or target.endswith("runtime-v2-anchor.json"))
+
+
+def main():
+    try:
+        require(os.geteuid() == 0 and len(sys.argv) == 8)
+        phase,config_path,digest,group = sys.argv[1:5]
+        require(phase in {"before","after"})
+        module_pins,client_pins,desired = map(decode,sys.argv[5:8])
+        require(module_pins and set(client_pins) == {"incus-runtime-client","incus_job_client.py"})
+        inactive()
+        configurations(config_path,digest,group)
+        for path in (PRIVATE,PUBLIC,"/etc/lit/incus-lease-issuer","/etc/lightning-it",
+                     "/run/lightning-it/incus-runtime-v2","/etc/systemd/system","/usr/lib/tmpfiles.d"):
+            fd=directory(path,missing=True)
+            if fd is not None:os.close(fd)
+        installed_files(module_pins,client_pins,desired,phase == "after")
+        import cryptography
+        require(tuple(map(int,cryptography.__version__.split(".")[:2])) >= (41,0))
+        if phase == "after":
+            sys.dont_write_bytecode=True
+            sys.path.insert(0,PRIVATE)
+            from incus_lease_issuer.runtime_rpc import RuntimeRPC
+            dispatcher = RuntimeRPC(config_path,digest)
+            from incus_lease_issuer import preparation, signed_context
+            root = preparation._config(dispatcher._config.preparation_config_path,
+                                       dispatcher._config.preparation_config_sha256)[0]
+            signed_context.RootSigner(root.signing_key_path,root.signing_public_key)
+        print("runtime-v2-disabled-installation-validated")
+        return 0
+    except Exception:
+        print("runtime-v2-installation-denied",file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":raise SystemExit(main())

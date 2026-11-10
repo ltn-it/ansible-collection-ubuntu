@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - incus - bind maintenance Install and Configure actions to the exact changed members of the pinned
+    package closure, preserving already configured dependencies without reinstalling them; keep full
+    archive validation, final closure verification and once-only unknown-outcome guards.

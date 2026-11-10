@@ -1,0 +1,14 @@
+---
+- name: Verify disabled installer produced no service
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Read sender service absence
+      ansible.builtin.stat:
+        path: /etc/systemd/system/lit-github-runner-ephemeral-worker-local-mail.service
+      register: github_runner_local_mail_service_probe
+    - name: Require no installed sender unit
+      ansible.builtin.assert:
+        that:
+          - not github_runner_local_mail_service_probe.stat.exists
+        quiet: true

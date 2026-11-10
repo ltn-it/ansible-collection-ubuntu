@@ -1,0 +1,482 @@
+{
+  "schema": 1,
+  "candidate_sha256": "1b7c0c2c6baeb0b3130f3156047dcf1f40db59e89345ea593e909472e5ed7500",
+  "hook_literal": "/usr/sbin/dpkg-preconfigure --apt || true",
+  "protocol": 1,
+  "module_root": "/usr/share/perl5/Debconf",
+  "module_directories": [
+    "Client",
+    "DbDriver",
+    "Element",
+    "Element/Dialog",
+    "Element/Editor",
+    "Element/Gnome",
+    "Element/Noninteractive",
+    "Element/Teletype",
+    "Element/Web",
+    "Format",
+    "FrontEnd",
+    "Template"
+  ],
+  "modules": {
+    "AutoSelect.pm": {
+      "sha256": "f2a6ec2142d76cc775668f239e0210d769d5329c2ae494b1af51a52fcb8f387b",
+      "size": 2024
+    },
+    "Base.pm": {
+      "sha256": "b69794dc206f91e1d8230dfff68c97543f7c2937e02270d5b09557504e25ec32",
+      "size": 510
+    },
+    "Client/ConfModule.pm": {
+      "sha256": "dee1cb9f961b76d28ef7c6e099ebf0ef4e18bad55f4d0bf843245f8ab2b80457",
+      "size": 3891
+    },
+    "ConfModule.pm": {
+      "sha256": "010edf4ec588ad8fc1856f37ea9767b6b8e5eeb82017ce922d887c671358be8f",
+      "size": 15717
+    },
+    "Config.pm": {
+      "sha256": "e5e262cea03f075f0a459f57c077f485a184b4819c3bea7d2f5bb55528a073f5",
+      "size": 7181
+    },
+    "Db.pm": {
+      "sha256": "ee568caf310d037671e28f5aca28526bb9509ac88897e1be437d5570d678b254",
+      "size": 1212
+    },
+    "DbDriver.pm": {
+      "sha256": "281474446e4b96c66425716afc63837be4684a08be6ae0fc455edd65ed16a416",
+      "size": 2408
+    },
+    "DbDriver/Backup.pm": {
+      "sha256": "3620ba1981937ffe39fd1365561e751dc11a78ce4b9087bf04858c2e90a5e952",
+      "size": 1647
+    },
+    "DbDriver/Cache.pm": {
+      "sha256": "2b7548c30e8ded3b1bbc795a1396edb3a812fee32d5aaa481650535202742ebd",
+      "size": 4830
+    },
+    "DbDriver/Copy.pm": {
+      "sha256": "f762dfec8894befed2f129342dc56cea97e273ec99d7e04abf94ef540ad0b2cb",
+      "size": 959
+    },
+    "DbDriver/Debug.pm": {
+      "sha256": "f42691f8a393dbde2229c1faeda617b9c521c9baa518bdd480263c2947c3a957",
+      "size": 961
+    },
+    "DbDriver/DirTree.pm": {
+      "sha256": "56b40bf04a33c226ae8756297e88756f9da1155c2e0d55451f029498322621fd",
+      "size": 1994
+    },
+    "DbDriver/Directory.pm": {
+      "sha256": "febd6f5eb719249fdf52fb124d5124d5fe8e7d507698e8ce524fcf6f069f2b7a",
+      "size": 3702
+    },
+    "DbDriver/File.pm": {
+      "sha256": "abb4c3eedf11c0724ca539115efd85add7d62ccef92f21c6f6899b293459ae73",
+      "size": 3730
+    },
+    "DbDriver/LDAP.pm": {
+      "sha256": "dc729b02bbb78fac5c200725f619c8be42cf4eb7ce04a5b16bf143408d29ec34",
+      "size": 6215
+    },
+    "DbDriver/PackageDir.pm": {
+      "sha256": "3b52f5916de51dedeb563c2ce3db83a4d749d1fcc9eac917a9b80af03a43aa2b",
+      "size": 3680
+    },
+    "DbDriver/Pipe.pm": {
+      "sha256": "d992f4df3a92570ac5838aa019afabfbacd78ca17cc1b4da905c82f6b7e2712c",
+      "size": 1810
+    },
+    "DbDriver/Stack.pm": {
+      "sha256": "192d19a3b8701fcc1fe0ff634fb2e6aa1b9d56e422e13dd03c6e34b3c802bda2",
+      "size": 5260
+    },
+    "Element.pm": {
+      "sha256": "a2b1c2afd76a96771daa3253e277b697c5d69efdb29d540dfff816b986d71fad",
+      "size": 206
+    },
+    "Element/Dialog/Boolean.pm": {
+      "sha256": "8b005178b1eaa2287743c1f13d6f9aa33778428110811f2c73c8c07d2bbf0678",
+      "size": 740
+    },
+    "Element/Dialog/Error.pm": {
+      "sha256": "f8b82dddc6846a459d0b20e3e858c8d85421cafb4528d51b19e58a61f6e7dd3b",
+      "size": 341
+    },
+    "Element/Dialog/Multiselect.pm": {
+      "sha256": "7f66878812ce99fd67b4dd85eb42b8b12d0ab83b83e63f0d4602117911b5cab8",
+      "size": 2194
+    },
+    "Element/Dialog/Note.pm": {
+      "sha256": "338e4f869b96f4587f23d4d220cb5feb32938aae56720f2397514369f4b9500e",
+      "size": 340
+    },
+    "Element/Dialog/Password.pm": {
+      "sha256": "602a508a94ff0af5e6629d086def8ebf518763e658ced266d08301c44d990aa0",
+      "size": 700
+    },
+    "Element/Dialog/Progress.pm": {
+      "sha256": "236b9d8671234e53262228463b741d7bb6b15880e52dd3b1696b33a10e0ab60f",
+      "size": 1857
+    },
+    "Element/Dialog/Select.pm": {
+      "sha256": "d6efc6ffa815caa6cdd0f1838b8703d9a5dee36b849a66707c1fde28f1ca4fcc",
+      "size": 1692
+    },
+    "Element/Dialog/String.pm": {
+      "sha256": "64111195f36e838121e0b30a799a736cd4ea4c9ea40b418e02635cba9a37a2c6",
+      "size": 797
+    },
+    "Element/Dialog/Text.pm": {
+      "sha256": "58f7fd84f1bb43f997ed248b21eceb319be83029d0e92e321e6b359507fa5052",
+      "size": 340
+    },
+    "Element/Editor/Boolean.pm": {
+      "sha256": "7ce327c85796f4dcbb91e6b983e548359affa9fc4264e8e80f9ca15f79e43e6a",
+      "size": 1018
+    },
+    "Element/Editor/Error.pm": {
+      "sha256": "8d210e36c5a7ed8821c05576d0caf047b85e68554af04f027a4075cf89d3fd0f",
+      "size": 176
+    },
+    "Element/Editor/Multiselect.pm": {
+      "sha256": "4540144e3f3c9c0935d17c78144bb4406ffa43fefe259abd0455cfd4ed2763df",
+      "size": 926
+    },
+    "Element/Editor/Note.pm": {
+      "sha256": "90f71570e2975217739074fc807b975f0506b3323fd17ae6d4c7179d34119091",
+      "size": 175
+    },
+    "Element/Editor/Password.pm": {
+      "sha256": "4376048c2b5e27b8622834a3f1f8449ee9d7413c606bad1dd8bcf06d6a854e2e",
+      "size": 182
+    },
+    "Element/Editor/Progress.pm": {
+      "sha256": "a000b866a949e08ef3dff1f9ad0ccec1f463dce3c554194dbad8ed9384ca54b8",
+      "size": 246
+    },
+    "Element/Editor/Select.pm": {
+      "sha256": "2fd2b0182c1cc4e6b273991ea664d8b6493582f59016336cd94d57399d6f5249",
+      "size": 843
+    },
+    "Element/Editor/String.pm": {
+      "sha256": "b3f9ac3c8bf337b271402a4c50d18eb788f6e88ca96033692cbfa164ff85df3c",
+      "size": 450
+    },
+    "Element/Editor/Text.pm": {
+      "sha256": "2c3949a7aeeea2202c99aa158b269fd8980c2313d96c9559c8efe8c436f8c2b4",
+      "size": 326
+    },
+    "Element/Gnome.pm": {
+      "sha256": "2a385481d07bf770ba902bc695b42da827858a9a768ec07c0e4b2f61e5fd34b7",
+      "size": 2869
+    },
+    "Element/Gnome/Boolean.pm": {
+      "sha256": "48112d97692c0dc236b7768d0056e818c14566d0bc8ee5f58e04606608ed0478",
+      "size": 693
+    },
+    "Element/Gnome/Error.pm": {
+      "sha256": "2837ac3b2273b702b881786742841e34c6b7d78aa1568c4aeceb53d3ed4fc29e",
+      "size": 1177
+    },
+    "Element/Gnome/Multiselect.pm": {
+      "sha256": "36810b1a352f9437f7001175a647caf09789ac55e956eac47e1d1bdd2192190c",
+      "size": 2485
+    },
+    "Element/Gnome/Note.pm": {
+      "sha256": "da1036c593cbea2e3f7a5949e8a399fbe3403baaedafa17897f2201146121cb8",
+      "size": 1087
+    },
+    "Element/Gnome/Password.pm": {
+      "sha256": "0c869e898994defb9cbb1668eca597e8b912ee6ffa39cb37fa0a13db4af78a27",
+      "size": 590
+    },
+    "Element/Gnome/Progress.pm": {
+      "sha256": "991b298c100d68d3a56f0af82c85da7e32dc4caa39c9c26c40de19f83cf371b2",
+      "size": 1123
+    },
+    "Element/Gnome/Select.pm": {
+      "sha256": "9101a0a8d775a319a81c2b16e8049c11d932a26665e8261b44e2a57890b53341",
+      "size": 985
+    },
+    "Element/Gnome/String.pm": {
+      "sha256": "0791fd1b17791057dec52249cde63e027638e381b9ed6d8df3af61af31385865",
+      "size": 659
+    },
+    "Element/Gnome/Text.pm": {
+      "sha256": "04d3e093b9bb5b054a0f6b30c343d7f469106427b3706a6a2f1d66747db04293",
+      "size": 301
+    },
+    "Element/Multiselect.pm": {
+      "sha256": "52b9ff6a8619ddc2e9d81e7ee005a0d844e83340c1a8869de0575c5ab02d010c",
+      "size": 926
+    },
+    "Element/Noninteractive.pm": {
+      "sha256": "d09df6c1ebe36e8a66d1763b18246a3474c1069ea9658b2d813de798efd95a58",
+      "size": 352
+    },
+    "Element/Noninteractive/Boolean.pm": {
+      "sha256": "da9bc4de7a37954ffe0ff352f015fcc9f2fee44ad4731d4251176e665ff6a4b1",
+      "size": 189
+    },
+    "Element/Noninteractive/Error.pm": {
+      "sha256": "8307cc93fe02070febe53c84a80abfc4433c5686084139168f0500f51c3168c0",
+      "size": 1686
+    },
+    "Element/Noninteractive/Multiselect.pm": {
+      "sha256": "b87f48cef7f37bee09f1c004b3ef24c4caae957735f42c81f26854e7e57a30a6",
+      "size": 193
+    },
+    "Element/Noninteractive/Note.pm": {
+      "sha256": "b7686057ef127250493d0f0d798bd4af5fd573746385c6331a90d9824329c412",
+      "size": 186
+    },
+    "Element/Noninteractive/Password.pm": {
+      "sha256": "2c6c4318959dae8d6c5d1e427014ddbee4ffd5d144aaf7657b5d939d2db64692",
+      "size": 190
+    },
+    "Element/Noninteractive/Progress.pm": {
+      "sha256": "ff9324048f2197f62d1a29d2ddbd36e254523c1acf8f0289d08bf5ddb62b3daa",
+      "size": 269
+    },
+    "Element/Noninteractive/Select.pm": {
+      "sha256": "bc98ec856a55d4190ed4beb12716d35a599c86479a7602ad4fecb04251e988fd",
+      "size": 613
+    },
+    "Element/Noninteractive/String.pm": {
+      "sha256": "0268c7c333d42a172c2a04b7497356753a70e182e975f76240a185eef02c8c6b",
+      "size": 188
+    },
+    "Element/Noninteractive/Text.pm": {
+      "sha256": "c71f33fce010170d5f914d2dbf15f0e4b7bc1b96b1dde51f26853d5fb31ce7f1",
+      "size": 237
+    },
+    "Element/Select.pm": {
+      "sha256": "b0d1708f0cb3379bd535cb507c3316e57b2e9cd99744d7b4f9aac0950120fd82",
+      "size": 1991
+    },
+    "Element/Teletype/Boolean.pm": {
+      "sha256": "9b841f807abeb509c47b6d28eff5ca120f20d7c20393ba22c763792f3240896c",
+      "size": 1206
+    },
+    "Element/Teletype/Error.pm": {
+      "sha256": "6a039f10a5b99bad208dcf4fe34a9b6656ec204edc0d987d768aa09f5ba8e0a9",
+      "size": 181
+    },
+    "Element/Teletype/Multiselect.pm": {
+      "sha256": "e9eeaf52ad9972f01d4366c73edc1549ab700878ce93bb4c4ced2b675cb2e794",
+      "size": 2257
+    },
+    "Element/Teletype/Note.pm": {
+      "sha256": "c9691629ebdfc51888b7e1bd69a132896dc09fccef2637c4ed5328e505aad035",
+      "size": 414
+    },
+    "Element/Teletype/Password.pm": {
+      "sha256": "a27e587660b90ba0e0a734123ba7daf79c8acc7488b886311987bdecd50a9369",
+      "size": 638
+    },
+    "Element/Teletype/Progress.pm": {
+      "sha256": "f9735fb5c8626474dec53a55e77906055ec76094972e9a7190a0f6353ff365af",
+      "size": 816
+    },
+    "Element/Teletype/Select.pm": {
+      "sha256": "e3725f9e272f3a5b9b0702b33dcf90ef211e9fc29e617f5a7175a43c6b6bf124",
+      "size": 3282
+    },
+    "Element/Teletype/String.pm": {
+      "sha256": "7190f6aa30ed17373f2ffdc24b24d03f07195528d9ae7b399254c01250506240",
+      "size": 583
+    },
+    "Element/Teletype/Text.pm": {
+      "sha256": "21204c75925e1c4f42eb30f9ad0ffc17ec51e23dd64b5b19e41388be91adf60b",
+      "size": 326
+    },
+    "Element/Web/Boolean.pm": {
+      "sha256": "4d484c697566d0225e446a01cfa7be333e00e1fa0cc1f101091efa37a4ab3521",
+      "size": 671
+    },
+    "Element/Web/Error.pm": {
+      "sha256": "790d995821dca1e9d007b0058f95081337fcda574934ff8543c754938d6a16e9",
+      "size": 171
+    },
+    "Element/Web/Multiselect.pm": {
+      "sha256": "18a335a9421152f5a165cb8bfc51b4474dbb660fe1da7201f402700f8f3bedfc",
+      "size": 967
+    },
+    "Element/Web/Note.pm": {
+      "sha256": "c38c8ec7191436c1a095722d680fd7337f474cd2d3201e0cf02d47821491b7cf",
+      "size": 170
+    },
+    "Element/Web/Password.pm": {
+      "sha256": "bc9629f5aa67ea0f9411d54c5e4a20e124f3316c85981ae7a4cc5970301c94cc",
+      "size": 494
+    },
+    "Element/Web/Progress.pm": {
+      "sha256": "58785869b8dfcd6f0e466cbecf099b52c8c21eebd59aceeb6f9b51285109a207",
+      "size": 242
+    },
+    "Element/Web/Select.pm": {
+      "sha256": "50dfbb3f090947a1d47691083e4d5a893f523faa5bad92c057be61aee5eba439",
+      "size": 887
+    },
+    "Element/Web/String.pm": {
+      "sha256": "8c08e24dc1fe9b88e1c0ca61a245bd82d9624b93404951685e43e5337d73589d",
+      "size": 478
+    },
+    "Element/Web/Text.pm": {
+      "sha256": "142e2c3004fb2d0c42e6a0093aabcbf15ebcceba5d1db43de0f69541597faff4",
+      "size": 326
+    },
+    "Encoding.pm": {
+      "sha256": "aba864856f671a1f5b553a845e80c683183b50db08b178377c061f01c6736e3b",
+      "size": 1483
+    },
+    "Format.pm": {
+      "sha256": "8a606807846230c56c0b117f0be535432503b81afd8a858bf225b0710079a19d",
+      "size": 144
+    },
+    "Format/822.pm": {
+      "sha256": "4e0606e39f3cde0221b87434ac258be14a8e168871ca81711ada2c5e337bfeab",
+      "size": 2105
+    },
+    "FrontEnd.pm": {
+      "sha256": "9807fa98c81e5b9314bc25c4d288ffe97350cf33ff5aa46534f690db78baf888",
+      "size": 2870
+    },
+    "FrontEnd/Dialog.pm": {
+      "sha256": "0fe24d4a9be73f9136812cfbaad43b2818554db8a037db39392070091eb9bc96",
+      "size": 7832
+    },
+    "FrontEnd/Editor.pm": {
+      "sha256": "a800ddbeffc897ab64f738a18e9ce9ea12b25ae884283ae48b74eb1356a4c789",
+      "size": 2179
+    },
+    "FrontEnd/Gnome.pm": {
+      "sha256": "d18d81e196ec08a86eee1ccf688ac75d985fd2811c0e23350296fe3183c6d93e",
+      "size": 7519
+    },
+    "FrontEnd/Kde.pm": {
+      "sha256": "af31800eed184035c7cb762fdeff4ecf77d76b37fe433836cfed540c38dacccd",
+      "size": 2085
+    },
+    "FrontEnd/Noninteractive.pm": {
+      "sha256": "055c00cb7f0d3ffc1d4f477e0242ea18de8d58b476a53e7b81c7ca1b30974aa7",
+      "size": 744
+    },
+    "FrontEnd/Passthrough.pm": {
+      "sha256": "f457ae992af0dc650004e55485db6970134d6f071c996c52b987ac0ed55be1b7",
+      "size": 7152
+    },
+    "FrontEnd/Readline.pm": {
+      "sha256": "6fa21ae48c32768dd85a8217c79daacfe7e4ca09096ebb3e08f0de00f52c4114",
+      "size": 3657
+    },
+    "FrontEnd/ScreenSize.pm": {
+      "sha256": "163b48b39d090fe21dc0c71ed636d18dd3969dec1be8dcce2dc469a5218f77b3",
+      "size": 892
+    },
+    "FrontEnd/Teletype.pm": {
+      "sha256": "619177ad4bbfcfbf398c2b0e96a3f9016ed53f98ddb4947c34056b08303f4767",
+      "size": 1582
+    },
+    "FrontEnd/Text.pm": {
+      "sha256": "e0aac882da15de83d9eb5306d9f0b86f1418821d67924d647e109faafd30855f",
+      "size": 166
+    },
+    "FrontEnd/Web.pm": {
+      "sha256": "3f99aeda14e4c64ec41dda69f4f906b70812a1f578dc073631fe4df8b720f295",
+      "size": 2666
+    },
+    "Gettext.pm": {
+      "sha256": "cf0d28ad9cee9812620584cf0ef6a98062b36502fa601b725178ebc764c01e4e",
+      "size": 311
+    },
+    "Iterator.pm": {
+      "sha256": "d08310a34e32c689d8bff8dcafd92bf4849d76e762470f8c991425c4990f751c",
+      "size": 209
+    },
+    "Log.pm": {
+      "sha256": "0f4b4a7b38292449475f981760f14056a44c7b641d0a84951a767a493dcab91e",
+      "size": 926
+    },
+    "Path.pm": {
+      "sha256": "25967cae35d6e7cf0e75fb13b9ca142d6fa8c9f034c13a9e6b4e379edba1266d",
+      "size": 305
+    },
+    "Priority.pm": {
+      "sha256": "7ccb2d9fb96964ea06a7c3ac71910c5a8afc0e50e571c1bea5d31922019e3d84",
+      "size": 676
+    },
+    "Question.pm": {
+      "sha256": "76e39a8413aae732f4f08e321be98725e670b62469e4f5905440f971a7a1487d",
+      "size": 5862
+    },
+    "Template.pm": {
+      "sha256": "9aef3d86e4a57c90fe69bc7275930049d37e1308547097680b3ae1d941ff9b2a",
+      "size": 8198
+    },
+    "Template/Transient.pm": {
+      "sha256": "20c8d2c432718c69b9e5f6e0e8dd3420c6756a498074ad167716ff61119a736f",
+      "size": 1100
+    },
+    "TmpFile.pm": {
+      "sha256": "d21f028a596779cf454bdc8acc7e2f3803e01acf034750c53ff6ea7023949067",
+      "size": 388
+    }
+  },
+  "public_files": {
+    "/etc/debconf.conf": {
+      "sha256": "0d0e7109df366b0e963add08e218d62afb516218deeb3b5aa9259b821efb569c",
+      "size": 2967,
+      "links": 1
+    },
+    "/usr/bin/apt-extracttemplates": {
+      "sha256": "c6a92a81dc5b26f12a2ae2ce0a6de3b3783d22ca0a8cf5d8c01807f34201f197",
+      "size": 23008,
+      "links": 1
+    },
+    "/usr/bin/dpkg-deb": {
+      "sha256": "fc9dde782ca8309b65ab92e61d13318bf463cd1aa71daa8967b87b81b48b63d2",
+      "size": 146000,
+      "links": 1
+    },
+    "/usr/bin/perl": {
+      "sha256": "47bdc8a342556c1d140084417ef6cacd79a3362e4b6cc1e4754df55bdf1e3683",
+      "size": 4023408,
+      "links": 2
+    },
+    "/usr/sbin/dpkg-preconfigure": {
+      "sha256": "8f389d049e6b15029ca7311cd449861f47b7e3381f4083646b812380f07f28c9",
+      "size": 4356,
+      "links": 1
+    }
+  },
+  "packages": {
+    "apt-utils": {
+      "version": "2.8.4ubuntu0.1",
+      "architecture": "amd64"
+    },
+    "debconf": {
+      "version": "1.5.86ubuntu1",
+      "architecture": "all"
+    },
+    "debconf-i18n": {
+      "version": "1.5.86ubuntu1",
+      "architecture": "all"
+    },
+    "dpkg": {
+      "version": "1.22.6ubuntu6.6",
+      "architecture": "amd64"
+    },
+    "perl": {
+      "version": "5.38.2-3.2ubuntu0.6",
+      "architecture": "amd64"
+    },
+    "perl-base": {
+      "version": "5.38.2-3.2ubuntu0.6",
+      "architecture": "amd64"
+    }
+  },
+  "config_present_count": 0,
+  "templates_present_count": 0
+}

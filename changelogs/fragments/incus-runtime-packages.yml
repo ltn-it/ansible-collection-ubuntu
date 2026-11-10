@@ -1,0 +1,15 @@
+---
+minor_changes:
+  - >-
+    incus - add an explicitly invoked runtime_packages entry for one byte-bound Incus and
+    container-engine package transaction, with fresh full-plan validation, a fixed final
+    archive hook, retained uncertain intents, and invocation-private fixed-profile Ubuntu
+    Debconf compatibility; normal role behavior remains unchanged.
+bugfixes:
+  - >-
+    incus - bound fixed Debconf public-file reads to their authenticated sizes so the
+    qualified Perl binary is not rejected by the smaller general input limit.
+  - >-
+    incus - require schema-2 private staging of all 32 canonical APT cache archives,
+    including separately verified copies of the six direct inputs, so offline installs
+    reach the final archive hook without broadening package or download authority.

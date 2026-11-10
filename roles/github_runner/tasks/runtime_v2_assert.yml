@@ -1,0 +1,53 @@
+---
+- name: Validate runtime-v2 installation switch
+  ansible.builtin.assert:
+    that:
+      - github_runner_runtime_v2_install is boolean
+    fail_msg: Runtime-v2 installation must be explicitly selected with a boolean.
+  changed_when: false
+
+- name: Validate explicit runtime-v2 installation inputs
+  ansible.builtin.assert:
+    that:
+      - github_runner_enabled | bool
+      - github_runner_runtime_v2_configuration_path is match('^/[A-Za-z0-9_./-]+$')
+      - not (github_runner_runtime_v2_configuration_path | regex_search('(^|/)\.\.?(/|$)|//'))
+      - github_runner_runtime_v2_configuration_sha256 is match('^[0-9a-f]{64}$')
+      - github_runner_runtime_v2_socket_group is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - github_runner_runtime_v2_socket_group not in ['root', 'sudo', 'docker', 'incus', 'incus-admin']
+      - github_runner_runtime_v2_module_sha256 is mapping
+      - github_runner_runtime_v2_module_sha256 | length > 0
+      - github_runner_runtime_v2_client_sha256 is mapping
+      - github_runner_runtime_v2_client_sha256 | length == 2
+      - "'incus-runtime-client' in github_runner_runtime_v2_client_sha256"
+      - "'incus_job_client.py' in github_runner_runtime_v2_client_sha256"
+    fail_msg: >-
+      Runtime-v2 requires an existing sealed configuration, explicit as-built module/client hashes,
+      and an existing dedicated protected-runner group. Installation is not activation authority.
+  changed_when: false
+  when: github_runner_runtime_v2_install
+
+- name: Validate runtime-v2 module hash pins
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[_a-z][_a-z0-9]*\.py$')
+      - item.value is string
+      - item.value is match('^[0-9a-f]{64}$')
+    fail_msg: Every runtime-v2 module must have an exact explicit SHA256 pin.
+  loop: "{{ github_runner_runtime_v2_module_sha256 | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+  when: github_runner_runtime_v2_install
+
+- name: Validate runtime-v2 public client hash pins
+  ansible.builtin.assert:
+    that:
+      - item.value is string
+      - item.value is match('^[0-9a-f]{64}$')
+    fail_msg: Both public runtime-v2 clients require exact explicit SHA256 pins.
+  loop: "{{ github_runner_runtime_v2_client_sha256 | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+  when: github_runner_runtime_v2_install

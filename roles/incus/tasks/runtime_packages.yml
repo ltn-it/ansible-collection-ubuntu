@@ -1,0 +1,117 @@
+---
+- name: Refuse check mode for the explicit package maintenance entry
+  ansible.builtin.fail:
+    msg: >-
+      runtime_packages does not install its helper or run APT in check mode.
+      Use the separately reviewed read-only maintenance preflight and simulation.
+  when: ansible_check_mode
+
+- name: Validate the explicit package maintenance request reference
+  ansible.builtin.assert:
+    that:
+      - incus_runtime_packages_request_path is match('^/[A-Za-z0-9_./%+:-]+$')
+      - incus_runtime_packages_request_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: A Root-private request path and exact SHA256 are required for package maintenance.
+    quiet: true
+
+- name: Inspect every fixed helper directory before changing files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /usr
+    - /usr/libexec
+    - /usr/libexec/lightning-it
+    - /usr/libexec/lightning-it/incus-maintenance
+  register: incus_runtime_packages_directories
+
+- name: Reject foreign or permissive helper directories
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists or
+        (item.stat.isdir | default(false) and item.stat.uid == 0 and
+         item.stat.mode is match('^[0-7][0-7][0145][0145]$'))
+    quiet: true
+  loop: "{{ incus_runtime_packages_directories.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Inspect the fixed helper without following an existing symlink
+  ansible.builtin.stat:
+    path: /usr/libexec/lightning-it/incus-maintenance/runtime_packages.py
+    follow: false
+    checksum_algorithm: sha256
+  register: incus_runtime_packages_helper
+
+- name: Refuse to replace a different or unsafe existing maintenance helper
+  ansible.builtin.assert:
+    that:
+      - >-
+        not incus_runtime_packages_helper.stat.exists or
+        (incus_runtime_packages_helper.stat.isreg | default(false) and
+         incus_runtime_packages_helper.stat.uid == 0 and incus_runtime_packages_helper.stat.nlink == 1 and
+         incus_runtime_packages_helper.stat.mode in ['0644', '0755'] and
+         incus_runtime_packages_helper.stat.checksum ==
+         (lookup('ansible.builtin.file', role_path ~ '/files/runtime_packages.py', rstrip=false) | hash('sha256')))
+    fail_msg: An existing different or unsafe helper requires separate reconciliation before replacement.
+    quiet: true
+
+- name: Inspect the fixed Debconf profile without following an existing symlink
+  ansible.builtin.stat:
+    path: /usr/libexec/lightning-it/incus-maintenance/runtime_packages_debconf.json
+    follow: false
+    checksum_algorithm: sha256
+  register: incus_runtime_packages_debconf_profile
+
+- name: Refuse to replace a different or unsafe existing Debconf profile
+  ansible.builtin.assert:
+    that:
+      - >-
+        not incus_runtime_packages_debconf_profile.stat.exists or
+        (incus_runtime_packages_debconf_profile.stat.isreg | default(false) and
+         incus_runtime_packages_debconf_profile.stat.uid == 0 and
+         incus_runtime_packages_debconf_profile.stat.nlink == 1 and
+         incus_runtime_packages_debconf_profile.stat.mode in ['0444', '0644'] and
+         incus_runtime_packages_debconf_profile.stat.checksum ==
+         (lookup('ansible.builtin.file', role_path ~ '/files/runtime_packages_debconf.json',
+                 rstrip=false) | hash('sha256')))
+    fail_msg: An existing different or unsafe Debconf profile requires separate reconciliation before replacement.
+    quiet: true
+
+- name: Create the fixed package maintenance helper directory
+  ansible.builtin.file:
+    path: /usr/libexec/lightning-it/incus-maintenance
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the closed package maintenance helper
+  ansible.builtin.copy:
+    src: runtime_packages.py
+    dest: /usr/libexec/lightning-it/incus-maintenance/runtime_packages.py
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the fixed qualified Debconf public-file profile
+  ansible.builtin.copy:
+    src: runtime_packages_debconf.json
+    dest: /usr/libexec/lightning-it/incus-maintenance/runtime_packages_debconf.json
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Execute the single reviewed native package transaction
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - /usr/libexec/lightning-it/incus-maintenance/runtime_packages.py
+      - install
+      - "{{ incus_runtime_packages_request_path }}"
+      - "{{ incus_runtime_packages_request_sha256 }}"
+  register: incus_runtime_packages_result
+  changed_when: (incus_runtime_packages_result.stdout | from_json).changed | default(false) | bool

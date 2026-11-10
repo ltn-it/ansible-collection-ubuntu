@@ -1,0 +1,215 @@
+---
+- name: Prepare one explicitly bound physical runtime host
+  hosts: "{{ github_runner_runtime_host_target | default('localhost') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    podman_packages:
+      - "podman={{ github_runner_runtime_host_podman_version | mandatory }}"
+    podman_validate_executable: >-
+      {{ not (ansible_check_mode
+      and github_runner_runtime_host_restore_packaged_podman_profile | default(false) | bool) }}
+    podman_registries_conf_dir: /etc/containers
+    podman_executable_path: /usr/bin/podman
+    podman_apparmor_profile_reload: false
+    podman_buildah_apparmor_profile_reload: false
+    podman_helper_apparmor_profiles: []
+    podman_dns_authoritative_only: false
+    podman_system_socket_manage: false
+    podman_system_socket_enabled: false
+    podman_user_socket_enabled: false
+    podman_user_socket_users: []
+  pre_tasks:
+    - name: Require one literal host and a reviewed package version
+      ansible.builtin.assert:
+        that:
+          - github_runner_runtime_host_target is defined
+          - github_runner_runtime_host_target is string
+          - github_runner_runtime_host_target is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
+          - github_runner_runtime_host_target not in ['all', 'ungrouped', 'localhost', '127.0.0.1']
+          - ansible_play_hosts_all == [github_runner_runtime_host_target]
+          - github_runner_runtime_host_machine_id | default('') is match('^[0-9a-f]{32}$')
+          - github_runner_runtime_host_podman_version is string
+          - github_runner_runtime_host_podman_version is match('^[0-9][A-Za-z0-9.+:~_-]*$')
+          - podman_packages == ['podman=' ~ github_runner_runtime_host_podman_version]
+          - podman_registries_conf_dir == '/etc/containers'
+          - podman_executable_path == '/usr/bin/podman'
+          - >-
+            podman_validate_executable == (not (ansible_check_mode
+            and github_runner_runtime_host_restore_packaged_podman_profile | default(false) | bool))
+          - podman_apparmor_profile_reload is sameas false
+          - podman_buildah_apparmor_profile_reload is sameas false
+          - podman_helper_apparmor_profiles == []
+          - podman_dns_authoritative_only is sameas false
+          - podman_system_socket_manage is sameas false
+          - podman_system_socket_enabled is sameas false
+          - podman_user_socket_enabled is sameas false
+          - podman_user_socket_users == []
+          - github_runner_runtime_host_restore_packaged_podman_profile | default(false) is boolean
+          - ansible_check_mode or github_runner_runtime_host_window_reference | default('') | trim | length > 0
+        fail_msg: >-
+          Runtime host preparation needs one bound host and exact package input
+          with no API expansion and only explicitly selected package-profile restoration.
+
+    - name: Read the actual physical host identity
+      ansible.builtin.slurp:
+        src: /etc/machine-id
+      register: github_runner_runtime_host_actual_machine
+
+    - name: Require the selected native host identity
+      ansible.builtin.assert:
+        that:
+          - >-
+            (github_runner_runtime_host_actual_machine.content | b64decode | trim)
+            == github_runner_runtime_host_machine_id
+        fail_msg: The actual machine differs from the explicitly selected runtime host.
+
+    - name: Read the host distribution
+      ansible.builtin.slurp:
+        src: /etc/os-release
+      register: github_runner_runtime_host_os
+
+    - name: Read the native host architecture
+      ansible.builtin.command:
+        argv: [/usr/bin/uname, -m]
+      register: github_runner_runtime_host_arch
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect existing KVM access without opening it
+      ansible.builtin.stat:
+        path: /dev/kvm
+        get_checksum: false
+      register: github_runner_runtime_host_kvm
+
+    - name: Require the selected Ubuntu KVM platform
+      ansible.builtin.assert:
+        that:
+          - (github_runner_runtime_host_os.content | b64decode) is search('(?m)^ID=ubuntu$')
+          - (github_runner_runtime_host_os.content | b64decode) is search('(?m)^VERSION_ID="24[.]04"$')
+          - github_runner_runtime_host_arch.stdout | trim == 'x86_64'
+          - github_runner_runtime_host_kvm.stat.ischr | default(false)
+        fail_msg: This physical runtime preparation requires Ubuntu 24.04 x86_64 with an existing KVM device.
+
+    - name: Restore only the package-authenticated Podman attachment profile
+      when: github_runner_runtime_host_restore_packaged_podman_profile | default(false) | bool
+      block:
+        - name: Inspect the existing package profile without following a link
+          ansible.builtin.stat:
+            path: /etc/apparmor.d/podman
+            follow: false
+          register: github_runner_runtime_host_profile_stat
+
+        - name: Require a private administrative package-profile boundary
+          ansible.builtin.assert:
+            that:
+              - github_runner_runtime_host_profile_stat.stat.isreg | default(false)
+              - github_runner_runtime_host_profile_stat.stat.uid == 0
+              - github_runner_runtime_host_profile_stat.stat.mode == '0644'
+
+        - name: Read installed AppArmor package conffile identities
+          ansible.builtin.command:
+            argv: [/usr/bin/dpkg-query, --show, '--showformat=${Conffiles}', apparmor]
+          changed_when: false
+          check_mode: false
+          register: github_runner_runtime_host_profile_package
+
+        - name: Read the existing Podman attachment profile
+          ansible.builtin.slurp:
+            src: /etc/apparmor.d/podman
+          register: github_runner_runtime_host_profile_source
+
+        - name: Derive only the missing package attachment flag
+          ansible.builtin.set_fact:
+            github_runner_runtime_host_profile_expected: >-
+              {{ github_runner_runtime_host_profile_package.stdout
+              | regex_findall('(?m)^ /etc/apparmor[.]d/podman ([0-9a-f]{32})$') }}
+            github_runner_runtime_host_profile_restored: >-
+              {{ (github_runner_runtime_host_profile_source.content | b64decode)
+              | replace('profile podman /usr/bin/podman {',
+              'profile podman /usr/bin/podman flags=(unconfined) {') }}
+
+        - name: Refuse any result other than the exact installed package profile
+          ansible.builtin.assert:
+            that:
+              - github_runner_runtime_host_profile_expected | length == 1
+              - >-
+                (github_runner_runtime_host_profile_restored | hash('md5'))
+                == github_runner_runtime_host_profile_expected[0]
+              - >-
+                github_runner_runtime_host_profile_restored
+                is search('(?m)^profile podman /usr/bin/podman flags=\(unconfined\) \{$')
+            fail_msg: >-
+              Refusing unknown Podman policy bytes; this opt-in only restores
+              the exact conffile recorded by the installed AppArmor package.
+
+        - name: Restore the exact package profile atomically
+          ansible.builtin.copy:
+            content: "{{ github_runner_runtime_host_profile_restored }}"
+            dest: /etc/apparmor.d/podman
+            owner: root
+            group: root
+            mode: '0644'
+            validate: /usr/sbin/apparmor_parser --skip-kernel-load --skip-cache %s
+
+        - name: Reconcile the exact package profile with the loaded kernel policy
+          ansible.builtin.command:
+            argv: [/usr/sbin/apparmor_parser, --replace, /etc/apparmor.d/podman]
+          changed_when: false
+          when: not ansible_check_mode
+
+    - name: Observe the existing system API socket without changing it
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, is-active, podman.socket]
+      register: github_runner_runtime_host_socket_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Require a known socket observation before package preparation
+      ansible.builtin.assert:
+        that:
+          - github_runner_runtime_host_socket_before.rc in [0, 3, 4]
+          - github_runner_runtime_host_socket_before.stdout | trim in ['active', 'inactive', 'unknown', 'failed']
+        fail_msg: Existing Podman API socket state is unknown; no package preparation is admitted.
+
+  roles:
+    - role: lit.ubuntu.podman
+
+  post_tasks:
+    - name: Inspect the installed direct engine binary
+      ansible.builtin.stat:
+        path: /usr/bin/podman
+        follow: false
+        checksum_algorithm: sha256
+      register: github_runner_runtime_host_binary
+      when: not ansible_check_mode
+
+    - name: Require a regular Root-owned package executable
+      ansible.builtin.assert:
+        that:
+          - github_runner_runtime_host_binary.stat.isreg | default(false)
+          - github_runner_runtime_host_binary.stat.uid == 0
+          - github_runner_runtime_host_binary.stat.mode in ['0755', '0555']
+        fail_msg: The installed engine executable has not passed the native file check.
+      when: not ansible_check_mode
+
+    - name: Read the system API socket after package preparation
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, is-active, podman.socket]
+      register: github_runner_runtime_host_socket_after
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Reject an unexpected newly active system API socket
+      ansible.builtin.assert:
+        that:
+          - github_runner_runtime_host_socket_after.rc in [0, 3, 4]
+          - >-
+            (github_runner_runtime_host_socket_before.stdout | trim == 'active')
+            or (github_runner_runtime_host_socket_after.stdout | trim in ['inactive', 'unknown', 'failed'])
+        fail_msg: Package preparation changed the API socket state unexpectedly; reconcile before proceeding.
+      when: not ansible_check_mode

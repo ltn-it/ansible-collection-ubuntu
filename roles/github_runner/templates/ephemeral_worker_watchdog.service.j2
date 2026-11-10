@@ -1,0 +1,35 @@
+[Unit]
+Description=Root disposable worker expiry watchdog
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I -B {{ github_runner_ephemeral_watchdog_program_directory }}/ephemeral_worker_watchdog_entry.py --state-directory {{ github_runner_ephemeral_watchdog_state_directory }}
+UMask=0077
+TimeoutStartSec=170
+TimeoutStopSec=5
+KillMode=control-group
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+ReadWritePaths={{ github_runner_ephemeral_watchdog_state_directory }}
+MemoryMax=128M
+TasksMax=8
+CPUQuota=25%

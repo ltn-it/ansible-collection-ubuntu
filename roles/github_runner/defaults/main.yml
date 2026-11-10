@@ -47,11 +47,22 @@ github_runner_manage_service: true
 github_runner_service_user: "{{ github_runner_user }}"
 github_runner_service_state: started
 
+# Protected instances are opt-in; these pins do not alter the legacy runner.
+github_runner_protected_version: "2.338.2"
+github_runner_protected_archive_sha256:
+  arm64: 670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945
+  x64: baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
+github_runner_protected_helper_dir: /usr/local/lib/github-runner-protected
+github_runner_legacy_instances: >-
+  {{ (github_runner_instances | rejectattr('protected', 'defined') | list)
+  + (github_runner_instances | selectattr('protected', 'defined') | selectattr('protected', 'equalto', false) | list) }}
+
 # Define multiple isolated runners on one host. The default preserves the
 # legacy single-runner interface; inventory can replace this with any number of
 # explicit instance mappings.
 github_runner_instances:
   - name: "{{ github_runner_name }}"
+    protected: false
     dir: "{{ github_runner_dir }}"
     work_dir: "{{ github_runner_work_dir }}"
     labels: "{{ github_runner_labels }}"
@@ -63,3 +74,26 @@ github_runner_instances:
     service_state: "{{ github_runner_service_state }}"
     external_service_name: ""
     external_service_unit_path: ""
+
+# Installation preparation only: this never enables or starts the socket.
+github_runner_runtime_v2_install: false
+github_runner_runtime_v2_configuration_path: ""
+github_runner_runtime_v2_configuration_sha256: ""
+github_runner_runtime_v2_socket_group: ""
+github_runner_runtime_v2_module_sha256: {}
+github_runner_runtime_v2_client_sha256: {}
+
+# Independent supervision is separately opt-in; preparation does not activate.
+github_runner_ephemeral_watchdog_install: false
+github_runner_ephemeral_watchdog_activate: false
+github_runner_ephemeral_watchdog_machine_id: ""
+github_runner_ephemeral_watchdog_boot_id: ""
+github_runner_ephemeral_watchdog_program_directory: /usr/local/lib/lit-github-runner-ephemeral-worker
+github_runner_ephemeral_watchdog_state_directory: /var/lib/lightning-it/github-runner-ephemeral-worker
+github_runner_ephemeral_watchdog_module_sha256: {}
+
+# Local Root mailbox sender is independently opt-in and consumes the same Store.
+github_runner_ephemeral_local_mail_install: false
+github_runner_ephemeral_local_mail_activate: false
+github_runner_ephemeral_local_mail_program_directory: /usr/local/lib/lit-github-runner-local-mail
+github_runner_ephemeral_local_mail_module_sha256: {}

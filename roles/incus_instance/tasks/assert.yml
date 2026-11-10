@@ -11,6 +11,7 @@
       - incus_instance_default_state in ['running', 'present', 'stopped', 'absent']
       - incus_instance_default_empty is boolean
       - incus_instance_default_reconfigure is boolean
+      - incus_instance_default_create_only is boolean
       - incus_instance_default_profiles is sequence
       - incus_instance_default_profiles is not string
       - incus_instance_default_config is mapping
@@ -55,6 +56,13 @@
       - incus_instance_item.type | default(incus_instance_default_type) in ['vm', 'container']
       - incus_instance_item.empty | default(incus_instance_default_empty) is boolean
       - incus_instance_item.reconfigure | default(incus_instance_default_reconfigure) is boolean
+      - incus_instance_item.create_only | default(incus_instance_default_create_only) is boolean
+      - >-
+        not (incus_instance_item.create_only | default(incus_instance_default_create_only) | bool)
+        or (
+          (incus_instance_item.state | default(incus_instance_default_state)) == 'present'
+          and not (incus_instance_item.reconfigure | default(incus_instance_default_reconfigure) | bool)
+        )
       - incus_instance_item.image | default('', true) is string
       - incus_instance_item.image_candidates | default([], true) is sequence
       - incus_instance_item.image_candidates | default([], true) is not string

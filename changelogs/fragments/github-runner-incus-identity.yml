@@ -1,0 +1,20 @@
+---
+minor_changes:
+  - github_runner - add the signature and native assignment verification component for a future scoped Incus issuer;
+    existing role tasks do not enable a service or issue runtime credentials.
+  - github_runner - add explicit private-store initialization, durable worker-bound replay and effect records,
+    and identity refresh without extending fixed lease deadlines for the future issuer.
+  - github_runner - add bounded Linux peer and process readers, fixed service-lineage checks,
+    root-selected systemd metadata acquisition and installation-manifest verification as internal components;
+    operating admission remains unqualified.
+  - github_runner - add an explicitly opted-in protected installation path with verified current runner archives,
+    dedicated identity, root-owned code and transaction records; existing legacy registrations are rejected
+    before service effects while their preserving migration remains unqualified.
+  - github_runner - add integrated root process acquisition and an internal expected-ID credential replacement
+    component with persistent RSA parameters and unknown-result holds; native migration remains unqualified.
+  - github_runner - add byte-pinned stock Linux service-script generation for the exact Root-fenced
+    organization registration without replaying configuration, writing files or changing services;
+    the full preserving migration remains unqualified.
+  - github_runner - add explicit offline Root generation acquisition, authenticated Git/archive provenance,
+    collector descriptor translation, static cell sealing and compare-and-swap anchor publication;
+    inactive maintenance exclusion and closed leases are required, with no automatic activation or cleanup.

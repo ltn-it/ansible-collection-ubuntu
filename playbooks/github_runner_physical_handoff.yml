@@ -1,0 +1,129 @@
+---
+- name: Inspect or perform one explicitly reserved physical runner handoff
+  hosts: "{{ github_runner_physical_handoff_target | default('localhost') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Require one selected host and a closed maintenance request
+      ansible.builtin.assert:
+        that:
+          - github_runner_physical_handoff_target is defined
+          - github_runner_physical_handoff_target is string
+          - github_runner_physical_handoff_target is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
+          - github_runner_physical_handoff_target not in ['all', 'ungrouped', 'localhost', '127.0.0.1']
+          - ansible_play_hosts_all == [github_runner_physical_handoff_target]
+          - github_runner_physical_handoff_machine_id | default('') is match('^[0-9a-f]{32}$')
+          - github_runner_physical_handoff_helper_sha256 | default('') is match('^[0-9a-f]{64}$')
+          - github_runner_physical_handoff_request is mapping
+          - >-
+            github_runner_physical_handoff_request.keys() | list | sort
+            == ['configuration', 'native_fence', 'registration_stage']
+          - github_runner_physical_handoff_request.configuration.service_state == 'stopped'
+          - github_runner_physical_handoff_request.configuration.ephemeral | default(false) is sameas false
+          - github_runner_physical_handoff_request.configuration.rootless_engine is not defined
+          - github_runner_physical_handoff_request.configuration.expected_guest_uuid is not defined
+          - github_runner_physical_handoff_window is mapping
+          - github_runner_physical_handoff_window.reference is string
+          - github_runner_physical_handoff_window.reference | trim | length > 0
+          - >-
+            (github_runner_physical_handoff_window.keys() | list | sort
+            == ['ends_at', 'reference', 'starts_at'])
+            or (github_runner_physical_handoff_window.keys() | list | sort
+            == ['ends_at', 'owner_approved_open_end', 'reference', 'starts_at'])
+          - github_runner_physical_handoff_window.starts_at is integer
+          - >-
+            ((github_runner_physical_handoff_window.owner_approved_open_end | default(false)) is sameas true
+            and github_runner_physical_handoff_window.ends_at is none)
+            or (github_runner_physical_handoff_window.owner_approved_open_end is not defined
+            and github_runner_physical_handoff_window.ends_at is integer
+            and github_runner_physical_handoff_window.ends_at > github_runner_physical_handoff_window.starts_at)
+          - >-
+            github_runner_physical_handoff_window.ends_at is none
+            or (github_runner_physical_handoff_window.ends_at
+            - github_runner_physical_handoff_window.starts_at <= 7200)
+          - >-
+            github_runner_physical_handoff_window.reference
+            == github_runner_physical_handoff_request.native_fence.operations_window_reference
+        fail_msg: Physical handoff requires one explicit host and an externally approved maintenance request.
+
+    - name: Read the actual selected machine identity
+      ansible.builtin.slurp:
+        src: /etc/machine-id
+      register: github_runner_physical_handoff_actual_machine
+
+    - name: Refuse a different physical host before invoking the helper
+      ansible.builtin.assert:
+        that:
+          - >-
+            github_runner_physical_handoff_actual_machine.content | b64decode | trim
+            == github_runner_physical_handoff_machine_id
+        fail_msg: The actual machine is not the selected physical runner host.
+
+    - name: Inspect the existing private helper directory
+      ansible.builtin.stat:
+        path: /usr/local/lib/github-runner-protected
+        follow: false
+        get_checksum: false
+      register: github_runner_physical_handoff_directory
+
+    - name: Inspect the exact already installed maintenance helper
+      ansible.builtin.stat:
+        path: /usr/local/lib/github-runner-protected/protected_provision.py
+        follow: false
+        checksum_algorithm: sha256
+      register: github_runner_physical_handoff_helper
+
+    - name: Require the reviewed Root-only installed helper bytes
+      ansible.builtin.assert:
+        that:
+          - github_runner_physical_handoff_directory.stat.isdir | default(false)
+          - github_runner_physical_handoff_directory.stat.uid == 0
+          - github_runner_physical_handoff_directory.stat.mode == '0700'
+          - github_runner_physical_handoff_helper.stat.isreg | default(false)
+          - github_runner_physical_handoff_helper.stat.uid == 0
+          - github_runner_physical_handoff_helper.stat.mode == '0700'
+          - github_runner_physical_handoff_helper.stat.checksum == github_runner_physical_handoff_helper_sha256
+        fail_msg: The already installed private maintenance helper does not match the reviewed package.
+
+    - name: Read native time immediately before the maintenance invocation
+      ansible.builtin.command:
+        argv: [/usr/bin/date, '+%s']
+      changed_when: false
+      check_mode: false
+      register: github_runner_physical_handoff_now
+
+    - name: Require the actual owner-approved maintenance window
+      ansible.builtin.assert:
+        that:
+          - github_runner_physical_handoff_now.stdout | int >= github_runner_physical_handoff_window.starts_at
+          - >-
+            github_runner_physical_handoff_window.ends_at is none
+            or github_runner_physical_handoff_now.stdout | int + 600
+            <= github_runner_physical_handoff_window.ends_at
+        fail_msg: The externally approved maintenance window is not active or its bounded end is too close.
+
+    - name: Invoke the fixed Root maintenance interface without reserving or starting a runner
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - >-
+            import sys, stat; from pathlib import Path; base = Path('/usr/local/lib/github-runner-protected');
+            all(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+            for path in (base, *base.parents) for info in [path.lstat()]) or sys.exit('unsafe helper ancestor');
+            sys.path.insert(0, str(base));
+            from protected_provision import main; raise SystemExit(main())
+          - "{{ 'handoff-inspect-input' if ansible_check_mode else 'handoff-apply-input' }}"
+        stdin: >-
+          {{ github_runner_physical_handoff_request
+          | combine({} if ansible_check_mode else
+          {'registration_token': github_runner_physical_handoff_registration_token | default('')}) | to_json }}
+        stdin_add_newline: false
+      check_mode: false
+      register: github_runner_physical_handoff_result
+      changed_when: (github_runner_physical_handoff_result.stdout | from_json).changed | bool
+      no_log: true

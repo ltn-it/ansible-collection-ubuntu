@@ -3,9 +3,27 @@
   ansible.builtin.import_tasks: assert.yml
   tags: always
 
+- name: Prepare explicitly selected independent watchdog
+  ansible.builtin.include_tasks: ephemeral_worker_watchdog.yml
+  when: github_runner_ephemeral_watchdog_install or github_runner_ephemeral_watchdog_activate
+
 - name: Skip when disabled
   ansible.builtin.meta: end_host
   when: not (github_runner_enabled | bool)
+
+- name: Install explicitly selected disabled runtime-v2 components
+  ansible.builtin.include_tasks: runtime_v2.yml
+  when: github_runner_runtime_v2_install
+
+- name: Reject unsupported protected adoption before role effects
+  ansible.builtin.include_tasks: protected_instance.yml
+  vars:
+    github_runner_protected_phase: preflight
+  loop: "{{ github_runner_instances }}"
+  loop_control:
+    loop_var: github_runner_instance
+    label: "{{ github_runner_instance.name }}"
+  when: github_runner_instance.protected | default(false) | bool
 
 - name: Ensure GitHub runner packages are installed
   ansible.builtin.apt:
@@ -17,6 +35,7 @@
   ansible.builtin.group:
     name: "{{ github_runner_group }}"
     state: present
+  when: github_runner_legacy_instances | length > 0
 
 - name: Ensure GitHub runner user exists
   ansible.builtin.user:
@@ -28,6 +47,7 @@
     shell: /bin/bash
     create_home: true
     state: present
+  when: github_runner_legacy_instances | length > 0
 
 - name: Download GitHub runner archive
   ansible.builtin.get_url:
@@ -36,8 +56,10 @@
     owner: root
     group: root
     mode: "0644"
-  when: github_runner_instances | selectattr('state', 'undefined') | list | length > 0
-    or github_runner_instances | selectattr('state', 'equalto', 'present') | list | length > 0
+  when: >-
+    github_runner_legacy_instances | selectattr('state', 'undefined') | list | length > 0
+    or github_runner_legacy_instances | selectattr('state', 'defined') | selectattr('state', 'equalto', 'present')
+    | list | length > 0
 
 - name: Manage GitHub runner instances
   ansible.builtin.include_tasks: manage_instance.yml
@@ -45,3 +67,12 @@
   loop_control:
     loop_var: github_runner_instance
     label: "{{ github_runner_instance.name }}"
+  when: not (github_runner_instance.protected | default(false) | bool)
+
+- name: Manage opt-in protected GitHub runner instances
+  ansible.builtin.include_tasks: protected_instance.yml
+  loop: "{{ github_runner_instances }}"
+  loop_control:
+    loop_var: github_runner_instance
+    label: "{{ github_runner_instance.name }}"
+  when: github_runner_instance.protected | default(false) | bool

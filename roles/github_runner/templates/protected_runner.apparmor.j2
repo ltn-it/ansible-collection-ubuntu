@@ -1,0 +1,11 @@
+# Opt-in inherited runner confinement. No change_profile or unconfined exec.
+# Root issuer may acquire read-only proc evidence; workers cannot trace peers.
+profile {{ github_runner_protected_profile_name }} flags=(attach_disconnected) {
+  file,
+  network,
+  unix,
+  signal,
+  /** ix,
+  deny ptrace (trace, tracedby, read),
+  ptrace (readby) peer=unconfined,
+}

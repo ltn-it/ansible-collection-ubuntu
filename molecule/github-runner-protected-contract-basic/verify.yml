@@ -1,0 +1,72 @@
+---
+- name: Verify invalid protected configuration is rejected without an installer
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    github_runner_url: https://github.com/example
+    github_runner_instances:
+      - name: invalid
+        protected: true
+        dir: /opt/invalid
+        work_dir: _work-relative-legacy-only
+        labels: [self-hosted]
+  tasks:
+    - name: Reject incomplete protected interface
+      block:
+        - name: Validate intentionally incomplete protected input
+          ansible.builtin.include_role:
+            name: lit.ubuntu.github_runner
+            tasks_from: assert.yml
+        - name: Mark unexpected protected acceptance
+          ansible.builtin.set_fact:
+            github_runner_protected_contract_unexpected_acceptance: true
+      rescue:
+        - name: Record expected input denial
+          ansible.builtin.set_fact:
+            github_runner_protected_contract_denied: true
+
+    - name: Require genuine precheck denial
+      ansible.builtin.assert:
+        that:
+          - github_runner_protected_contract_denied | default(false)
+          - not (github_runner_protected_contract_unexpected_acceptance | default(false))
+
+- name: Reject an ephemeral request on the legacy installer before effects
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    github_runner_url: https://github.com/example
+    github_runner_instances:
+      - name: legacy
+        ephemeral: true
+        dir: /opt/legacy-runner
+        work_dir: _work-legacy
+        labels: [self-hosted, linux]
+  tasks:
+    - name: Exercise otherwise valid legacy inputs with an unsupported lifecycle
+      block:
+        - name: Validate ephemeral request on the legacy installer
+          ansible.builtin.include_role:
+            name: lit.ubuntu.github_runner
+            tasks_from: assert.yml
+        - name: Record unexpected legacy lifecycle acceptance
+          ansible.builtin.set_fact:
+            github_runner_legacy_ephemeral_unexpected: true
+      rescue:
+        - name: Require the lifecycle routing assertion to be the denial
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.results | length == 1
+              - "'item.ephemeral' in (ansible_failed_result.results | first).assertion"
+              - "'item.protected' in (ansible_failed_result.results | first).assertion"
+        - name: Record expected legacy lifecycle denial
+          ansible.builtin.set_fact:
+            github_runner_legacy_ephemeral_denied: true
+
+    - name: Require explicit legacy lifecycle rejection
+      ansible.builtin.assert:
+        that:
+          - github_runner_legacy_ephemeral_denied | default(false)
+          - not (github_runner_legacy_ephemeral_unexpected | default(false))

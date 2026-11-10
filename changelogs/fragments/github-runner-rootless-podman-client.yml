@@ -1,0 +1,4 @@
+---
+minor_changes:
+  - github_runner - add opt-in private rootless Podman service preparation for a fresh stopped protected ephemeral
+    runner, with sealed fixed-endpoint client, disjoint sub-ID ranges and write-ahead refusal of uncertain retries.

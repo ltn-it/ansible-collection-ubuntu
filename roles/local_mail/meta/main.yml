@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  role_name: local_mail
+  namespace: lit
+  author: Lightning IT
+  description: Explicitly enabled Postfix delivery to local system mailboxes without network transports.
+  company: Lightning IT
+  license: MIT
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+  galaxy_tags: [ubuntu, mail, system, automation]
+dependencies: []

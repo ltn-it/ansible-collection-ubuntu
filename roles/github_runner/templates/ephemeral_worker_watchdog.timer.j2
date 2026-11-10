@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule disposable worker expiry supervision
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=lit-github-runner-ephemeral-worker-watchdog.service
+
+[Install]
+WantedBy=timers.target

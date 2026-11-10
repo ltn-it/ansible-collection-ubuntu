@@ -1,0 +1,43 @@
+---
+minor_changes:
+  - github_runner - support the stock legacy registration flow through discovered TaskAgent resource routes,
+    binding replacement to the existing pool and runner ID, projecting only pinned DTO members and retaining
+    the V2 flow and one-effect journal.
+  - github_runner - allow explicit Root reconciliation of a proved rejected authentication response without
+    resetting its original intent or regenerating its key; a proved read-only preparation rejection can continue
+    after fresh preparation, while attempted or unknown replacement outcomes remain held.
+  - github_runner - complete an unpublished registered handoff only after verifying its entire retained
+    staging tree against the pinned package; publish the new service stopped and disabled without registering again.
+  - github_runner - prepare a fresh dedicated physical account, private pinned payload and enforcing profile
+    without registration or service effects; verify exact receipt-backed reentry and reject unbound state.
+  - github_runner - prepare only the machine-bound private physical handoff library from exact packaged
+    helper bytes, with closed Root receipt/inventory verification and no registration or service action.
+  - github_runner - seal the authenticated Source commit, tree and complete Git blob inventory alongside the candidate
+    so the runtime can verify exact archived Source without manufacturing Git checkout metadata.
+  - github_runner - add an explicit-host physical handoff playbook for an already installed reviewed Root helper,
+    with read-only check mode, native machine/time checks and a bounded external maintenance-window reference.
+  - github_runner - expose separate Root-only read-only inspection and stopped handoff stdin actions with closed inputs
+    and no job hooks or token-bearing arguments.
+  - github_runner - verify exact completed stopped handoffs on repeated calls without another credential or
+    service mutation; retain uncertain or changed state for reconciliation.
+  - github_runner - add an explicitly machine-bound physical runtime host preparation playbook using the
+    existing Podman role and an exact package version.
+  - github_runner - connect the Root-only stopped expected-ID handoff to fresh protected installation while
+    retaining uncertain journals and disabling the new service.
+  - github_runner - prepare the physical runtime from the exact Validation Main Nexus-readback artifact, with
+    separate source, caller and controller identities and matching profile selectors.
+bugfixes:
+  - github_runner - accept the official runner archive's root directory marker without recreating the
+    private staging directory; reject non-directory root entries before extraction.
+  - github_runner - download the pinned physical runner payload directly on the target over verified HTTPS
+    instead of relaying the large archive through the operator connection.
+  - github_runner - accept an explicitly owner-approved open-ended maintenance window for physical handoff,
+    keeping bounded windows and independent job expiry and retention limits unchanged.
+  - github_runner - optionally restore only the exact installed Ubuntu package Podman AppArmor conffile
+    when a missing attachment flag blocks library loading; reject unknown policy bytes.
+  - github_runner - allow offline generic syntax checks of physical host preparation while rejecting execution
+    without an explicit target before host reads or package effects.
+  - github_runner - serialize Root provisioning and stopped handoff calls before native effects and reject
+    unsafe existing lock inodes without repair.
+  - github_runner - require the stopped legacy runner unit to be disabled before issuing an expected-ID
+    registration handoff target.

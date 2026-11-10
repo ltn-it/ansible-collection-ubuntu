@@ -7,6 +7,9 @@
     incus_instance_empty: "{{ incus_instance_item.empty | default(incus_instance_default_empty) | bool }}"
     incus_instance_reconfigure: >-
       {{ incus_instance_item.reconfigure | default(incus_instance_default_reconfigure) | bool }}
+    incus_instance_create_only: >-
+      {{ incus_instance_item.create_only | default(incus_instance_default_create_only) | bool }}
+    incus_instance_initial_config_argv: []
     incus_instance_project: "{{ incus_instance_item.project | default(incus_instance_default_project) | trim }}"
     incus_instance_profiles: "{{ incus_instance_item.profiles | default(incus_instance_default_profiles) }}"
     incus_instance_profiles_explicit: "{{ 'profiles' in incus_instance_item }}"
@@ -60,6 +63,41 @@
   changed_when: false
   failed_when: false
 
+# A failed info request can mean permission or transport failure, not absence.
+# A successful complete list is required before a create-only allocation. A
+# concurrent create still conflicts in Incus init; never adopt or retry it.
+- name: Read native inventory before create-only allocation
+  ansible.builtin.command:
+    argv: "{{ incus_instance_base_argv + ['list', '--format', 'json'] }}"
+  become: "{{ incus_instance_command_user | trim | length > 0 }}"
+  become_user: "{{ incus_instance_command_user if incus_instance_command_user | trim | length > 0 else omit }}"
+  register: incus_instance_create_inventory
+  changed_when: false
+  no_log: true
+  when: incus_instance_create_only | bool
+
+- name: Require native absence without adopting an existing instance
+  ansible.builtin.assert:
+    that:
+      - incus_instance_info.rc != 0
+      - (incus_instance_create_inventory.stdout | from_json) is sequence
+      - (incus_instance_create_inventory.stdout | from_json) is not string
+      - (incus_instance_create_inventory.stdout | from_json) is not mapping
+      - >-
+        incus_instance_create_inventory.stdout | from_json
+        | selectattr('name', 'equalto', incus_instance_name) | list | length == 0
+    fail_msg: "Create-only allocation requires a successful native absence check; existing instances are never adopted."
+    quiet: true
+  when: incus_instance_create_only | bool
+
+- name: Include initial config in the single create-only allocation request
+  ansible.builtin.set_fact:
+    incus_instance_initial_config_argv: >-
+      {{ incus_instance_initial_config_argv + ['--config', item.key ~ '=' ~ (item.value | string)] }}
+  loop: "{{ incus_instance_config | dict2items }}"
+  no_log: true
+  when: incus_instance_create_only | bool
+
 - name: Delete Incus instance when absent
   ansible.builtin.command:
     argv: "{{ incus_instance_base_argv + ['delete', incus_instance_name, '--force'] }}"
@@ -93,11 +131,13 @@
           if incus_instance_profiles_explicit | bool and incus_instance_profiles | length == 0
           else (incus_instance_profiles | map('regex_replace', '^', '--profile=') | list)
         )
+        + incus_instance_initial_config_argv
       }}
   become: "{{ incus_instance_command_user | trim | length > 0 }}"
   become_user: "{{ incus_instance_command_user if incus_instance_command_user | trim | length > 0 else omit }}"
   register: incus_instance_create
   changed_when: true
+  no_log: true
   when:
     - incus_instance_state != 'absent'
     - incus_instance_info.rc != 0
