@@ -481,7 +481,10 @@ VM acceptance claim. No executable live activation command is provided here.
 
 Each fresh admitted lease owns a separate private Podman graphroot and runroot.
 Root preparation populates that empty store once with the fixed Devtools image
-index for Linux amd64, using TLS verification and no retry. The exact existing
+index for Linux amd64, using TLS verification and one owned Podman invocation.
+The command uses options supported by Podman 4.9; its registry transport may
+retry reads within the same bounded process deadline. Root never replays the
+pull invocation or its journal intent. The exact existing
 index/child/config checks run before the context is signed; runtime execution
 retains `--pull=never`. No job image URL, credentials or host-global cache is used.
 Image transfer and extraction remain inside the existing private storage quota.

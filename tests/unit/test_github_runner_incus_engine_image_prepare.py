@@ -79,7 +79,8 @@ mode=MODE
 image=IMAGE
 metadata={"Digest":"sha256:"+INDEX,"Id":"sha256:"+CONFIG,"Architecture":"amd64","Os":"linux"}
 if command[0]=="pull":
-    assert command==["pull","--retry=0","--tls-verify=true","--platform=linux/amd64",image]
+    # Source Podman 4.9.3 rejects --retry before starting an image copy.
+    assert command==["pull","--tls-verify=true","--platform=linux/amd64",image]
     assert not list(graph.iterdir()), "fresh graphroot"
     (graph/"partial").write_text("owned partial image bytes")
     (run/"pull-owner").write_text(str(os.getpid()))

@@ -194,7 +194,10 @@ def _pull_image(manifest, seconds):
         # Do not poll/wait (reap) this leader before its entire new group is
         # checked/signalled: the original unreaped child pins the PGID.
         with runtime_entry._spawn_adoption():
-            proc = subprocess.Popen(_prefix(manifest) + ["pull", "--retry=0", "--tls-verify=true",
+            # Podman 4.9 has no --retry pull option. This is one owned CLI
+            # invocation; any registry transport retries stay inside its
+            # original process deadline and never replay the journal intent.
+            proc = subprocess.Popen(_prefix(manifest) + ["pull", "--tls-verify=true",
                 "--platform=linux/amd64", engine.IMAGE], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, env=_environment(manifest), close_fds=True,
                 start_new_session=True, umask=0o077)
