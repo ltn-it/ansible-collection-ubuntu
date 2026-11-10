@@ -141,11 +141,14 @@ def _environment(manifest):
 def _command(manifest, arguments, seconds=5):
     """Only internal fixed commands; bounded output and a separately owned CLI."""
     require(os.geteuid() == 0, "engine-executor-root-required")
-    proc = subprocess.Popen(_prefix(manifest) + arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, env=_environment(manifest), close_fds=True, umask=0o077)
+    from . import runtime_entry
+    proc = None
     result = bytearray()
+    deadline = time.monotonic() + seconds
     try:
-        deadline = time.monotonic() + seconds
+        with runtime_entry._spawn_adoption():
+            proc = subprocess.Popen(_prefix(manifest) + arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, env=_environment(manifest), close_fds=True, umask=0o077)
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ)
             while True:
@@ -159,11 +162,14 @@ def _command(manifest, arguments, seconds=5):
                 require(len(result) <= 2 * 1024 ** 2, "engine-cli-output-limit")
         return proc.wait(timeout=max(0.001, deadline - time.monotonic())), bytes(result)
     finally:
-        if proc.poll() is None:
-            # Popen still owns this unreaped child; never address a foreign PID.
-            proc.kill()
-            proc.wait(timeout=2)
-        proc.stdout.close()
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    # Popen still owns this unreaped child.
+                    proc.kill()
+                    proc.wait(timeout=2)
+            finally:
+                proc.stdout.close()
 
 
 def _pull_group_members(pid, deadline):

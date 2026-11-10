@@ -246,13 +246,19 @@ else: raise AssertionError(command)
         self.assertEqual(self.commands, [])
 
     def test_initial_deadline_during_spawn_adoption_terminates_owned_process(self):
+        self.assert_interrupted_spawn_is_reaped("--platform=linux/amd64")
+
+    def test_initial_deadline_during_post_pull_info_spawn_reaps_readback_child(self):
+        self.assert_interrupted_spawn_is_reaped("info")
+
+    def assert_interrupted_spawn_is_reaped(self, argument):
         from incus_lease_issuer import runtime_entry
         original = executor.subprocess.Popen
         acquired = []
         def interrupted(*args, **kwargs):
             proc = original(*args, **kwargs)
             command = args[0] if args else kwargs["args"]
-            if "--platform=linux/amd64" in command:
+            if argument in command:
                 acquired.append(proc)
                 os.kill(os.getpid(), signal.SIGALRM)
             return proc
@@ -265,6 +271,7 @@ else: raise AssertionError(command)
             self.io.run_prepare()
         self.assertEqual(len(acquired), 1)
         self.assertIsNotNone(acquired[0].returncode)
+        self.assertTrue(acquired[0].stdout.closed)
         self.assertEqual(self.io.effect("engine-prepare")["state"], "unknown")
 
 
