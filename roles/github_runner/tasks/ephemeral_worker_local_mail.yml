@@ -64,6 +64,7 @@
           - -B
           - -c
           - "{{ lookup('ansible.builtin.file', role_path ~ '/files/ephemeral_worker_local_mail_install_guard.py') }}"
+          - preflight
           - "{{ github_runner_ephemeral_watchdog_machine_id }}"
           - "{{ github_runner_ephemeral_watchdog_boot_id }}"
           - "{{ github_runner_ephemeral_local_mail_program_directory }}"
@@ -121,14 +122,29 @@
       changed_when: false
       when: not ansible_check_mode
 
-    - name: Reload local mail units after changed definitions
+    - name: Reload sealed local mail unit definitions
       ansible.builtin.systemd_service:
         daemon_reload: true
-      when:
-        - not ansible_check_mode
-        - >-
-          github_runner_ephemeral_local_mail_service_result.changed
-          or github_runner_ephemeral_local_mail_timer_result.changed
+      when: not ansible_check_mode
+
+    - name: Verify effective local mail units before activation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.file', role_path ~ '/files/ephemeral_worker_local_mail_install_guard.py') }}"
+          - effective
+          - "{{ github_runner_ephemeral_watchdog_machine_id }}"
+          - "{{ github_runner_ephemeral_watchdog_boot_id }}"
+          - "{{ github_runner_ephemeral_local_mail_program_directory }}"
+          - "{{ github_runner_ephemeral_watchdog_state_directory }}"
+          - "{{ github_runner_ephemeral_local_mail_module_sha256 | to_json }}"
+          - "{{ github_runner_ephemeral_local_mail_units | to_json }}"
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode
 
     - name: Activate explicitly selected local mail timer
       ansible.builtin.systemd_service:

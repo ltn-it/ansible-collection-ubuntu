@@ -1,0 +1,11 @@
+---
+security_fixes:
+  - >-
+    Reject alternate unit fragments and unapproved full-name, hierarchical,
+    type-wide and runtime systemd overrides before installing the ephemeral-worker
+    watchdog or local alarm sender. Verify effective fragments and drop-ins after
+    reload and before activation.
+bugfixes:
+  - >-
+    Keep local-mail initialization check mode read-only without asserting unrendered
+    Postfix transport settings or creating an ownership receipt.

@@ -133,6 +133,7 @@
   register: local_mail_transport_settings
   changed_when: false
   check_mode: false
+  when: not ansible_check_mode
 
 - name: Require local transport and disabled forwarding
   ansible.builtin.assert:
@@ -142,6 +143,7 @@
         ['127.0.0.1', 'ipv4', 'error:external delivery disabled', 'error:external delivery disabled']
       - local_mail_transport_settings.stdout_lines[4:] | select('ne', '') | list | length == 0
     quiet: true
+  when: not ansible_check_mode
 
 - name: Create private ownership receipt directory
   ansible.builtin.file:
@@ -150,6 +152,7 @@
     owner: root
     group: root
     mode: "0700"
+  when: not ansible_check_mode
 
 - name: Read installed configuration hashes
   ansible.builtin.stat:
@@ -159,6 +162,7 @@
   loop_control:
     loop_var: local_mail_configuration
   register: local_mail_configuration_hashes
+  when: not ansible_check_mode
 
 - name: Seal owned local mail configuration
   ansible.builtin.copy:
@@ -171,6 +175,7 @@
     owner: root
     group: root
     mode: "0600"
+  when: not ansible_check_mode
 
 - name: Start only the owned local mail service
   ansible.builtin.systemd_service:
