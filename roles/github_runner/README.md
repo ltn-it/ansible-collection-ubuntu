@@ -585,6 +585,10 @@ permission to shorten retention.
 Completed owned image-delete tasks must actually leave the native operations
 map before Root records a new project-delete intent. Foreign tasks, failed tasks
 and bounded-wait expiry hold cleanup; unknown writes are never retried.
+The original process owner drains after abort, cancellation, expiry or capture
+failure without requesting live READY again. Actual exit proof still requires
+the same child to finish; an uncertain stop remains held. Quiet-observation
+budgets include native reads and final snapshots before any new delete intent.
 
 A distinct authenticated observer job reads the original final state without a
 new lease or VM effects. Ordinary final quality requires an EdDSA receipt for the

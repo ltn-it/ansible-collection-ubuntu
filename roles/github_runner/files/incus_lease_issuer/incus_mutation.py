@@ -666,11 +666,17 @@ class RootIncusCleanup(RootIncusMutator):
         require(type(seconds) is int and 1 <= seconds <= 60, "mutation-quiet-wait-bound")
         end = time.monotonic() + seconds
         while True:
+            require(time.monotonic() < end, "mutation-project-not-quiet")
             self._scope()
+            require(time.monotonic() < end, "mutation-project-not-quiet")
             require(not self._client.instances(), "mutation-project-not-quiet")
+            require(time.monotonic() < end, "mutation-project-not-quiet")
             operations = self._client.operations()
+            require(time.monotonic() < end, "mutation-project-not-quiet")
             if all(not rows for rows in operations.values()):
-                return self.quiet_project()
+                observed = self.quiet_project()
+                require(time.monotonic() < end, "mutation-project-not-quiet")
+                return observed
             record = self._store.read(self._owner.lease_id)
             own = {row["incus_operation_id"] for row in record["effects"].values()
                    if row["state"] == "verified" and "incus_operation_id" in row}

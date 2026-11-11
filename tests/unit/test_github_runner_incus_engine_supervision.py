@@ -214,5 +214,75 @@ class RootSupervisionTests(unittest.TestCase):
         self.assertTrue(owned.eof)
 
 
+@unittest.skipUnless(sys.platform=="linux" and os.geteuid()==0,"private proper-EE Root only")
+class RootOperatingTerminationPhaseTests(unittest.TestCase):
+    def phase(self,name):
+        import test_github_runner_incus_full_finalization as fixtures
+        value=fixtures.operating_cleanup_fixture("termination:"+name)
+        self.assertTrue(value["authorization_unchanged"] and value["deadline_unchanged"] and value["no_new_process"])
+        self.assertTrue(value["real_wall_clock_during_wait"])
+        self.assertLessEqual(sum(row["arguments"][:2]==["container","stop"] for row in value["commands"]),1)
+        return value
+
+    def drained(self,name):
+        value=self.phase(name)
+        self.assertTrue(value["original_exit_proof_at_return"])
+        self.assertFalse(value["child_still_live_at_return"])
+        self.assertEqual(value["readiness_calls"], [])
+        self.assertEqual(value["actual_Unix_notifications"], [])
+        self.assertEqual(len(value["engine_stop_effects"]),1)
+        self.assertEqual(value["engine_stop_effects"][0]["state"],"unknown")
+        self.assertNotEqual(value["state_at_return"],"closed")
+        return value
+
+    def test_normal_ready_emits_exactly_one_actual_unix_frame(self):
+        value=self.phase("normal-ready")
+        self.assertEqual(value["observed_exit"],23)
+        self.assertEqual(len(value["actual_Unix_notifications"]),1)
+        self.assertEqual(len(value["readiness_calls"]),1)
+
+    def test_cancel_before_ready_drains_same_unknown_stop_owner(self):
+        self.drained("cancel-before-ready")
+
+    def test_previously_attempted_unknown_stop_is_not_retried_or_ready(self):
+        self.drained("previous-stop-before-ready")
+
+    def test_existing_root_ack_cannot_reauthorize_ready_during_abort(self):
+        self.drained("ready-then-abort")
+
+    def test_cancelled_normal_wait_stops_and_drains_before_ready(self):
+        self.drained("normal-cancel-before-ready")
+
+    def test_actual_wall_expiry_before_first_ready_records_expiry_then_drains(self):
+        value=self.drained("expiry-before-ready")
+        self.assertEqual(value["state_at_return"],"cancelled")
+        self.assertGreaterEqual(value["real_wall_at_return"],value["authorization_deadline"])
+
+    def test_actual_wall_expiry_abort_keeps_unknown_stop_and_original_exit(self):
+        self.drained("expiry-abort-before-ready")
+
+    def test_already_exited_original_child_is_observed_without_ready_or_stop_retry(self):
+        self.drained("previous-stop-child-exited")
+
+    def test_generic_failure_abort_never_runs_live_ready_phase(self):
+        self.drained("failure-abort-live-authority")
+
+    def test_real_cancellation_race_stays_denied_then_original_retention_drains(self):
+        value=self.phase("ready-race-cancel")
+        self.assertEqual(value["production_error"],"Denied:cell-observation-not-live")
+        self.assertTrue(value["exit_proof_after_retention"])
+        self.assertEqual(value["actual_Unix_notifications"],[])
+
+    def test_wrong_ready_owner_stays_denied_and_never_grants_an_ack(self):
+        value=self.phase("wrong-ready-owner")
+        self.assertIsNotNone(value["production_error"])
+        self.assertTrue(value["exit_proof_after_retention"])
+        self.assertEqual(value["actual_Unix_notifications"],[])
+
+    def test_actual_capture_limit_failure_drains_before_live_ready(self):
+        value=self.drained("capture-failure-normal")
+        self.assertEqual(value["recorded_exit_states"]["stdout_state"],"limited")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1047,15 +1047,27 @@ def _wait_original(config_path, config_sha256, registry, selector, store, lease_
     ready_notified = False
     operating = identity.decode_json(manifest.canonical_bytes)["environment"].get("QUALITY_INPUT_PROFILE") == "operating"
     while True:
-        if stop_first and not owned.stop_attempted:
+        owned.pump(0.05)
+        record = store.read(lease_id)
+        authorization = record["authorizations"][-1]
+        expired = int(time.time()) >= min(owned.prepared.expires_at, authorization["valid_until"])
+        if expired and record["state"] == "prepared":
+            store.expire_authorization(lease_id)
+            record = store.read(lease_id)
+        # READY is a live phase, never a prerequisite for draining an original
+        # owner after abort, cancellation, expiry or a prior uncertain stop.
+        stopping = stop_first or expired or owned.capture.problem or record["state"] != "prepared"
+        if stopping and not owned.stop_attempted:
             owned.stop_attempted = True
+            # cancel reacquires the lock only for its finite transition.
             try:
                 cancel(config_path, config_sha256, registry, selector, store, lease_id, receipt)
             except EngineUnknown:
                 owned.withdrawal_hold = True
-        owned.pump(0.05)
-        if operating and not ready_notified and owned.returncode is None:
+        if operating and not stopping and not owned.stop_attempted and not ready_notified and owned.returncode is None:
             from . import operating_custody
+            # A raced live-authority/provenance denial stays strict. The normal
+            # exact-original-owner abort path can still drain without READY.
             ready = operating_custody.operating_ready_tick(config_path, config_sha256, registry, selector, store, lease_id, receipt)
             if ready is not None:
                 if notification_socket is not None:
@@ -1063,18 +1075,6 @@ def _wait_original(config_path, config_sha256, registry, selector, store, lease_
                     runtime_rpc._write(notification_socket, {"schema": 2, "type": "operating-ready", "operation": "run",
                         "lease_id": lease_id, "case": ready["case"], "instance_uuid": ready["instance_uuid"]})
                 ready_notified = True
-        record = store.read(lease_id)
-        authorization = record["authorizations"][-1]
-        expired = int(time.time()) >= min(owned.prepared.expires_at, authorization["valid_until"])
-        if expired and record["state"] == "prepared":
-            store.expire_authorization(lease_id)
-        if (expired or owned.capture.problem) and not owned.stop_attempted:
-            owned.stop_attempted = True
-            # cancel reacquires the lock only for its finite transition.
-            try:
-                cancel(config_path, config_sha256, registry, selector, store, lease_id, receipt)
-            except EngineUnknown:
-                owned.withdrawal_hold = True
         if owned.returncode is not None:
             if not owned.stop_attempted:
                 owned.stop_attempted = True

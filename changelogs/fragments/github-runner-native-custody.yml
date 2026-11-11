@@ -25,3 +25,6 @@ bugfixes:
   - >-
     github_runner - Wait for completed owned image-delete tasks to disappear before recording project
     deletion, preserving unknown-effect holds and strict proof-based cleanup fixtures.
+  - >-
+    github_runner - Keep live READY separate from original-owner abort drainage and enforce the original
+    quiet-observation deadline across native reads before authorizing another cleanup intent.

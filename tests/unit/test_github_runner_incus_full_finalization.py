@@ -341,9 +341,16 @@ def _operating_snapshot(io):
 
 def operating_cleanup_fixture(mode):
     """Actual factory/ELF/READY/opaque proof/retention/finalizer; native HTTP/kernel modeled."""
-    CASE, CASE2 = "failure", "broker-cancel"
+    real_time=time.time
+    termination=mode.startswith("termination:")
+    phase=mode.removeprefix("termination:")
+    CASE=("expiry-controller-loss" if phase.startswith("expiry") else
+          "broker-cancel" if any(part in phase for part in ("cancel","previous","ready-then")) else "failure") if termination else "failure"
+    CASE2="failure" if CASE!="failure" else "broker-cancel"
     UUID = "12345678-1234-4234-8234-123456789abc"
     with ExitStack() as stack:
+        if termination:
+            stack.enter_context(mock.patch.object(factories.crypto,"NOW",int(real_time())))
         cap_fixtures.RootCapacityTests.setUpClass()
         quota = cap_fixtures.RootCapacityTests(); stack.callback(quota.doCleanups); quota.setUp()
         factories.RootConfigurationTests.setUpClass()
@@ -360,6 +367,15 @@ def operating_cleanup_fixture(mode):
         memcpy(ack,out,size);ack[size]=0;strcat(ack,"/control/root-operating-ready.json");
         for(int n=0;n<1000 && access(ack,F_OK);n++) usleep(10000);
         return access(ack,F_OK)==0?23:92;''')
+        if termination:
+            code=code.replace('for(int n=0;n<1000 && access(ack,F_OK);n++) usleep(10000);',
+                'for(int n=0;n<10000;n++) {if(!access(ack,F_OK) || !access(stopped,F_OK)) {usleep(500000);return 23;}usleep(10000);}')
+            code=code.replace('return access(ack,F_OK)==0?23:92;','return 92;')
+            if phase!="normal-ready":
+                code=code.replace('if(!strcmp(argv[i],"stop")) { if(access(stopped,F_OK)) put(stopped,"stopped");return 0; }',
+                    'if(!strcmp(argv[i],"stop")) { if(access(stopped,F_OK)) put(stopped,"stopped");return 1; }')
+        if termination and phase=="capture-failure-normal":
+            code=code.replace('write(1,"fixed-root-fixture-output\\n",26);','write(1,"fixed-root-fixture-output\\n",26);write(1,"fixed-root-fixture-output\\n",26);')
         source.write_text(code)
         subprocess.run(["/usr/bin/cc", "-std=c11", "-D_DEFAULT_SOURCE", "-O2", str(source), "-o", str(binary)],
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
@@ -382,6 +398,10 @@ def operating_cleanup_fixture(mode):
         template.update(kind="operating", lease_seconds=900, job_timeout_seconds=5400)
         template["engine"]["engine"] = {"executable": str(binary), "executable_sha256": digest(binary.read_bytes())}
         template["engine"]["limits"]["timeout_seconds"] = 600
+        if termination and phase=="capture-failure-normal":
+            template["engine"]["capture"]={"stdout_limit":32,"stderr_limit":32,"total_limit":64}
+            io.helper.value["runtime"]["capture"]={**io.helper.value["runtime"]["capture"],
+                "stdout_limit":32,"stderr_limit":32,"total_limit":64}
         template["engine"]["paths"].update(storage=str(quota.quota.mount / "graph"),
             runroot=str(quota.quota.mount / "run"), output=str(quota.quota.mount / "output"))
         template["incus"]["project_limits"] = {"cpu": 1, "memory_bytes": operating_cells.MEMORY,
@@ -402,6 +422,10 @@ def operating_cleanup_fixture(mode):
         io.helper.native.job["name"] = "Operating custody / " + CASE
         io.helper.seal(); io.bootstrap = io.helper.bootstrap; io.selector = io.helper.selector
         io.proof, io.token = io.helper.mint()
+        if termination:
+            time.time=real_time
+            if phase.startswith("expiry"):
+                io.helper.native.claims["exp"]=int(real_time())+40
         configuration = io.create(snapshot)
         registry = policy_registry.load_registry(configuration.registry_path, configuration.registry_sha256)
         store = ledger.Ledger(io.helper.store_path, clock=run_factory.time.time); stack.callback(store.shutdown)
@@ -473,6 +497,8 @@ def operating_cleanup_fixture(mode):
         st = io.root.stat()
         stack.enter_context(mock.patch.object(engine_executor, "_cgroup", return_value=(st.st_dev, st.st_ino)))
         engine_executor._spawn(prepared, manifest, store)
+        if termination:
+            return observe_original_termination(phase,stack,configuration,registry,store,lease,io,receipt,quota,vm,real_time)
         ready = operating_custody.operating_ready_tick(configuration.preparation_config_path,
             configuration.preparation_config_sha256, registry, io.selector, store, lease, receipt)
         assert ready["instance_uuid"] == UUID
@@ -588,11 +614,14 @@ def operating_cleanup_fixture(mode):
                 return mutations.reply(mutations.envelope({"id":op,"class":"task","status_code":200,"err":""}))
             if method=="GET" and path==ops_url and leaf["image_deleted"]:
                 leaf["operations_reads"]+=1
-                visible=mode in {"linger","persistent","foreign-active"}
+                if (mode=="late-first-empty" and leaf["operations_reads"]==1 or
+                    mode=="late-final-empty" and leaf["operations_reads"]==3):
+                    time.sleep(1.1)
+                visible=mode in {"linger","persistent","foreign-active","pending-own"}
                 if mode=="linger" and leaf["operations_reads"]>=3:visible=False
                 row={"id":op if mode!="foreign-active" else "99999999-9999-4999-8999-999999999999",
-                    "class":"task","status_code":103 if mode=="foreign-active" else 200,
-                    "status":"Running" if mode=="foreign-active" else "Success","err":""}
+                    "class":"task","status_code":103 if mode in {"foreign-active","pending-own"} else 200,
+                    "status":"Running" if mode in {"foreign-active","pending-own"} else "Success","err":""}
                 return mutations.reply(mutations.envelope({row["status"].lower():[row]} if visible else {}))
             return old_handler(method,path,body)
         server.handle=async_leaf
@@ -637,7 +666,7 @@ def operating_cleanup_fixture(mode):
         if mode=="immediate":assert record["state"]=="closed" and error is None
         elif mode == "linger":
             assert record["state"] == "closed" and error is None
-        elif mode in {"persistent","foreign-active"}:
+        elif mode in {"persistent","foreign-active","pending-own","late-first-empty","late-final-empty"}:
             assert error and not any(e["operation"]=="project-delete" for e in effects)
             assert any(e["operation"]=="image-delete" and e["state"]=="verified" for e in effects)
         else:
@@ -649,6 +678,120 @@ def operating_cleanup_fixture(mode):
             "no_retry_writes":True,"native_acceptance":False,"source_model":"actual factory/RootREADY/ELF23/opaque terminal/4h policy/retention/prune/next capacity; only HTTP operation lifecycle modeled"}
         stack.close()
         return result
+
+def observe_original_termination(mode,stack,configuration,registry,store,lease,io,receipt,quota,vm,real_time):
+    """Real original owner/live-policy/Unix frame; only host/provider/kernel leaves modeled."""
+    from incus_lease_issuer import runtime_rpc
+    import socket,struct
+    MODE=mode
+    _REAL_TIME=real_time
+    UUID="12345678-1234-4234-8234-123456789abc"
+    notify,receiver=socket.socketpair()
+    stack.callback(notify.close);stack.callback(receiver.close)
+    selector=io.selector
+    start_id,start=next((k,v) for k,v in store.read(lease)["effects"].items() if v["operation"]=="engine-start")
+    owned=engine_executor._PROCESSES[start["engine_process"]["pid"]]
+    initial=store.read(lease); pid=owned.process["pid"]
+    commands=[]
+    real_command=engine_executor._command
+    def command(*args,**kwargs):
+        result=real_command(*args,**kwargs)
+        commands.append({"arguments":args[1],"rc":result[0]})
+        return result
+    stack.enter_context(mock.patch.object(engine_executor,"_command",side_effect=command))
+    def kernel_withdraw(_path,_sha,owner,journal,_worker,_config):
+        # Only unavailable kernel nft/fence I/O is modeled; actual Ledger effect remains once-only.
+        effect=journal.begin(lease,"fence-disable","fence:"+lease)
+        journal.record(lease,effect,"verified",evidence_sha256="d"*64)
+    stack.enter_context(mock.patch.object(network_fence,"disable",side_effect=kernel_withdraw))
+    stack.enter_context(mock.patch.object(network_fence,"verify_disabled"))
+    stack.enter_context(mock.patch.object(engine_executor,"_drained"))
+    ready_calls=[]; original_ready=operating_custody.operating_ready_tick
+    def readiness(*args,**kwargs):
+        if MODE=="ready-race-cancel" and not ready_calls:
+            store.cancel(lease,"cancelled")
+        if MODE=="wrong-ready-owner":
+            vm["config"]["user.lit-molecule-owner"]="foreign-owner"
+        try:
+            value=original_ready(*args,**kwargs)
+            ready_calls.append({"state":"returned","ready":value is not None,"lease_state":store.read(lease)["state"]})
+            return value
+        except identity.Denied as e:
+            ready_calls.append({"state":"denied","category":str(e),"lease_state":store.read(lease)["state"]})
+            raise
+    stack.enter_context(mock.patch.object(operating_custody,"operating_ready_tick",side_effect=readiness))
+    if MODE=="ready-then-abort":
+        assert original_ready(configuration.preparation_config_path,configuration.preparation_config_sha256,
+            registry,io.selector,store,lease,receipt)["instance_uuid"]==UUID
+    if MODE in {"cancel-before-ready","previous-stop-before-ready","ready-then-abort","normal-cancel-before-ready","previous-stop-child-exited"}:
+        store.cancel(lease,"cancelled")
+    previous_stop_error=None
+    if MODE in {"previous-stop-before-ready","previous-stop-child-exited"}:
+        try:engine_executor.cancel(configuration.preparation_config_path,configuration.preparation_config_sha256,registry,io.selector,store,lease,receipt)
+        except identity.Denied as e:previous_stop_error=type(e).__name__+":"+str(e)
+    if MODE=="previous-stop-child-exited":
+        end=time.monotonic()+2
+        while (owned.returncode is None or not owned.eof) and time.monotonic()<end:owned.pump(.01)
+        assert owned.returncode==23 and owned.eof
+    if MODE.startswith("expiry"):
+        cutoff=min(initial["expires_at"],initial["authorizations"][-1]["valid_until"])
+        while _REAL_TIME()<cutoff+.01:time.sleep(min(.05,cutoff+.01-_REAL_TIME()))
+        assert time.time is _REAL_TIME
+    error=None; observed=None
+    try:
+        if MODE in {"normal-ready","expiry-before-ready","normal-cancel-before-ready","previous-stop-child-exited","ready-race-cancel","wrong-ready-owner","capture-failure-normal"}:
+            observed=engine_executor.wait_for_exit(configuration.preparation_config_path,configuration.preparation_config_sha256,
+                registry,io.selector,store,lease,receipt,notification_socket=notify)
+        else:
+            observed=engine_executor._abort_after_failure(configuration.preparation_config_path,configuration.preparation_config_sha256,
+                registry,io.selector,store,lease,receipt)
+    except identity.Denied as e:error=type(e).__name__+":"+str(e)
+    notify.shutdown(socket.SHUT_WR)
+    frames=[]
+    receiver.settimeout(1)
+    raw=b""
+    while True:
+        part=receiver.recv(65536)
+        if not part:break
+        raw+=part
+    while raw:
+        size=struct.unpack("!I",raw[:4])[0];frames.append(identity.decode_json(raw[4:4+size]));raw=raw[4+size:]
+    after=store.read(lease); child_live=owned.returncode is None
+    receipt_before_teardown="engine_exit" in after["effects"][start_id]
+    before_commands=list(commands)
+    stop_at_return=owned.stop_attempted
+    wall_at_return=_REAL_TIME()
+    downstream={}
+    if error:
+        rpc=runtime_rpc.RuntimeRPC(configuration.runtime_config_path,configuration.runtime_config_sha256)
+        try:rpc._retain_after_failure(store,lease,io.selector,receipt)
+        except identity.Denied as e:downstream["original_owner_retention_error"]=type(e).__name__+":"+str(e)
+        try:operating_custody.retain_stopped(configuration.runtime_config_path,configuration.runtime_config_sha256,registry,io.selector,store,lease)
+        except identity.Denied as e:downstream["custody_error"]=type(e).__name__+":"+str(e)
+        try:finalization.RootFinalizer(configuration.runtime_config_path,configuration.runtime_config_sha256).finalize(registry,io.selector,store,lease)
+        except identity.Denied as e:downstream["finalization_error"]=type(e).__name__+":"+str(e)
+    final=store.read(lease)
+    result={"mode":MODE,"production_error":error,"observed_exit":None if observed is None else observed.exit_code,
+        "original_pid":pid,"actual_owner_pid_unchanged":owned.process["pid"]==pid,
+        "child_still_live_at_return":child_live,"original_exit_proof_at_return":receipt_before_teardown,
+        "initial_state":initial["state"],"state_at_return":after["state"],"stop_attempted":owned.stop_attempted,"stop_attempted_at_return":stop_at_return,"commands_at_return":before_commands,
+        "authorization_deadline":min(initial["expires_at"],initial["authorizations"][-1]["valid_until"]),"real_wall_at_return":wall_at_return,
+        "readiness_calls":ready_calls,"actual_Unix_notifications":frames,"previous_stop_error":previous_stop_error,"commands":commands,
+        "engine_stop_effects":[{"state":e["state"],"id":k} for k,e in final["effects"].items() if e["operation"]=="engine-stop"],
+        "downstream":downstream,"exit_proof_after_retention":"engine_exit" in final["effects"][start_id],
+        "recorded_exit_states":{key:final["effects"][start_id].get("engine_exit",{}).get(key) for key in ("stdout_state","stderr_state")},"authorization_unchanged":initial["authorizations"]==final["authorizations"],
+        "deadline_unchanged":initial["expires_at"]==final["expires_at"],
+        "no_new_process":[e["engine_process"]["pid"] for e in final["effects"].values() if e["operation"]=="engine-start"]==[pid],
+        "real_wall_clock_during_wait":time.time is _REAL_TIME,"native_acceptance":False}
+    # TEST-ONLY teardown AFTER recording the product result; never claimed as automatic recovery.
+    if not owned.closed:
+        if owned.returncode is None:owned.proc.terminate()
+        end=time.monotonic()+3
+        while (owned.returncode is None or not owned.eof) and time.monotonic()<end:owned.pump(.01)
+        if owned.returncode is not None and owned.eof:
+            owned.record_exit();owned.release()
+    return result
+
 
 @unittest.skipUnless(sys.platform=="linux" and os.geteuid()==0,"private proper-EE Root only")
 class RootAsyncImageFinalizationTests(unittest.TestCase):
@@ -664,6 +807,18 @@ class RootAsyncImageFinalizationTests(unittest.TestCase):
 
     def test_own_completed_operation_timeout_holds_before_project_intent_or_delete(self):
         result=operating_cleanup_fixture("persistent")
+        self.assertEqual(result["project_DELETE_requests"], [])
+
+    def test_late_first_empty_response_never_authorizes_project_intent(self):
+        result=operating_cleanup_fixture("late-first-empty")
+        self.assertEqual(result["project_DELETE_requests"], [])
+
+    def test_late_final_empty_snapshot_never_authorizes_project_intent(self):
+        result=operating_cleanup_fixture("late-final-empty")
+        self.assertEqual(result["project_DELETE_requests"], [])
+
+    def test_pending_owned_operation_is_not_adopted_as_quiet(self):
+        result=operating_cleanup_fixture("pending-own")
         self.assertEqual(result["project_DELETE_requests"], [])
 
     def test_unknown_applied_image_delete_is_never_retried(self):
