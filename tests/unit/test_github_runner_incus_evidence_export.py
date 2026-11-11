@@ -26,13 +26,13 @@ from incus_lease_issuer import evidence_export as export, ledger  # noqa: E402
 from incus_lease_issuer import evidence_policy as policy  # noqa: E402
 from incus_lease_issuer.identity import Denied  # noqa: E402
 
-SECRET = "SYNTHETIC_SECRET_NEVER_EXPORTED"
+FIXTURE_MARKER = "synthetic-marker-excluded-from-export"
 
 
 class NormalizationTests(unittest.TestCase):
     def test_junit_per_test_status_duration_identity_hash_without_free_text(self):
-        raw = ('<testsuite><testcase name="' + SECRET + '" classname="x" time="0.25"><failure>'
-               + SECRET + '</failure><system-out>' + SECRET + '</system-out></testcase>'
+        raw = ('<testsuite><testcase name="' + FIXTURE_MARKER + '" classname="x" time="0.25"><failure>'
+               + FIXTURE_MARKER + '</failure><system-out>' + FIXTURE_MARKER + '</system-out></testcase>'
                '<testcase name="second"><skipped/></testcase></testsuite>').encode()
         result = export._junit(raw)
         self.assertEqual(result["test_count"], 2)
@@ -40,17 +40,17 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(result["tests"][0]["duration_seconds"], 0.25)
         self.assertEqual(result["source_sha256"], hashlib.sha256(raw).hexdigest())
         self.assertEqual(result["source_bytes"], len(raw))
-        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn(FIXTURE_MARKER, json.dumps(result))
         self.assertIs(result["evidence_policy_complete"], False)
 
     def test_allure_per_test_projection_excludes_attachments_parameters_and_failure_text(self):
-        raw = ledger.canonical({"uuid": SECRET, "fullName": SECRET, "name": SECRET, "status": "broken",
+        raw = ledger.canonical({"uuid": FIXTURE_MARKER, "fullName": FIXTURE_MARKER, "name": FIXTURE_MARKER, "status": "broken",
             "start": 1000, "stop": 1250, "attachments": [{"source": "/client.key"}],
-            "statusDetails": {"message": SECRET}, "parameters": [{"value": SECRET}]})
+            "statusDetails": {"message": FIXTURE_MARKER}, "parameters": [{"value": FIXTURE_MARKER}]})
         result = export._allure(raw)
         self.assertEqual(result["tests"][0]["status"], "broken")
         self.assertEqual(result["tests"][0]["duration_seconds"], 0.25)
-        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn(FIXTURE_MARKER, json.dumps(result))
         self.assertNotIn("client.key", json.dumps(result))
 
     def test_malformed_xml_entities_statuses_and_nonfinite_durations_deny(self):
@@ -120,7 +120,7 @@ class RootExportTests(unittest.TestCase):
             "workflow_attempt": "1", "commit_sha": "a" * 40, "expected_commit_sha": "a" * 40,
             "results": [{"scenario": "role_heavy", "target": "ubuntu", "run_attempt": "1",
                          "junit": ["junit/report.xml"], "allure_results": ["allure-results/one-result.json"]}],
-            "blockers": [SECRET], "release_eligible": True}
+            "blockers": [FIXTURE_MARKER], "release_eligible": True}
         properties = {"commit_sha": "a" * 40, "profile": "heavy", "scenario": "role_heavy", "target": "ubuntu",
                       "run_attempt": "1", "roles": "demo"}
         prop_xml = "".join(f'<property name="{key}" value="{value}"/>' for key, value in properties.items())
@@ -148,7 +148,7 @@ class RootExportTests(unittest.TestCase):
             "security_evidence": {"required_for_release": [], "missing": [], "external_secret_findings": 0,
                 "vulnerability_blocking_findings": 0, "semantic_valid": False}, "prerequisites": {}, "blockers": []})
         self.refresh_checksums()
-        self.write(self.output / "artifacts/logs/private.log", SECRET.encode())
+        self.write(self.output / "artifacts/logs/private.log", FIXTURE_MARKER.encode())
 
     @staticmethod
     def write(path, value):
@@ -190,7 +190,7 @@ class RootExportTests(unittest.TestCase):
             members = {row.name: stream.extractfile(row).read() for row in stream.getmembers()}
             self.assertTrue(all(row.isfile() and row.uid == 0 and row.gid == 0 and row.mtime == 0
                                 for row in stream.getmembers()))
-        self.assertNotIn(SECRET.encode(), b"".join(members.values()))
+        self.assertNotIn(FIXTURE_MARKER.encode(), b"".join(members.values()))
         self.assertNotIn(b"client.key", b"".join(members.values()))
         self.assertTrue(json.loads(members["runtime/evidence-policy.json"])["evidence_policy_complete"])
         self.assertIn(b'assert route available', members["evidence/junit/report.xml"])
@@ -285,7 +285,7 @@ class RootExportTests(unittest.TestCase):
         original = export._create
         def fail_receipt(parent, name, raw):
             if name == export.RECEIPT:
-                raise OSError(SECRET)
+                raise OSError(FIXTURE_MARKER)
             return original(parent, name, raw)
         with mock.patch.object(export, "_create", side_effect=fail_receipt):
             self.deny()
