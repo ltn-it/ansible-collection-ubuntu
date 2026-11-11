@@ -589,6 +589,13 @@ actual closed cleanup, original execution job and exact uploaded artifact. The
 public client verifies the independently installed public pin; the Source
 consumer must independently verify its own trusted pin and provider artifact.
 
+An ordinary run can still transfer its already sealed, independently validated
+diagnostics when finalization reports a safety-maintenance hold. The exact
+original-owner failure-retention safeguard remains required, and unknown native
+writes stay unknown without retries. This transfer does not grant final quality
+or release capacity. Changed runtime trust, a corrupt archive or a partial
+protocol stream must continue to deny delivery.
+
 The three closed operating selectors exercise workload failure, broker
 cancellation and client-heartbeat loss with the Root supervisor alive. Root must
 observe the owned VM running with the exact UUID, image and devices before

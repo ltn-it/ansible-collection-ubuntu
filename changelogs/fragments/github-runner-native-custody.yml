@@ -19,3 +19,6 @@ bugfixes:
   - >-
     github_runner - Isolate interrupted mail replacements and archive confirmed events durably without replay,
     so historical delivery records cannot exhaust pending notification capacity; keep mail fixtures private.
+  - >-
+    github_runner - Preserve validated ordinary diagnostic delivery across typed finalization holds while
+    retaining the exact original owner and denying trust, archive and partial-stream failures.

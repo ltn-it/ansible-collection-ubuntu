@@ -201,21 +201,21 @@ class RootFinalizer:
         """
         require(os.geteuid() == 0, "finalization-root-required")
         from . import root_session, cleanup_storage, evidence_export, emergency_stop, operating_custody
-        # Safety withdrawal is independent of destructive eligibility.  Acquire
-        # its normal Root session before, never recursively inside ours.
-        initial = store.read(lease_id)
-        if initial["state"] != "closed" and _effect(initial, "engine-release", "engine:" + lease_id) is None:
-            emergency_stop.RootEmergencyStop(self._runtime.path, self._runtime.sha256).stop(
-                registry, selector, store, lease_id)
-        elif initial["state"] != "closed":
-            # A verified raw release already consumed its original stopped VM
-            # and credential. Re-entry is readback of verified effects only;
-            # deleted engine files cannot reconstruct an original Popen owner.
-            ledger.Ledger._owned_instance_deleted(initial)
-            require(any(row["operation"] == "certificate-revoke" and row["state"] == "verified"
-                        for row in initial["effects"].values()), "finalization-prior-release-unsafe")
         attempted = False
         try:
+            # Safety withdrawal is independent of destructive eligibility.
+            # Its own finite session remains OUTSIDE ours, but expected safety
+            # failures belong to this same finalization exception domain.
+            initial = store.read(lease_id)
+            if initial["state"] != "closed" and _effect(initial, "engine-release", "engine:" + lease_id) is None:
+                emergency_stop.RootEmergencyStop(self._runtime.path, self._runtime.sha256).stop(
+                    registry, selector, store, lease_id)
+            elif initial["state"] != "closed":
+                # Re-entry reads verified effects only. Deleted raw files
+                # cannot reconstruct an original Popen owner or permit retry.
+                ledger.Ledger._owned_instance_deleted(initial)
+                require(any(row["operation"] == "certificate-revoke" and row["state"] == "verified"
+                            for row in initial["effects"].values()), "finalization-prior-release-unsafe")
             with root_session._session(self._runtime.preparation_config_path,
                                        self._runtime.preparation_config_sha256) as session:
                 owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
@@ -319,6 +319,12 @@ class RootFinalizer:
                                    "effects": closed["effects"], "evidence": evidence_sha}))
         except FinalizationUnknown:
             raise
+        except emergency_stop.EmergencyStopUnknown:
+            # A safety write can be UNKNOWN before this finalizer has begun
+            # any destructive operation. Never demote it to a known denial.
+            raise FinalizationUnknown("finalization-safety-unknown") from None
+        except emergency_stop.EmergencyStopDenied:
+            raise FinalizationDenied("finalization-safety-denied") from None
         except Exception:
             if attempted:
                 raise FinalizationUnknown("finalization-cleanup-held") from None

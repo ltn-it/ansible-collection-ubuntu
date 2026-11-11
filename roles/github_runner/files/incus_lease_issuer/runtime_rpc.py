@@ -300,6 +300,7 @@ class RuntimeRPC:
         # Fresh normal native authentication below grants all actual authority.
         _root()
         operation, lease_id, accepted, writing = None, None, False, False
+        retention_attempted = False  # Request-local control flow, never authority or a retry permission.
         store, exported, receipt = None, None, None
         try:
             admission._socket(connected)
@@ -461,8 +462,14 @@ class RuntimeRPC:
                             self._registry, selector, store, lease_id)
                     except (finalization.FinalizationDenied, finalization.FinalizationUnknown):
                         # Preserve the observed exit/evidence, but ONLY actual
-                        # Ledger.close can make terminal cleanup verified.
-                        pass
+                        # Ledger.close can make terminal cleanup verified. Keep
+                        # the exact original owner safeguarded as the generic
+                        # failure path did, even if its earlier drain held.
+                        retention_attempted = True
+                        try:
+                            self._retain_after_failure(store, lease_id, selector, receipt)
+                        except Exception:
+                            pass  # Hold stays; no replacement waiter or UNKNOWN-effect retry.
                 outcome = _terminal(operation, lease_id, store.read(lease_id), exported)
             elif operation == "cancel":
                 receipt = _receipt(self._registry, selector, store, lease_id)
@@ -511,9 +518,10 @@ class RuntimeRPC:
                 _stream(connected, lease_id, exported)
             return outcome
         except Exception:
-            if accepted and store is not None:
+            if accepted and store is not None and not retention_attempted:
                 # An error/failed terminal send NEVER abandons an original
                 # child. No replay, replacement Popen or guessed wait status.
+                retention_attempted = True
                 try:
                     self._retain_after_failure(store, lease_id, selector, receipt)
                 except Exception:

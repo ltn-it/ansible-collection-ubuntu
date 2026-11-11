@@ -75,6 +75,30 @@ class RootFinalizationTests(unittest.TestCase):
             target["project"], target["network"], "default", target["pool"], (fingerprint,)))
         return incus_mutation.RootIncusCleanup(client, self.owner, self.store)
 
+    def test_early_safety_denial_is_finalization_denied_without_a_new_effect(self):
+        """Exception domain only; real native fault/journal cases are composed separately."""
+        from incus_lease_issuer import emergency_stop
+        before = self.store.read(self.lease)
+        with mock.patch.object(emergency_stop.RootEmergencyStop, "stop",
+                               side_effect=emergency_stop.EmergencyStopDenied("fixture-read-held")):
+            with self.assertRaises(finalization.FinalizationDenied):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+        self.assertEqual(self.store.read(self.lease), before)
+
+    def test_early_safety_unknown_keeps_unknown_type_before_destructive_attempt(self):
+        from incus_lease_issuer import emergency_stop
+        before = self.store.read(self.lease)
+        with mock.patch.object(emergency_stop.RootEmergencyStop, "stop",
+                               side_effect=emergency_stop.EmergencyStopUnknown("fixture-native-unknown")):
+            with self.assertRaises(finalization.FinalizationUnknown):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+        self.assertEqual(self.store.read(self.lease), before)
+
+    def test_initial_record_failure_is_in_the_existing_finalizer_domain(self):
+        with mock.patch.object(self.store, "read", side_effect=Denied("fixture-record-held")):
+            with self.assertRaises(finalization.FinalizationDenied):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+
     def deletes(self):
         return [request for request in self.server.requests if request[0] == "DELETE"]
 
