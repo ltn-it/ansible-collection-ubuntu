@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 import time
 
 from . import (cell_contract, engine_executor, identity, incus_admin, incus_mutation,
-               ledger, network_fence, runtime_rpc)
+               ledger, network_fence, operating_cells, runtime_rpc)
 from .identity import Denied, require
 
 
@@ -270,6 +270,27 @@ class RootFinalizer:
                     target["project"], target["network"], "default", target["pool"], (fingerprint,), target["instance"]))
                 cleanup = incus_mutation.RootIncusCleanup(client, owner, store)
                 project_deleted = _effect(record, "project-delete", "project:"+target["project"])
+                copies = [row for row in record["effects"].values() if row["operation"] == "image-copy"]
+                if copies or descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
+                    require(len(copies) == 1 and copies[0]["state"] == "verified"
+                            and copies[0]["target"] == "image:" + target["project"] + ":" + operating_cells.IMAGE,
+                            "finalization-image-copy-held")
+                if project_deleted is not None:
+                    # A verified parent deletion makes scoped child inventories
+                    # unavailable. Fresh parent absence and exact original child
+                    # deletion receipts are required, never a generic404 waiver.
+                    require(project_deleted[1]["state"] == "verified"
+                            and cleanup.readback("project")["state"] == "absent_observed",
+                            "finalization-deleted-project-returned")
+                    if "owned_instance" in record:
+                        child = _effect(record, "instance-destroy",
+                            "instance:" + target["project"] + ":" + target["instance"])
+                        require(child is not None and child[1]["state"] == "verified",
+                                "finalization-prior-instance-held")
+                    if copies:
+                        child = _effect(record, "image-delete", copies[0]["target"])
+                        require(child is not None and child[1]["state"] == "verified",
+                                "finalization-prior-image-held")
                 if project_deleted is None:
                     observed = cleanup.stop_inventory()
                     if observed["state"] != "absent_observed" and "owned_instance" not in record:
@@ -286,7 +307,7 @@ class RootFinalizer:
                 # Revoke access promptly above; never destroy retained failure
                 # storage merely because sanitized export completed.
                 operating_custody.require_cleanup_allowed(store, lease_id)
-                if store.read(lease_id).get("owned_instance") is not None:
+                if project_deleted is None and store.read(lease_id).get("owned_instance") is not None:
                     self._remote_delete(session, registry, selector, store, owner, cleanup, "instance-destroy",
                         "instance:" + target["project"] + ":" + target["instance"], "instance", cleanup.instance_delete)
                 if project_deleted is None:
@@ -294,9 +315,7 @@ class RootFinalizer:
                 cleanup_storage.release_engine(owner, store, config)
                 self._fresh(session, registry, selector, store, owner)
                 cleanup_storage.delete_context(owner, store, config)
-                copies = [row for row in store.read(lease_id)["effects"].values() if row["operation"] == "image-copy"]
-                if copies:
-                    require(len(copies) == 1 and copies[0]["state"] == "verified", "finalization-image-copy-held")
+                if copies and project_deleted is None:
                     self._remote_delete(session, registry, selector, store, owner, cleanup, "image-delete",
                         copies[0]["target"], "image", cleanup.image_delete)
                     if project_deleted is None:

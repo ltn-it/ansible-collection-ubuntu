@@ -28,3 +28,6 @@ bugfixes:
   - >-
     github_runner - Keep live READY separate from original-owner abort drainage and enforce the original
     quiet-observation deadline across native reads before authorizing another cleanup intent.
+  - >-
+    github_runner - Resume interrupted finalization after verified parent deletion using fresh parent
+    absence and exact verified child receipts, preserving recreated-resource and unknown-effect holds.

@@ -826,4 +826,213 @@ class RootAsyncImageFinalizationTests(unittest.TestCase):
         self.assertTrue(result["no_retry_writes"])
 
 
+@contextmanager
+def interrupted_parent_cleanup(stage, *, negative=""):
+    """Real finalizer/journal restart; only Unix backend/kernel leaves modeled.
+
+    The server deliberately returns project404 before inherited fixture routes.
+    No missing child effect is adopted and no HTTP write may repeat on reentry.
+    """
+    from copy import deepcopy
+    from urllib.parse import parse_qs, urlsplit
+    from incus_lease_issuer import incus_admin, incus_mutation
+    servers = []
+    state = {"armed": None, "hit": False, "reentry": False}
+    real_init, real_finalize = mutations.MutationFixture.__init__, finalization.RootFinalizer.finalize
+    real_begin, real_record, real_close = ledger.Ledger.begin, ledger.Ledger.record, ledger.Ledger.close
+
+    class Interrupted(BaseException):
+        pass
+
+    def intercept(point):
+        if state["armed"] is not None and not state["hit"] and not state["reentry"] and stage == point:
+            state["hit"] = True
+            raise Interrupted(point)
+
+    def init(server, *args, **kwargs):
+        real_init(server, *args, **kwargs)
+        servers.append(server)
+        server._reentry_http = server.path.parent / "test-reentry-requests.jsonl"
+        server._reentry_http.touch(mode=0o600, exist_ok=False)
+
+    def instrument(server):
+        if getattr(server, "_reentry_instrumented", False):
+            return
+        server._reentry_instrumented = True
+        prior = server.handle
+
+        def native(method, path, body):
+            parsed = urlsplit(path)
+            project = parse_qs(parsed.query).get("project", [None])[0]
+            if method != "GET":
+                with server._reentry_http.open("ab") as stream:
+                    stream.write(ledger.canonical([method, path]) + b"\n")
+            if method == "GET" and project and project != "default" and "/1.0/projects/" + project not in server.resources:
+                return mutations.reply({"type": "error", "error_code": 404, "error": "Project not found"}, 404)
+            response = prior(method, path, body)
+            if method == "DELETE" and path.startswith("/1.0/instances/"):
+                server.resources["/1.0/instances?project=" + project] = []
+            if method == "DELETE" and path.startswith("/1.0/projects/"):
+                for key in list(server.resources):
+                    if parse_qs(urlsplit(key).query).get("project") == [path.removeprefix("/1.0/projects/")]:
+                        server.resources.pop(key)
+            return response
+
+        server.handle = native
+
+
+    def http_writes():
+        return [tuple(json.loads(line)) for server in servers
+                for line in server._reentry_http.read_bytes().splitlines()]
+
+    def begin(store, lease, operation, target):
+        if store is state["armed"]:
+            intercept("before:" + operation)
+        result = real_begin(store, lease, operation, target)
+        if store is state["armed"]:
+            intercept("intent:" + operation)
+        return result
+
+    def record(store, lease, effect, outcome, *, evidence_sha256):
+        operation = store.read(lease)["effects"][effect]["operation"]
+        result = real_record(store, lease, effect, outcome, evidence_sha256=evidence_sha256)
+        if store is state["armed"] and outcome == "verified":
+            intercept("verified:" + operation)
+        return result
+
+    def close(store, lease):
+        if store is state["armed"]:
+            intercept("before:close")
+        result = real_close(store, lease)
+        if store is state["armed"]:
+            intercept("after:close")
+        return result
+
+    def finalize(finalizer, registry, selector, store, lease):
+        if state["hit"]:
+            return real_finalize(finalizer, registry, selector, store, lease)
+        config = preparation._config(finalizer._runtime.preparation_config_path,
+                                     finalizer._runtime.preparation_config_sha256)[0]
+        server = next(row for row in servers if str(row.path) == config.incus_socket_path)
+        instrument(server)
+        owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease)
+        target = owner.incus
+        project_path = "/1.0/projects/" + target["project"]
+        state["armed"] = store
+        original = store.read(lease)
+        parent = deepcopy(server.resources.get(project_path))
+        try:
+            result = real_finalize(finalizer, registry, selector, store, lease)
+        except (Exception, Interrupted):
+            if not state["hit"]:
+                state["armed"] = None
+                raise
+        else:
+            if not state["hit"]:
+                raise AssertionError("requested interruption boundary was not reached")
+        interrupted = store.read(lease)
+        if negative in {"recreated", "foreign"}:
+            server.resources[project_path] = parent
+            if negative == "foreign":
+                server.resources[project_path] = {**parent, "description": "foreign", "config": {}}
+        if negative == "config-drift":
+            Path(finalizer._runtime.path).write_bytes(Path(finalizer._runtime.path).read_bytes() + b"\n")
+        if negative.startswith(("child-", "instance-", "copy-")):
+            mutation_writes = http_writes()
+            try:
+                # Deliberately corrupt this private fixture journal, not an authority shortcut.
+                with store._transaction() as journal:
+                    effects = journal["leases"][lease]["effects"]
+                    operation = "instance-destroy" if negative.startswith("instance-") else (
+                        "image-copy" if negative.startswith("copy-") else "image-delete")
+                    key = next(key for key, row in effects.items() if row["operation"] == operation)
+                    if negative.endswith("missing"):
+                        effects.pop(key)
+                    elif negative == "copy-duplicate":
+                        effects["f" * 64] = deepcopy(effects[key])
+                    elif negative == "copy-target":
+                        effects[key]["target"] = "image:" + target["project"] + ":" + "f" * 64
+                    else:
+                        effects[key]["state"] = "unknown"
+            except identity.Denied as error:
+                # Ledger rejects malformed duplicate/foreign copy records at
+                # persistence, before they can become reentry authority.
+                assert negative in {"copy-duplicate", "copy-target"} and str(error) == "ledger-corrupt"
+                assert http_writes() == mutation_writes and store.read(lease) == interrupted
+                state["armed"] = None
+                raise Interrupted("invalid-journal-rejected") from None
+        before = http_writes()
+        state["reentry"] = True
+        try:
+            with ledger.Ledger(registry.select(selector).ledger_path, owner_uid=store.owner_uid, clock=store.clock) as reopened:
+                if negative:
+                    try:
+                        fresh = finalization.RootFinalizer(finalizer._runtime.path, finalizer._runtime.sha256)
+                        real_finalize(fresh, registry, selector, reopened, lease)
+                    except identity.Denied:
+                        pass
+                    else:
+                        raise AssertionError("untrusted parent/child accepted")
+                    assert http_writes() == before
+                    # Corrupt fixture metadata may itself deny further Ledger reads.
+                    raise Interrupted("negative-denied")
+                fresh = finalization.RootFinalizer(finalizer._runtime.path, finalizer._runtime.sha256)
+                result = real_finalize(fresh, registry, selector, reopened, lease)
+            after = store.read(lease)
+            assert after["state"] == "closed"
+            assert after["authorizations"] == original["authorizations"] and after["expires_at"] == original["expires_at"]
+            assert not any(row in before for row in http_writes()[len(before):])
+            if stage.startswith("verified:project") or stage in {"verified:network-delete", "before:close", "after:close"}:
+                assert not any(path.startswith("/1.0/instances/") or path.startswith("/1.0/images/") for _, path in http_writes()[len(before):])
+            assert interrupted["state"] in {"prepared", "retained", "closed"}
+            return result
+        finally:
+            state["armed"] = None
+
+    with mock.patch.object(mutations.MutationFixture, "__init__", init), mock.patch.object(ledger.Ledger, "begin", begin), \
+            mock.patch.object(ledger.Ledger, "record", record), mock.patch.object(ledger.Ledger, "close", close), \
+            mock.patch.object(finalization.RootFinalizer, "finalize", finalize):
+        Interrupted.instrument = instrument
+        yield Interrupted
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private proper-EE Root only")
+class RootDeletedProjectReentryTests(unittest.TestCase):
+    def business(self, stage):
+        fixture = RootFullCoreFinalizationTests()
+        with interrupted_parent_cleanup(stage) as interrupted:
+            fixture.setUpClass()
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            target, server = fixture.io.prepared.incus, fixture.io.server
+            interrupted.instrument(server)
+            instance = "/1.0/instances/" + target["instance"] + "?project=" + target["project"]
+            own = target["ownership"]
+            server.resources["/1.0/instances?project=" + target["project"]] = [instance]
+            server.resources[instance] = {"name": target["instance"], "type": "virtual-machine", "config": {
+                "volatile.uuid": "12345678-1234-4234-8234-123456789abc", **{
+                    "user.lit-molecule-" + key: str(own[value]) for key, value in (
+                        ("owner", "owner"), ("repository", "repository"), ("run-id", "run_id"),
+                        ("attempt", "run_attempt"), ("scenario", "scenario"), ("target", "target"))}}}
+            server.resources[instance.replace("?project=", "/state?project=")] = {"status": "Stopped", "status_code": 102, "pid": 0}
+            fixture.test_actual_signed_fixed_engine_exit_public_evidence_and_owned_cleanup_close()
+
+    def test_business_verified_parent_and_network_and_preclose_reentry(self):
+        for stage in ("verified:project-delete", "verified:network-delete", "before:close", "after:close"):
+            with self.subTest(stage=stage):
+                self.business(stage)
+
+    def test_operating_verified_parent_network_and_preclose_close_and_release_capacity(self):
+        for stage in ("verified:project-delete", "verified:network-delete", "before:close", "after:close"):
+            with self.subTest(stage=stage), interrupted_parent_cleanup(stage):
+                self.assertEqual(operating_cleanup_fixture("immediate")["ledger_state"], "closed")
+
+    def test_recreated_foreign_and_missing_or_unknown_original_image_cleanup_hold(self):
+        for negative in ("recreated", "foreign", "child-missing", "child-unknown", "instance-missing",
+                         "copy-duplicate", "copy-target", "config-drift"):
+            with self.subTest(negative=negative), interrupted_parent_cleanup("verified:project-delete", negative=negative) as interrupted:
+                with self.assertRaises(interrupted):
+                    operating_cleanup_fixture("immediate")
+
+
 if __name__=="__main__":unittest.main()

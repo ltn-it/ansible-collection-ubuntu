@@ -613,6 +613,12 @@ PASS. Their reviewed limits are a 900-second lease and 600-second engine budget;
 ordinary profile budgets remain unchanged. They are admitted only for the
 reviewed first Main transition, not on every subsequent Main push.
 
+Interrupted finalization after a verified project deletion rechecks that the
+original project is still absent and verifies the exact original child-deletion
+receipts before bypassing unavailable project-scoped inventories. A recreated
+project or missing or unknown child receipt holds cleanup; no DELETE is retried.
+The remaining global resource and namespace checks still precede ledger closure.
+
 Operating EE graph **cache children** may be pruned once after proven stopped
 custody, original process/cgroup drain, and preserved raw diagnostics. The original
 graph directory inode and all runroot, output, context, descriptors, captured
