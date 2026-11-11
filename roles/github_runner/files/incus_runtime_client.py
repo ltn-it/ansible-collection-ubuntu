@@ -28,14 +28,18 @@ import struct
 import sys
 import tarfile
 import time
+import ssl
+import urllib.request
 
 CONFIG = "/etc/lightning-it/incus-runtime-client.json"
 EXECUTABLE = "/usr/libexec/lightning-it/incus-runtime-client"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 LEASE = re.compile(r"[0-9a-f]{32}\Z")
 SELECTOR = re.compile(r"[a-z][a-z0-9_.-]{0,127}\Z")
-OPS = frozenset({"run", "heartbeat", "status", "cancel", "recover"})
-STATES = frozenset({"preparing", "running", "execution-complete", "cancelling", "cleanup-hold", "closed", "unknown"})
+OBSERVER_OPS = frozenset({"observe-profile", "observe-operating"})
+OPS = frozenset({"run", "heartbeat", "status", "cancel", "recover", "record-upload"}) | OBSERVER_OPS
+_CONFIGURATIONS = {}  # Public Root-sealed locators only; never credentials.
+STATES = frozenset({"preparing", "running", "execution-complete", "cancelling", "cleanup-hold", "closed", "unknown", "awaiting-native-end"})
 MAX_EVIDENCE = 2 * 1024 ** 3  # Wire ceiling, not an assigned operating quota.
 MAX_MEMBERS = 20000
 EVIDENCE_POLICY_SHA256 = "0c1dc5877ecb93fd55a9418ff360383c51e356c82c0bdc9268613f7e3c35e2ab"
@@ -137,7 +141,9 @@ def _object(raw):
 def _configuration():
     raw, stamp = _root_file(CONFIG, 2048)
     value = _object(raw)
-    require(set(value) == {"schema", "socket_path"} and type(value["schema"]) is int and value["schema"] == 2
+    require(set(value) in ({"schema", "socket_path"}, {"schema", "socket_path", "signing_public_key_hex"})
+            and ("signing_public_key_hex" not in value or type(value["signing_public_key_hex"]) is str
+                 and HEX.fullmatch(value["signing_public_key_hex"])) and type(value["schema"]) is int and value["schema"] == 2
             and type(value["socket_path"]) is str and value["socket_path"].startswith("/run/")
             and len(value["socket_path"].encode()) < 108)
     _parent_check, _ = _parent(value["socket_path"])
@@ -244,19 +250,28 @@ def _failure(reply, operation):
     raise _BeforeIntent("incus-runtime-client-denied")
 
 
-def _authenticate(selector, operation, lease_id=None):
+def _authenticate(selector, operation, lease_id=None, *, artifact=None):
     require(sys.platform == "linux" and type(selector) is str and SELECTOR.fullmatch(selector) and operation in OPS)
     require((operation in {"heartbeat", "status", "cancel"} and type(lease_id) is str and LEASE.fullmatch(lease_id))
-            or (operation in {"run", "recover"} and lease_id is None))
+            or (operation in {"run", "recover", "record-upload"} | OBSERVER_OPS and lease_id is None))
     authentication, connection, sent = _authentication(), None, False
     try:
         api_token = authentication._secret(os.environ.get("GITHUB_TOKEN"))
         connection = _connect()
         connected = connection[0]
-        connected.sendall(_frame({"schema": 2, "cell": selector, "operation": operation}, 512))
+        locator = _CONFIGURATIONS.get(selector) if operation not in OBSERVER_OPS else None
+        message = {"schema": 2, "cell": selector, "operation": operation}
+        if locator is not None:
+            require(type(locator) is str and HEX.fullmatch(locator))
+            message["configuration"] = locator
+        connected.sendall(_frame(message, 1024))
         challenge = _receive(connected)
         _failure(challenge, operation)
-        require(set(challenge) == {"schema", "type", "operation", "nonce", "audience", "expires_at"}
+        intake = challenge.get("phase") == "intake"
+        observer = challenge.get("phase") == "observer"
+        require(not observer or operation in OBSERVER_OPS)
+        challenge_keys = {"schema", "type", "operation", "nonce", "audience", "expires_at"} | ({"phase"} if intake or observer else set())
+        require(set(challenge) == challenge_keys
                 and type(challenge["schema"]) is int and challenge["schema"] == 2 and challenge["type"] == "challenge"
                 and challenge["operation"] == operation and type(challenge["nonce"]) is str and HEX.fullmatch(challenge["nonce"])
                 and challenge["audience"] == authentication.AUDIENCE + challenge["nonce"]
@@ -266,11 +281,34 @@ def _authenticate(selector, operation, lease_id=None):
         request = {"schema": 2, "operation": operation, "nonce": challenge["nonce"], "token": token, "api_token": api_token}
         if lease_id is not None:
             request["lease_id"] = lease_id
+        if operation == "record-upload":
+            require(type(artifact) is dict and set(artifact) == {"id", "digest_sha256", "size_in_bytes"})
+            request["artifact"] = artifact
+        else:
+            require(artifact is None)
         _stable(connection)
         sent = True  # Set BEFORE send: any partial authentication is uncertain.
         connected.sendall(_frame(request, 40960))
         connected.shutdown(socket.SHUT_WR)
         del request, token, api_token
+        if intake:
+            require(locator is None)
+            require(select.select([connected], [], [], 600)[0])
+            ready = _receive(connected)
+            _failure(ready, operation)
+            require(set(ready) == {"schema", "type", "operation", "cell", "configuration", "deadline", "lease_created"}
+                    and type(ready["schema"]) is int and ready["schema"] == 2 and ready["type"] == "intake-ready"
+                    and ready["operation"] == operation and ready["cell"] == selector and ready["lease_created"] is False
+                    and type(ready["configuration"]) is str and HEX.fullmatch(ready["configuration"])
+                    and _integer(ready["deadline"], int(time.time()) + 1 if operation == "run" else 1) and connected.recv(1) == b""
+                    and len(_CONFIGURATIONS) < 16)
+            _stable(connection)
+            _CONFIGURATIONS[selector] = ready["configuration"]
+            _close(connection)
+            connection = None
+            # Separate connection + newly minted nonce/OIDC/native assignment.
+            # First phase's completed FS staging never authorizes a lease.
+            return _authenticate(selector, operation, lease_id, artifact=artifact)
         return connection
     except ClientDenied:
         if connection is not None:
@@ -284,6 +322,40 @@ def _authenticate(selector, operation, lease_id=None):
         if sent:
             raise ClientUnknown("incus-runtime-outcome-unknown") from None
         raise ClientDenied("incus-runtime-client-denied") from None
+
+
+
+def record_upload(selector, artifact_id, digest):
+    """Read native size locally, then Root independently binds the full ZIP."""
+    require(_integer(artifact_id, 1) and type(digest) is str and re.fullmatch(r"sha256:[a-f0-9]{64}", digest))
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository))
+    auth = _authentication()
+    bearer = auth._secret(os.environ.get("GITHUB_TOKEN"))
+    url = "https://api.github.com/repos/" + repository + "/actions/artifacts/" + str(artifact_id)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()), auth._NoRedirect())
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer " + bearer,
+        "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    with opener.open(request, timeout=10) as response:
+        require(response.status == 200 and response.geturl() == url)
+        raw = response.read(65537)
+        require(len(raw) <= 65536)
+    value = _object(raw)
+    require(value.get("id") == artifact_id and value.get("digest") == digest and value.get("expired") is False
+            and _integer(value.get("size_in_bytes"), 1, MAX_EVIDENCE))
+    artifact = {"id": artifact_id, "digest_sha256": digest.removeprefix("sha256:"), "size_in_bytes": value["size_in_bytes"]}
+    del bearer, request, raw, value
+    connection = None
+    try:
+        connection = _authenticate(selector, "record-upload", artifact=artifact)
+        result = _result(_authenticated_reply(connection[0]), "record-upload", None)
+        require(result["state"] == "awaiting-native-end" and connection[0].recv(1) == b"")
+        _stable(connection)
+        return result
+    finally:
+        if connection is not None:
+            _close(connection)
 
 
 def _result(reply, operation, lease_id):
@@ -402,16 +474,24 @@ def _semantic(manifest, lifecycle, policy, original_paths):
     for name in ("JUNIT", "ALLURE"):
         value = env.get("QUALITY_INPUT_" + name + "_REQUIRED")
         require(value in {"true", "false"} and policy["required_" + name.lower()] is (value == "true"))
-    require(set(lifecycle) == {"schema_version", "scenario", "target", "run_attempt", "test_exit_code", "capture_exit_code",
-                            "destroy_exit_code", "effective_exit_code", "infrastructure_error", "evidence_policy_complete"}
+    pending = policy.get("root_finalization") == "pending"
+    lifecycle_keys = {"schema_version", "scenario", "target", "run_attempt", "test_exit_code", "capture_exit_code",
+                      "destroy_exit_code", "effective_exit_code", "infrastructure_error", "evidence_policy_complete"}
+    if pending:
+        lifecycle_keys.add("root_finalization")
+        require(lifecycle.get("root_finalization") == "pending" and lifecycle.get("destroy_exit_code") is None
+                and manifest.get("root_finalization") == "pending" and type(manifest.get("execution_success")) is bool
+                and manifest.get("candidate_execution_passed") is False and manifest.get("release_eligible") is False)
+    require(set(lifecycle) == lifecycle_keys
             and type(lifecycle["schema_version"]) is int and lifecycle["schema_version"] == 1
             and lifecycle["scenario"] == scenario and lifecycle["target"] == target and lifecycle["run_attempt"] == "1"
             and lifecycle["evidence_policy_complete"] is False and type(lifecycle["infrastructure_error"]) is bool)
-    codes = [lifecycle[key] for key in ("test_exit_code", "capture_exit_code", "destroy_exit_code")]
+    codes = [lifecycle[key] for key in (("test_exit_code", "capture_exit_code") if pending else
+                                      ("test_exit_code", "capture_exit_code", "destroy_exit_code"))]
     require(all(_integer(code, 0, 255) for code in codes)
             and _integer(lifecycle["effective_exit_code"], 0, 255)
             and lifecycle["effective_exit_code"] == next((code for code in codes if code), 0)
-            and lifecycle["infrastructure_error"] is (codes[1] != 0 or codes[2] != 0))
+            and lifecycle["infrastructure_error"] is (codes[1] != 0 or (not pending and codes[2] != 0)))
     results, matrix = manifest.get("results"), manifest.get("matrix")
     require(type(results) is list and len(results) == len(roles) and type(matrix) is dict
             and type(matrix.get("expected")) is list and len(matrix["expected"]) == 1
@@ -450,9 +530,14 @@ def _semantic(manifest, lifecycle, policy, original_paths):
     passed = passed and totals["tests"] > 0 and totals["failures"] == totals["errors"] == 0
     passed = passed and scan.get("clean") is True and not scan.get("findings") and not scan.get("errors")
     passed = passed and not security.get("external_secret_findings", 0) and not manifest["blockers"]
-    passed = passed and all(value == "success" for value in prerequisites.values())
-    passed = passed and (manifest.get("candidate_execution_passed") is True if disposition == "candidate"
-                          else manifest.get("release_eligible") is True)
+    passed = passed and all(value == "success" for key, value in prerequisites.items()
+                            if not pending or key != "destroy")
+    if pending:
+        require(not prerequisites or prerequisites["destroy"] == "pending")
+        passed = passed and manifest.get("execution_success") is True
+    else:
+        passed = passed and (manifest.get("candidate_execution_passed") is True if disposition == "candidate"
+                            else manifest.get("release_eligible") is True)
     prefix = "candidate-quality-result" if disposition == "candidate" else "quality-result"
     return bool(passed), prefix + "-" + scenario + "-" + target + "-" + source + "-attempt-1"
 
@@ -469,7 +554,7 @@ def _archive(fd, size, directory=None, destination=None):
             require(len(names) < MAX_MEMBERS and (name in {"lifecycle.json", "cell.json", "runtime/evidence-policy.json"}
                     or re.fullmatch(r"(?:normalized/)?(?:junit|allure)-[0-9]{6}\.json", name)
                     or name in {"normalized/lifecycle.json", "normalized/cell.json"}
-                    or (is_original and (relative in {"manifest.json", "role-coverage.yml"}
+                    or (is_original and (relative in {"manifest.json", "role-coverage.yml", "environment.json"}
                          or relative.split("/")[0] in EVIDENCE_CATEGORIES)))
                     and member.name not in names and member.isfile() and not member.pax_headers
                     and member.uid == member.gid == 0 and member.mode == 0o600 and member.mtime == 0
@@ -520,7 +605,11 @@ def _archive(fd, size, directory=None, destination=None):
                for kind in ("junit", "allure") for index in range(cell[kind + "_report_count"])})
     require(directory is not None and destination is not None and originals and sum(row[0] for row in originals.values()) <= MAX_EVIDENCE_TOTAL_BYTES)
     policy = summaries["runtime/evidence-policy.json"]
-    require(set(policy) == {"schema", "evidence_policy_complete", "scope", "source_policy_sha256", "source_manifest_sha256", "required_junit", "required_allure"}
+    policy_keys = {"schema", "evidence_policy_complete", "scope", "source_policy_sha256", "source_manifest_sha256", "required_junit", "required_allure"}
+    pending = policy.get("root_finalization") == "pending"
+    if pending:
+        policy_keys.add("root_finalization")
+    require(set(policy) == policy_keys
             and type(policy["schema"]) is int and policy["schema"] == 1 and policy["evidence_policy_complete"] is True
             and policy["scope"] == "full-sanitized-cell-transfer" and policy["source_policy_sha256"] == EVIDENCE_POLICY_SHA256
             and type(policy["required_junit"]) is bool and type(policy["required_allure"]) is bool
@@ -552,7 +641,8 @@ def _archive(fd, size, directory=None, destination=None):
     os.mkdir("evidence", 0o700, dir_fd=directory)
     _extract_evidence(fd, directory, originals)
     return {"evidence_policy_complete": True, "execution_passed": passed, "package_directory": destination + "/evidence",
-            "result_artifact": artifact, "source_manifest_sha256": policy["source_manifest_sha256"], "_evidence_files": originals}
+            "result_artifact": artifact, "source_manifest_sha256": policy["source_manifest_sha256"], "_evidence_files": originals,
+            **({"root_finalization": "pending", "execution_state": "awaiting-native-end"} if pending else {})}
 
 
 def _extract_evidence(archive_fd, directory, originals):
@@ -715,6 +805,13 @@ def _publish(result):
             and re.fullmatch(r"transfer-[0-9a-f]{32}", capture.parent.name))
     require(digest_file(capture) == result["capture_sha256"])
     _package_inventory(package, result.get("_evidence_files"))
+    phase = "execution-state=awaiting-native-end\n" if result.get("root_finalization") == "pending" else ""
+    _command_output(("package-directory=" + package + "\nresult-artifact=" + artifact + "\n" + phase).encode())
+
+
+def _command_output(raw):
+    require(type(raw) is bytes and 0 < len(raw) <= 8192)
+    root = os.environ.get("RUNNER_TEMP", "")
     output = os.environ.get("GITHUB_OUTPUT", "")
     require(root.startswith("/") and output.startswith(root + "/_runner_file_commands/"))
     relative = output.removeprefix(root + "/_runner_file_commands/")
@@ -734,7 +831,6 @@ def _publish(result):
         require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
                 and not before.st_mode & 0o022 and before.st_size <= 65536
                 and _stamp(before) == _stamp(os.stat(relative, dir_fd=parent, follow_symlinks=False)))
-        raw = ("package-directory=" + package + "\nresult-artifact=" + artifact + "\n").encode()
         require(os.write(fd, raw) == len(raw))
         os.fsync(fd)
         after = os.fstat(fd)
@@ -821,6 +917,230 @@ def profile_selector(profile, scenario, target):
     return "cell-" + hashlib.sha256(raw).hexdigest()
 
 
+def _final_receipt(envelope, profile, scenario, target):
+    """Verify the external installed public pin, not the receipt's own key."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    raw, _ = _root_file(CONFIG, 2048)
+    key_hex = _object(raw).get("signing_public_key_hex")
+    require(type(key_hex) is str and HEX.fullmatch(key_hex))
+    require(type(envelope) is dict and set(envelope) == {"schema", "receipt", "signature"}
+            and type(envelope["schema"]) is int and envelope["schema"] == 1)
+    token = envelope["signature"]
+    require(type(token) is str and len(token) <= 16384 and token.count(".") == 2)
+    parts = token.split(".")
+    def decode(value):
+        require(re.fullmatch(r"[A-Za-z0-9_-]+", value))
+        result = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        require(base64.urlsafe_b64encode(result).rstrip(b"=").decode() == value)
+        return result
+    key = bytes.fromhex(key_hex)
+    require(_object(decode(parts[0])) == {"alg": "EdDSA", "typ": "lit-incus-final-quality+jwt",
+                                        "kid": hashlib.sha256(key).hexdigest()})
+    Ed25519PublicKey.from_public_bytes(key).verify(decode(parts[2]), (parts[0] + "." + parts[1]).encode("ascii"))
+    payload = _object(decode(parts[1]))
+    require(payload == envelope["receipt"] and decode(parts[1]) == json.dumps(payload, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode())
+    fields = {"schema", "purpose", "state", "lease_id", "repository", "repository_id", "run_id", "run_attempt",
+        "source_sha", "controller_sha", "profile", "scenario", "target", "execution", "artifact",
+        "capture_receipt_sha256", "cleanup", "custody_policy_sha256", "cell_sha256", "engine_policy_sha256",
+        "signer_public_key_hex", "issued_at"}
+    require(set(payload) == fields and type(payload["schema"]) is int and payload["schema"] == 1
+            and payload["purpose"] == "urn:lightning-it:g06:final-quality:v1" and payload["state"] == "closed"
+            and payload["signer_public_key_hex"] == key_hex and type(payload["lease_id"]) is str
+            and LEASE.fullmatch(payload["lease_id"]) and payload["repository"] == os.environ.get("GITHUB_REPOSITORY")
+            and str(payload["repository_id"]) == os.environ.get("GITHUB_REPOSITORY_ID")
+            and str(payload["run_id"]) == os.environ.get("GITHUB_RUN_ID") and type(payload["run_attempt"]) is int
+            and payload["run_attempt"] == 1 and payload["source_sha"] == os.environ.get("GITHUB_SHA")
+            and (payload["profile"], payload["scenario"], payload["target"]) == (profile, scenario, target))
+    for key_name in ("repository_id", "run_id", "issued_at"):
+        require(_integer(payload[key_name], 1))
+    for key_name in ("capture_receipt_sha256", "custody_policy_sha256", "cell_sha256", "engine_policy_sha256"):
+        require(type(payload[key_name]) is str and HEX.fullmatch(payload[key_name]))
+    require(type(payload["controller_sha"]) is str and re.fullmatch(r"[0-9a-f]{40}", payload["controller_sha"]))
+    execution, cleanup, artifact = payload["execution"], payload["cleanup"], payload["artifact"]
+    require(type(execution) is dict and set(execution) == {"job_id", "check_run_id", "conclusion", "completed_at"}
+            and execution["conclusion"] == "success" and all(_integer(execution[k], 1)
+                for k in ("job_id", "check_run_id", "completed_at")))
+    require(type(cleanup) is dict and set(cleanup) == {"state", "ledger_sha256", "closed_at", "resource_absence_sha256"}
+            and cleanup["state"] == "verified" and _integer(cleanup["closed_at"], execution["completed_at"], payload["issued_at"])
+            and payload["issued_at"] <= int(time.time()) and all(type(cleanup[k]) is str and HEX.fullmatch(cleanup[k])
+                for k in ("ledger_sha256", "resource_absence_sha256")))
+    require(type(artifact) is dict and set(artifact) == {"id", "name", "digest_sha256", "size_in_bytes"}
+            and _integer(artifact["id"], 1) and _integer(artifact["size_in_bytes"], 1, MAX_EVIDENCE)
+            and type(artifact["digest_sha256"]) is str and HEX.fullmatch(artifact["digest_sha256"])
+            and type(artifact["name"]) is str and re.fullmatch(r"(?:candidate-)?quality-result-[A-Za-z0-9._-]{1,400}", artifact["name"]))
+    return payload
+
+
+def _public_receipt_file(lease_id, name, value):
+    directory, path = _destination(lease_id)
+    try:
+        raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        require(0 < len(raw) <= 16384 and re.fullmatch(r"[a-z-]+\.json", name))
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+        try:
+            require(os.write(fd, raw) == len(raw))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(directory)
+        result = path + "/" + name
+        require(not any(ord(c) < 32 or ord(c) == 127 for c in result))
+        return result
+    finally:
+        os.close(directory)
+
+
+def observe_profile(profile, scenario, target):
+    selector = profile_selector(profile, scenario, target)
+    connection = None
+    try:
+        connection = _authenticate(selector, "observe-profile")
+        require(select.select([connection[0]], [], [], 180)[0])
+        outcome = _receive(connection[0])
+        _failure(outcome, "observe-profile")
+        require(set(outcome) == {"schema", "type", "operation", "cell", "receipt"}
+                and type(outcome["schema"]) is int and outcome["schema"] == 2 and outcome["type"] == "final-receipt"
+                and outcome["operation"] == "observe-profile" and outcome["cell"] == selector and connection[0].recv(1) == b"")
+        _stable(connection)
+        payload = _final_receipt(outcome["receipt"], profile, scenario, target)
+        path = _public_receipt_file(payload["lease_id"], "final-quality-receipt.json", outcome["receipt"])
+        artifact = "root-final-quality-" + str(payload["run_id"]) + "-" + selector
+        _command_output(("final-quality-artifact=" + artifact + "\nfinal-quality-receipt=" + path + "\n").encode())
+        return {"schema": 2, "state": "closed", "lease_id": payload["lease_id"], "final_quality_receipt": path,
+                "final_quality_artifact": artifact}
+    finally:
+        if connection is not None:
+            _close(connection)
+
+
+OPERATING_CASES = frozenset({"failure", "broker-cancel", "expiry-controller-loss"})
+
+
+def operating_selector(case):
+    require(type(case) is str and case in OPERATING_CASES)
+    return "operating-" + case
+
+
+def _operating_receipt(value, case, *, retained, lease=None, uuid=None):
+    fields = {"schema", "kind", "case", "selector", "run_id", "run_attempt", "source_sha", "controller_sha",
+        "lease_id", "instance_uuid", "raw_exit", "vm_state", "access", "retention_seconds", "terminal_at", "retain_until", "cutoff", "state"}
+    require(type(value) is dict and set(value) == fields and type(value["schema"]) is int and value["schema"] == 1
+            and value["kind"] == "operating" and value["case"] == case and value["selector"] == operating_selector(case)
+            and _integer(value["run_id"], 1) and str(value["run_id"]) == os.environ.get("GITHUB_RUN_ID")
+            and type(value["run_attempt"]) is int and value["run_attempt"] == 1
+            and value["source_sha"] == os.environ.get("GITHUB_SHA") and type(value["controller_sha"]) is str
+            and re.fullmatch(r"[0-9a-f]{40}", value["controller_sha"]) and type(value["lease_id"]) is str
+            and LEASE.fullmatch(value["lease_id"]) and (lease is None or value["lease_id"] == lease)
+            and type(value["instance_uuid"]) is str and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value["instance_uuid"])
+            and (uuid is None or value["instance_uuid"] == uuid) and value["vm_state"] == "stopped"
+            and value["access"] == "withdrawn" and type(value["retention_seconds"]) is int and value["retention_seconds"] == 14400)
+    actual = value["raw_exit"]
+    require(type(actual) is dict and set(actual) == {"code", "signal"}
+            and ((actual["signal"] is None and _integer(actual["code"], 0, 255))
+                 or (actual["code"] is None and _integer(actual["signal"], 1, 64))))
+    require((case == "failure" and actual == {"code": 23, "signal": None})
+            or (case != "failure" and (actual["signal"] is not None or actual["code"] != 0)))
+    cutoff = value["cutoff"]
+    if case == "expiry-controller-loss":
+        require(type(cutoff) is dict and set(cutoff) == {"kind", "deadline", "observed_at"}
+                and cutoff["kind"] in {"authorization", "lease"} and _integer(cutoff["deadline"], 1, int(time.time()))
+                and _integer(cutoff["observed_at"], cutoff["deadline"], int(time.time())))
+    else:
+        require(cutoff is None)
+    if retained:
+        require(value["state"] == "retained" and _integer(value["terminal_at"], 1, int(time.time()))
+                and _integer(value["retain_until"], value["terminal_at"] + 14400, value["terminal_at"] + 86400))
+    else:
+        require(value["state"] == "safety-proved-retention-armed" and value["terminal_at"] is None and value["retain_until"] is None)
+    return value
+
+
+def _publish_operating(value, case, *, retained):
+    value = _operating_receipt(value, case, retained=retained)
+    path = _public_receipt_file(value["lease_id"], "operating-receipt.json", value)
+    artifact = "root-operating-" + str(value["run_id"]) + "-" + case + ("-retained" if retained else "-execution")
+    _command_output(("operating-artifact=" + artifact + "\noperating-receipt=" + path
+                     + "\noperating-state=" + value["state"] + "\n").encode())
+    return {"schema": 2, "state": value["state"], "operating_receipt": path, "operating_artifact": artifact}
+
+
+def run_operating(case):
+    selector = operating_selector(case)
+    connection, previous = None, {}
+    interrupted = [False]
+    try:
+        connection = _authenticate(selector, "run")
+        reply = _authenticated_reply(connection[0])
+        _failure(reply, "run")
+        require(set(reply) == {"schema", "type", "operation", "sequence", "lease_id", "state", "expires_at", "authorization_expires_at"}
+                and type(reply["schema"]) is int and reply["schema"] == 2 and reply["type"] == "accepted"
+                and reply["operation"] == "run" and type(reply["sequence"]) is int and reply["sequence"] == 0
+                and type(reply["lease_id"]) is str and LEASE.fullmatch(reply["lease_id"]) and reply["state"] == "preparing"
+                and _integer(reply["expires_at"], int(time.time()) + 1, int(time.time()) + 5400)
+                and _integer(reply["authorization_expires_at"], int(time.time()) + 1, reply["expires_at"]))
+        lease, deadline, authorization = reply["lease_id"], reply["expires_at"], reply["authorization_expires_at"]
+        next_heartbeat = authorization - min(30, max(1, (authorization - int(time.time())) // 2))
+        ready_uuid, cancelled = None, False
+        def requested(_kind, _frame):
+            interrupted[0] = True
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous[number] = signal.signal(number, requested)
+        while True:
+            require(time.time() < deadline + 1800)
+            if interrupted[0] and not cancelled:
+                operation(selector, "cancel", lease)
+                cancelled = True
+            if not cancelled and not (ready_uuid is not None and case == "expiry-controller-loss") and time.time() >= next_heartbeat:
+                renewed = operation(selector, "heartbeat", lease)
+                require(renewed["expires_at"] == deadline and renewed["authorization_expires_at"] > time.time())
+                authorization = renewed["authorization_expires_at"]
+                next_heartbeat = authorization - min(30, max(1, (authorization - int(time.time())) // 2))
+            if not select.select([connection[0]], [], [], 1)[0]:
+                continue
+            frame = _receive(connection[0])
+            _failure(frame, "run")
+            if frame.get("type") == "operating-ready":
+                require(ready_uuid is None and set(frame) == {"schema", "type", "operation", "lease_id", "case", "instance_uuid"}
+                        and type(frame["schema"]) is int and frame["schema"] == 2 and frame["operation"] == "run"
+                        and frame["lease_id"] == lease and frame["case"] == case and type(frame["instance_uuid"]) is str
+                        and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", frame["instance_uuid"]))
+                ready_uuid = frame["instance_uuid"]
+                if case == "broker-cancel" and not cancelled:
+                    operation(selector, "cancel", lease)
+                    cancelled = True
+                continue
+            require(ready_uuid is not None and not interrupted[0] and set(frame) == {"schema", "type", "operation", "lease_id", "receipt"}
+                    and type(frame["schema"]) is int and frame["schema"] == 2 and frame["type"] == "operating-terminal"
+                    and frame["operation"] == "run" and frame["lease_id"] == lease and connection[0].recv(1) == b"")
+            _stable(connection)
+            receipt = _operating_receipt(frame["receipt"], case, retained=False, lease=lease, uuid=ready_uuid)
+            return _publish_operating(receipt, case, retained=False)
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        if connection is not None:
+            _close(connection)
+
+
+def observe_operating(case):
+    selector = operating_selector(case)
+    connection = None
+    try:
+        connection = _authenticate(selector, "observe-operating")
+        require(select.select([connection[0]], [], [], 180)[0])
+        reply = _receive(connection[0])
+        _failure(reply, "observe-operating")
+        require(set(reply) == {"schema", "type", "operation", "cell", "receipt"}
+                and type(reply["schema"]) is int and reply["schema"] == 2 and reply["type"] == "operating-receipt"
+                and reply["operation"] == "observe-operating" and reply["cell"] == selector and connection[0].recv(1) == b"")
+        _stable(connection)
+        return _publish_operating(reply["receipt"], case, retained=True)
+    finally:
+        if connection is not None:
+            _close(connection)
+
+
 def main(argv=None):
     class Parser(argparse.ArgumentParser):
         def error(self, _message):
@@ -833,6 +1153,15 @@ def main(argv=None):
     profile = sub.add_parser("run-profile", add_help=False)
     for name in ("profile", "scenario", "target"):
         profile.add_argument("--" + name, required=True)
+    observer = sub.add_parser("observe-profile", add_help=False)
+    for name in ("profile", "scenario", "target"):
+        observer.add_argument("--" + name, required=True)
+    upload = sub.add_parser("record-upload", add_help=False)
+    for name in ("profile", "scenario", "target", "artifact-id", "artifact-digest"):
+        upload.add_argument("--" + name, required=True, **({"type": int} if name == "artifact-id" else {}))
+    for command in ("run-operating", "observe-operating"):
+        operating = sub.add_parser(command, add_help=False)
+        operating.add_argument("--case", required=True)
     recovery = sub.add_parser("recover", add_help=False)
     recovery.add_argument("--selector", required=True)
     for command in ("status", "cancel"):
@@ -841,21 +1170,34 @@ def main(argv=None):
         child.add_argument("--lease-id", required=True)
     try:
         supplied = sys.argv[1:] if argv is None else argv
-        limit = 7 if supplied and supplied[0] == "run-profile" else 5
+        limit = 11 if supplied and supplied[0] == "record-upload" else (7 if supplied and supplied[0] in {"run-profile", "observe-profile"} else 5)
         require(len(supplied) <= limit and all(supplied.count(flag) <= 1 for flag in
-            ("--selector", "--lease-id", "--profile", "--scenario", "--target")))
+            ("--selector", "--lease-id", "--profile", "--scenario", "--target", "--artifact-id", "--artifact-digest", "--case")))
         args = parser.parse_args(supplied)
         if args.command == "check":
             result = check()
+        elif args.command == "run-operating":
+            result = run_operating(args.case)
+        elif args.command == "observe-operating":
+            result = observe_operating(args.case)
+        elif args.command == "observe-profile":
+            result = observe_profile(args.profile, args.scenario, args.target)
+        elif args.command == "record-upload":
+            result = record_upload(profile_selector(args.profile, args.scenario, args.target), args.artifact_id, args.artifact_digest)
+            print(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
+            return 0
         elif args.command in {"run-cell", "run-profile", "recover"}:
             selector = (profile_selector(args.profile, args.scenario, args.target)
                         if args.command == "run-profile" else args.selector)
             result = run_cell(selector, recover=args.command == "recover")
             if result.get("evidence_policy_complete") is True:
                 _publish(result)
+            pending = result.get("root_finalization") == "pending"
             passed = (result.get("evidence_policy_complete") is True and result.get("execution_passed") is True
                       and result.get("exit") == {"kind": "exited", "code": 0, "signal": None}
-                      and result.get("cleanup") == {"state": "verified"} and result.get("interrupted") is False)
+                      and (pending or result.get("cleanup") == {"state": "verified"}) and result.get("interrupted") is False)
+            # This exit0 is execution/transfer only in the typed pending phase;
+            # a distinct authenticated observer owns final quality acceptance.
             print(json.dumps({key: value for key, value in result.items() if key != "_evidence_files"},
                              sort_keys=True, separators=(",", ":"), allow_nan=False))
             return 0 if passed else 1

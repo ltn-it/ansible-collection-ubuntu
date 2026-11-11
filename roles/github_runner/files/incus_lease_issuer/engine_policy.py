@@ -226,10 +226,29 @@ def _retained_output(path, expected):
     return expected
 
 
+
+def controller_files(environment):
+    if environment.get("QUALITY_INPUT_PROFILE") == "operating":
+        return frozenset({"controller.py"})
+    return CONTROLLER_FILES
+
+
 def _environment(value, runner_uid, cell_uid, cell_gid):
-    _keys(value, ENV_KEYS)
-    require(all(type(v) is str and 0 < len(v) <= 2048 and not any(ord(c) < 32 or ord(c) == 127 for c in v)
-                for v in value.values()), "engine-environment")
+    operating = value.get("QUALITY_INPUT_PROFILE") == "operating"
+    expected_keys = ENV_KEYS | {"QUALITY_OPERATING_CASE", "QUALITY_OPERATING_SPEC"} if operating else ENV_KEYS
+    _keys(value, expected_keys)
+    require(all(type(v) is str and (0 < len(v) <= 2048 or (operating and key == "QUALITY_INPUT_ROLES" and v == ""))
+                and not any(ord(c) < 32 or ord(c) == 127 for c in v) for key, v in value.items()), "engine-environment")
+    if operating:
+        from . import operating_cells
+        case = value.get("QUALITY_OPERATING_CASE")
+        require(case in operating_cells.CASES and value["QUALITY_INPUT_SCENARIO"] == "g06-operating-" + case
+                and value["QUALITY_INPUT_TARGET"] == "ubuntu-24.04" and value["QUALITY_INPUT_TARGET_DISPOSITION"] == "operating"
+                and value["QUALITY_INPUT_ROLES"] == "" and value["QUALITY_INPUT_JUNIT_REQUIRED"] == "false"
+                and value["QUALITY_INPUT_ALLURE_REQUIRED"] == "false", "engine-operating-kind")
+        spec = decode_json(value["QUALITY_OPERATING_SPEC"].encode())
+        require(spec == operating_cells.spec(case, value["QUALITY_INPUT_IMAGE"],
+            int(value["GITHUB_RUN_ID"])), "engine-operating-spec")
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["GITHUB_REPOSITORY"])
             and all(re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) for key in
                     ("GITHUB_REPOSITORY_ID", "GITHUB_RUN_ID")) and value["GITHUB_RUN_ATTEMPT"] == "1"
@@ -237,23 +256,24 @@ def _environment(value, runner_uid, cell_uid, cell_gid):
             and re.fullmatch(r"[0-9a-f]{40}", value["GITHUB_SHA"])
             and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["QUALITY_INPUT_SOURCE_SHA"]), "engine-native-identity")
     require(all(len(value["QUALITY_INPUT_" + key]) <= 512 for key in INPUTS)
-            and value["QUALITY_INPUT_PROFILE"] in ("heavy", "application_acceptance")
+            and value["QUALITY_INPUT_PROFILE"] in ("heavy", "application_acceptance", "operating")
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", value[key])
                     for key in ("QUALITY_INPUT_SCENARIO", "QUALITY_INPUT_TARGET"))
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}", value["QUALITY_INPUT_CANDIDATE_ARTIFACT"])
-            and re.fullmatch(r"[a-z][a-z0-9_]*(,[a-z][a-z0-9_]*)*", value["QUALITY_INPUT_ROLES"])
+            and (operating or re.fullmatch(r"[a-z][a-z0-9_]*(,[a-z][a-z0-9_]*)*", value["QUALITY_INPUT_ROLES"]))
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,511}", value["QUALITY_INPUT_IMAGE"])
             and re.fullmatch(r"[1-9][0-9]{0,2}", value["QUALITY_INPUT_CPU_LIMIT"])
             and re.fullmatch(r"[1-9][0-9]*(KiB|MiB|GiB|TiB)", value["QUALITY_INPUT_MEMORY_LIMIT"])
             and re.fullmatch(r"[1-9][0-9]*(MiB|GiB|TiB)", value["QUALITY_INPUT_DISK_LIMIT"]), "engine-typed-profile-input")
-    require(value["QUALITY_INPUT_TARGET_DISPOSITION"] in ("candidate", "supported")
+    require(value["QUALITY_INPUT_TARGET_DISPOSITION"] in (("operating",) if operating else ("candidate", "supported"))
             and value["QUALITY_INPUT_INSTANCE_TYPE"] in ("container", "vm")
             and all(value[key] in ("true", "false") for key in ("QUALITY_INPUT_JUNIT_REQUIRED", "QUALITY_INPUT_ALLURE_REQUIRED")),
             "engine-input-contract")
-    return {**value, "HOME": "/tmp/wunder", "TMPDIR": "/tmp/wunder", "INCUS_CONF": "/incus",
+    return {**value, "QUALITY_FAILURE_CUSTODY": "retain-failed-v1", "HOME": "/tmp/wunder", "TMPDIR": "/tmp/wunder", "INCUS_CONF": "/incus",
             "RUNNER_TEMP": "/quality/tmp", "GITHUB_WORKSPACE": "/workspace", "QUALITY_CONTEXT_PHASE": "runtime",
             "QUALITY_DEVTOOLS_IMAGE": IMAGE, "QUALITY_HOST_UID": str(runner_uid),
             "QUALITY_EFFECTIVE_UID": str(cell_uid), "QUALITY_EFFECTIVE_GID": str(cell_gid),
+            **({"QUALITY_OPERATING_READY_ACK": "/quality/control/root-operating-ready.json"} if operating else {}),
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "/workspace"}
 
 
@@ -302,9 +322,10 @@ def _compile(data, descriptor_sha256, *, retained_output=None):
         _keys(archive, {"path", "sha256"})
         proof = _file(archive["path"], archive["sha256"])
         checked_archives[key] = {"path": proof.path, "sha256": proof.sha256}
+    env = _environment(data["environment"], runner, uid, gid)
     trees = _keys(data["trees"], {"workspace", "controller", "candidate"})
     checked_trees = {key: _tree(value) for key, value in trees.items()}
-    require(set(checked_trees["controller"]["files"]) == CONTROLLER_FILES
+    require(set(checked_trees["controller"]["files"]) == controller_files(env)
             and not checked_trees["controller"]["directories"], "engine-controller-entries")
     context = _context(_path(data["context_path"]))
     output = (_output(_path(data["output_path"])) if retained_output is None
@@ -313,7 +334,6 @@ def _compile(data, descriptor_sha256, *, retained_output=None):
     paths += [value["path"] for value in checked_trees.values()] + [value["path"] for value in checked_archives.values()]
     require(len(set(paths)) == len(paths) and not any(left.startswith(right + "/") for left in paths for right in paths if left != right),
             "engine-path-overlap")
-    env = _environment(data["environment"], runner, uid, gid)
     lease_id = network.rsplit("lit-lease-", 1)[1]
     runtime = {"name": "lit-lease-" + lease_id, "cidfile": engine["runroot"] + "/container.cid",
                "labels": {"io.lightning-it.lease": lease_id, "io.lightning-it.descriptor": _hash(descriptor_sha256)}}
@@ -337,7 +357,7 @@ def _compile(data, descriptor_sha256, *, retained_output=None):
              "--mount", "type=bind,source=" + output["path"] + ",destination=/quality" + idmap]
     for key, value in sorted(env.items()):
         argv += ["--env", key + "=" + value]
-    argv += [PODMAN_IMAGE, "python3", "/controller/run-cell.py"]
+    argv += [PODMAN_IMAGE, "python3", "/controller/" + ("controller.py" if env["QUALITY_INPUT_PROFILE"] == "operating" else "run-cell.py")]
     require(len(argv) <= MAX_ENGINE_ARGS and all(type(arg) is str and 0 < len(arg) <= 8192 for arg in argv)
             and sum(len(arg.encode("utf-8")) + 1 for arg in argv) <= MAX_ENGINE_ARG_BYTES, "engine-argv-limit")
     details = {"schema": 1, "image": image, "argv": argv, "environment": env, "archives": checked_archives,

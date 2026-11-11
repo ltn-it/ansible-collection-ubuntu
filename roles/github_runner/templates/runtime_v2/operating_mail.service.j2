@@ -1,0 +1,13 @@
+[Unit]
+Description=Incus operating mail bounded tick
+ConditionPathExists=/etc/lit/incus-lease-issuer/operating-mail-anchor.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+StandardOutput=null
+StandardError=null
+NoNewPrivileges=yes
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/lit-incus-runtime-v2/operating_mail_entry.py

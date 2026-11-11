@@ -30,13 +30,17 @@ class InstallationContractTests(unittest.TestCase):
     def test_default_off_and_source_pins_have_no_guessed_live_values(self):
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
         self.assertIs(defaults["github_runner_runtime_v2_install"], False)
-        for key in ("configuration_path", "configuration_sha256", "socket_group"):
+        self.assertIs(defaults["github_runner_runtime_v2_bootstrap"], False)
+        self.assertIs(defaults["github_runner_runtime_v2_operating_install"], False)
+        self.assertEqual(defaults["github_runner_runtime_v2_mail_helper_sha256"], {})
+        for key in ("configuration_path", "configuration_sha256", "socket_group", "signing_public_key_hex",
+                    "watchdog_configuration_path", "watchdog_configuration_sha256", "mail_configuration_path", "mail_configuration_sha256"):
             self.assertEqual(defaults["github_runner_runtime_v2_"+key], "")
         self.assertEqual(defaults["github_runner_runtime_v2_module_sha256"], {})
         self.assertEqual(defaults["github_runner_runtime_v2_client_sha256"], {})
         main = (ROLE / "tasks/main.yml").read_text()
         self.assertLess(main.index("runtime_v2.yml"), main.index("Ensure GitHub runner packages"))
-        self.assertIn("when: github_runner_runtime_v2_install", main)
+        self.assertIn("github_runner_runtime_v2_install or github_runner_runtime_v2_operating_install", main)
 
     def test_no_activation_stop_group_creation_or_credential_generation(self):
         tasks = yaml.safe_load((ROLE / "tasks/runtime_v2.yml").read_text())
@@ -83,6 +87,85 @@ class InstallationContractTests(unittest.TestCase):
                 self.assertEqual(probe.main(),1)
 
 
+class RealAnsibleInstallationBoundary(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.directory=Path(self.temp.name)
+        collection=self.directory/"collections/ansible_collections/lit/ubuntu"
+        collection.parent.mkdir(parents=True);collection.symlink_to(ROOT,target_is_directory=True)
+        self.environment=dict(os.environ,ANSIBLE_COLLECTIONS_PATH=str(self.directory/"collections"),
+            ANSIBLE_LOCAL_TEMP=str(self.directory/"local"),ANSIBLE_REMOTE_TEMP=str(self.directory/"remote"),ANSIBLE_NOCOLOR="1")
+
+    def invoke(self, variables):
+        book=self.directory/"boundary.json"
+        book.write_text(json.dumps([{"hosts":"all","gather_facts":False,
+            "vars":{"ansible_python_interpreter":sys.executable,**variables},
+            "tasks":[{"ansible.builtin.include_role":{"name":"lit.ubuntu.github_runner","tasks_from":"runtime_v2"}}]}]))
+        return subprocess.run(["ansible-playbook","-i","localhost,","-c","local",str(book)],
+            cwd=self.directory,env=self.environment,capture_output=True,text=True,timeout=90)
+
+    def test_actual_bootstrap_and_observer_anchor_bytes_are_canonical(self):
+        outputs={}
+        tasks=[]
+        variables={"ansible_python_interpreter":sys.executable,"github_runner_runtime_v2_bootstrap":True,
+            "github_runner_runtime_v2_configuration_path":"/var/lib/g06/bootstrap.json",
+            "github_runner_runtime_v2_configuration_sha256":"a"*64}
+        for label in ("watchdog","mail"):
+            variables["github_runner_runtime_v2_"+label+"_configuration_path"]="/var/lib/g06/"+label+".json"
+            variables["github_runner_runtime_v2_"+label+"_configuration_sha256"]="b"*64
+        for label,template in (("bootstrap","anchor.json.j2"),("watchdog","operating_watchdog_anchor.json.j2"),
+                               ("mail","operating_mail_anchor.json.j2")):
+            outputs[label]=self.directory/(label+"-anchor.json")
+            tasks.append({"name":"Render "+label,"ansible.builtin.template":{
+                "src":str(TEMPLATES/template),"dest":str(outputs[label]),"mode":"0600"}})
+        play=[{"hosts":"all","gather_facts":False,"vars":variables,"tasks":tasks}]
+        book=self.directory/"anchors.json";book.write_text(json.dumps(play))
+        result=subprocess.run(["ansible-playbook","-i","localhost,","-c","local",str(book)],
+            cwd=self.directory,env=self.environment,capture_output=True,text=True,timeout=60)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        for label,file in outputs.items():
+            raw=file.read_bytes();value=json.loads(raw)
+            self.assertEqual(raw,json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False).encode())
+            self.assertEqual(stat.S_IMODE(file.stat().st_mode),0o600)
+            if label=="bootstrap":
+                self.assertEqual(value,{"schema":2,"bootstrap_path":"/var/lib/g06/bootstrap.json","bootstrap_sha256":"a"*64})
+            else:
+                self.assertEqual(value,{"schema":1,"config_path":"/var/lib/g06/"+label+".json","config_sha256":"b"*64})
+
+    def test_default_off_has_no_effects(self):
+        result=self.invoke({})
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("changed=0",result.stdout)
+
+    def test_operating_install_requires_explicit_bootstrap_before_effects(self):
+        result=self.invoke({"github_runner_runtime_v2_install":True,"github_runner_runtime_v2_operating_install":True})
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn("Create sealed runtime-v2 installation directories",result.stdout)
+        self.assertIn("Runtime-v2 installation must be explicitly selected",result.stdout)
+
+    def test_real_role_renders_complete_bootstrap_operating_assets_then_denies_missing_native_state(self):
+        value={"github_runner_enabled":True,"github_runner_runtime_v2_install":True,
+            "github_runner_runtime_v2_bootstrap":True,"github_runner_runtime_v2_operating_install":True,
+            "github_runner_runtime_v2_configuration_path":"/var/lib/nonexistent-g06-fixture/bootstrap.json",
+            "github_runner_runtime_v2_configuration_sha256":"a"*64,"github_runner_runtime_v2_socket_group":"g06fixture",
+            "github_runner_runtime_v2_signing_public_key_hex":"b"*64,
+            "github_runner_runtime_v2_module_sha256":{f.name:hashlib.sha256(f.read_bytes()).hexdigest()
+                for f in (ROLE/"files/incus_lease_issuer").glob("*.py")},
+            "github_runner_runtime_v2_client_sha256":{name:hashlib.sha256((ROLE/"files"/source).read_bytes()).hexdigest()
+                for name,source in (("incus-runtime-client","incus_runtime_client.py"),("incus_job_client.py","incus_job_client.py"))},
+            "github_runner_runtime_v2_mail_helper_sha256":{name:hashlib.sha256((ROLE/"files"/name).read_bytes()).hexdigest()
+                for name in probe.HELPERS}}
+        for label in ("watchdog","mail"):
+            value["github_runner_runtime_v2_"+label+"_configuration_path"]="/var/lib/nonexistent-g06-fixture/"+label+".json"
+            value["github_runner_runtime_v2_"+label+"_configuration_sha256"]="c"*64
+        result=self.invoke(value)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn("Refuse active unknown foreign or unsealed target state before copying",result.stdout)
+        self.assertNotIn("Create sealed runtime-v2 installation directories",result.stdout)
+        self.assertNotIn("undefined",result.stdout+result.stderr)
+        self.assertNotIn("Syntax error",result.stdout+result.stderr)
+
+
 @unittest.skipUnless(sys.platform=="linux" and os.geteuid()==0,"private proper-EE Root only")
 class RootInstalledRuntimeTests(unittest.TestCase):
     def setUp(self):
@@ -92,6 +175,62 @@ class RootInstalledRuntimeTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory(prefix="runtime-install-",dir=base)
         self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)
+
+    def test_signer_installation_metadata_never_reads_or_hashes_private_bytes(self):
+        file = self.root / "signer.key"
+        file.write_bytes(b"synthetic-private-file")
+        file.chmod(0o600)
+        info = file.stat()
+        with mock.patch.object(probe.os, "read", side_effect=AssertionError("private bytes must not be read")), \
+             mock.patch.object(probe.hashlib, "sha256", side_effect=AssertionError("private bytes must not be hashed")):
+            self.assertEqual(probe.private_metadata(str(file)), (info.st_dev, info.st_ino, info.st_size))
+        link = self.root / "symlink-key"
+        link.symlink_to(file)
+        with self.assertRaises((ValueError, OSError)):
+            probe.private_metadata(str(link))
+        file.chmod(0o644)
+        with self.assertRaises(ValueError):
+            probe.private_metadata(str(file))
+
+    def test_real_operating_configs_bind_host_and_same_private_spool_without_effects(self):
+        binding = self.root / "bindings";binding.mkdir(mode=0o700)
+        spool = self.root / "spool";spool.mkdir(mode=0o700)
+        helpers = {name: "a"*64 for name in probe.HELPERS}
+        common = {"schema":1,"source_machine_id":Path("/etc/machine-id").read_text().strip(),
+                  "source_boot_id":Path("/proc/sys/kernel/random/boot_id").read_text().strip(),"spool_directory":str(spool)}
+        watchdog = {**common,"bindings_directory":str(binding),"max_entries":256}
+        mail = {**common,"helper_sha256":helpers}
+        selected = {"helper_sha256":helpers}
+        for label,config in (("watchdog",watchdog),("mail",mail)):
+            file = self.root / (label+".json")
+            raw=json.dumps(config,sort_keys=True,separators=(",",":"),allow_nan=False).encode()
+            file.write_bytes(raw);file.chmod(0o600)
+            selected[label+"_path"]=str(file);selected[label+"_sha256"]=hashlib.sha256(raw).hexdigest()
+        with mock.patch.object(probe,"HELPER_ROOT",str(self.root/"not-installed")), \
+             mock.patch.object(probe.subprocess,"run",side_effect=AssertionError("no service or mail effects")):
+            self.assertEqual(probe.operating_configuration(selected),[watchdog,mail])
+            changed={**mail,"source_boot_id":"0"*36}
+            file=Path(selected["mail_path"]);raw=json.dumps(changed,sort_keys=True,separators=(",",":")).encode()
+            file.write_bytes(raw);selected["mail_sha256"]=hashlib.sha256(raw).hexdigest()
+            with self.assertRaises(ValueError):probe.operating_configuration(selected)
+        self.assertEqual(list(binding.iterdir()),[]);self.assertEqual(list(spool.iterdir()),[])
+
+    def test_fixed_operating_launchers_import_real_private_package_without_effects(self):
+        private=self.root/"operating-private";private.mkdir(mode=0o700)
+        library=private/"incus_lease_issuer";library.mkdir(mode=0o700)
+        for source in (ROLE/"files/incus_lease_issuer").glob("*.py"):
+            target=library/source.name;shutil.copyfile(source,target);target.chmod(0o600)
+        for name in ("watchdog","mail"):
+            with self.subTest(name=name):
+                launcher=private/("operating_"+name+"_entry.py")
+                launcher.write_text((TEMPLATES/("operating_"+name+"_entry.py.j2")).read_text().replace(
+                    '"/usr/local/lib/lit-incus-runtime-v2"',json.dumps(str(private))))
+                launcher.chmod(0o600)
+                result=subprocess.run([sys.executable,"-I","-B",str(launcher)],stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={"PATH":"/usr/bin:/bin","LANG":"C"},timeout=5,check=False)
+                self.assertEqual(result.returncode,1)  # Missing fixed Root anchor denies, without a tick.
+                self.assertEqual((result.stdout,result.stderr),(b"",b""))
+        self.assertFalse((library/"__pycache__").exists())
 
     def test_real_private_file_symlink_hardlink_writable_and_hash_guards(self):
         file=self.root/"sealed.json";file.write_bytes(b"{}");file.chmod(0o600)

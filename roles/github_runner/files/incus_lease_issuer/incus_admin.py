@@ -208,7 +208,9 @@ class RootIncusAdmin:
                       "instances": "/1.0/instances?" + urlencode({"project": target.project}),
                       "operations": "/1.0/operations?" + urlencode({"project": target.project, "recursion": 1}),
                       "network": "/1.0/networks/" + target.network + "?" + urlencode({"project": target.network_project}),
+                      "pool": "/1.0/storage-pools/" + target.pool,
                       "pool-resources": "/1.0/storage-pools/" + target.pool + "/resources",
+                      "pool-volumes": "/1.0/storage-pools/" + target.pool + "/volumes?recursion=1&all-projects=true",
                       "certificates": "/1.0/certificates?recursion=1"}
             routes.update({"certificate-" + fp: "/1.0/certificates/" + fp for fp in target.certificate_fingerprints})
             if target.instance is not None:
@@ -310,8 +312,18 @@ class RootIncusAdmin:
     def network(self):
         return self._get("network")
 
+    def pool(self):
+        """Exact Root-selected pool descriptor; no per-call name override."""
+        return self._get("pool")
+
     def pool_resources(self):
         return self._get("pool-resources")
+
+    def pool_volumes(self):
+        """Complete fixed-pool inventory; no job-supplied project filter."""
+        values = self._get("pool-volumes", list)
+        require(len(values) <= 4096 and all(type(value) is dict for value in values), "incus-admin-pool-volumes")
+        return values
 
     def certificates(self):
         return self._get("certificates", list)

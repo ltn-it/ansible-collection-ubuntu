@@ -1,0 +1,9 @@
+---
+bugfixes:
+  - >-
+    github_runner - Keep physical test destruction pending until Root verifies the original native job,
+    captured evidence, provider upload contents and owned cleanup; retain failed cells with revoked access
+    for the configured custody period.
+  - >-
+    github_runner - Prepare repeatable authenticated Main-job intake, closed operating drills, independent
+    custody watchdog and verified local-root mail through the disabled runtime-v2 installation path.

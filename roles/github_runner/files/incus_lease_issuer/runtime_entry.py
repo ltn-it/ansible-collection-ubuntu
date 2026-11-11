@@ -11,14 +11,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 import os
 import signal
-import socket
-import stat
 import sys
 import threading
 import time
 
 from . import engine_policy, identity, installation, socket_entry
-from .identity import Denied, require
+from .identity import require
 
 _ACTIVE = None
 
@@ -85,11 +83,13 @@ def _spawn_adoption():
 def _anchor():
     proof, raw, stamp = installation._file(ANCHOR, 16384, private=True, keep=True)
     value = identity.decode_json(raw)
-    engine_policy._keys(value, {"schema", "config_path", "config_sha256"})
-    require(type(value["schema"]) is int and value["schema"] == 1, "runtime-entry-anchor-schema")
-    engine_policy._path(value["config_path"])
-    engine_policy._hash(value["config_sha256"])
-    require(value["config_path"] != ANCHOR, "runtime-entry-anchor-cycle")
+    require(type(value.get("schema")) is int and value["schema"] in {1, 2}, "runtime-entry-anchor-schema")
+    path_key, sha_key = (("bootstrap_path", "bootstrap_sha256") if value["schema"] == 2
+                         else ("config_path", "config_sha256"))
+    engine_policy._keys(value, {"schema", path_key, sha_key})
+    engine_policy._path(value[path_key])
+    engine_policy._hash(value[sha_key])
+    require(value[path_key] != ANCHOR, "runtime-entry-anchor-cycle")
     return value, proof, stamp
 
 
@@ -107,12 +107,13 @@ def serve_inherited():
         connected = socket_entry._connected_stdin()
         value, proof, stamp = _anchor()
         from . import runtime_rpc
-        dispatcher = runtime_rpc.RuntimeRPC(value["config_path"], value["config_sha256"])
+        dispatcher = (runtime_rpc.BootstrapRuntimeRPC(value["bootstrap_path"], value["bootstrap_sha256"])
+            if value["schema"] == 2 else runtime_rpc.RuntimeRPC(value["config_path"], value["config_sha256"]))
         again, after, after_stamp = _anchor()
         require(again == value and after == proof and after_stamp == stamp, "runtime-entry-anchor-drift")
         handed_off = True
         outcome = dispatcher.handle(connected)
-        if outcome.get("type") == "result":
+        if outcome.get("type") in {"result", "intake-ready", "final-receipt", "operating-receipt", "operating-terminal"}:
             return 0
         if outcome.get("type") == "terminal" and outcome.get("capture", {}).get("state") == "verified":
             return 0

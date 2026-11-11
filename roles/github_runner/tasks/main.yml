@@ -13,7 +13,7 @@
 
 - name: Install explicitly selected disabled runtime-v2 components
   ansible.builtin.include_tasks: runtime_v2.yml
-  when: github_runner_runtime_v2_install
+  when: github_runner_runtime_v2_install or github_runner_runtime_v2_operating_install
 
 - name: Reject unsupported protected adoption before role effects
   ansible.builtin.include_tasks: protected_instance.yml

@@ -344,6 +344,11 @@ def _prepare_locked(session, registry, selector, store, lease_id):
         _remote(config, prepared, store, transport, "profile-configure", "profile:" + target["project"] + ":default",
                 "profile", transport.configure_default_profile)
         _fresh(config, prepared, store)
+        descriptor = identity.decode_json(prepared.engine_descriptor_bytes)
+        if descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
+            from . import operating_cells
+            _remote(config, prepared, store, transport, "image-copy", "image:" + target["project"] + ":" + operating_cells.IMAGE,
+                    "image", transport.image_copy)
         _bridge_facts_readback(config, prepared, store, transport)
         materialized = context_materializer.materialize(prepared, store)
         certificate = incus_mutation.CertificateSpec("lit-lease-" + lease_id, target["project"],

@@ -257,6 +257,70 @@ def _require_native(proof, connected_socket, selected):
     return proof.worker, proof.identity
 
 
+@dataclass(frozen=True, eq=False)
+class RootIntakeProof:
+    """Process-local native capability; constructor alone grants nothing."""
+    worker: ledger.Worker
+    identity: identity.Identity
+    nonce: str
+    policy: AdmissionPolicy
+    controls: tuple
+    connected: object
+    fd: int
+    pid: int
+    thread: int
+    expires_monotonic: float
+
+
+_INTAKE_PROOFS = weakref.WeakSet()
+
+
+def verify_intake_native(connected_socket, selected, nonce, token, api_token):
+    """Mint from genuine socket/OIDC/assignment, not a caller assertion.
+
+    Acquisition is bounded by ORIGINAL JWT expiry, never a renewal. No bearer
+    is retained in the ticket, written to disk, hashed or returned to a job.
+    """
+    proof = verify_runtime_native(connected_socket, selected, nonce, token, api_token)
+    worker, who = _require_native(proof, connected_socket, selected)
+    remaining = min(600, who.valid_until - int(time.time()) - 31)
+    require(remaining > 0, "intake-native-budget")
+    ticket = RootIntakeProof(worker, who, nonce, selected, proof.controls, proof.connected,
+        proof.fd, proof.pid, proof.thread, time.monotonic() + remaining)
+    with _NATIVE_GUARD:
+        _INTAKE_PROOFS.add(ticket)
+    return ticket
+
+
+def require_intake_native(proof, connected_socket, selected, token, api_token):
+    """Fixed fresh native revalidation before/after slow private acquisition."""
+    _root()
+    if type(proof) is not RootIntakeProof:
+        try:
+            from . import run_factory
+        except ImportError:
+            raise Denied("intake-native-proof") from None
+        return run_factory.require_bootstrap_native(proof, connected_socket, selected, token, api_token)
+    require(type(proof) is RootIntakeProof, "intake-native-proof")
+    with _NATIVE_GUARD:
+        require(proof in _INTAKE_PROOFS, "intake-native-proof")
+    require(proof.pid == os.getpid() and proof.thread == threading.get_ident()
+            and proof.connected() is connected_socket and proof.fd == connected_socket.fileno()
+            and proof.policy == selected and time.monotonic() < proof.expires_monotonic,
+            "intake-native-proof-expired")
+    remaining = min(600, int(proof.expires_monotonic - time.monotonic()),
+                    proof.identity.valid_until - int(time.time()) - 31)
+    require(remaining > 0 and _controls(selected)[0] == proof.controls, "intake-native-budget")
+    current = verify_runtime_native(connected_socket, selected, proof.nonce, token, api_token)
+    worker, who = _require_native(current, connected_socket, selected)
+    require(worker == proof.worker and who == proof.identity and current.controls == proof.controls,
+            "intake-native-provenance-drift")
+    remaining = min(600, int(proof.expires_monotonic - time.monotonic()),
+                    proof.identity.valid_until - int(time.time()) - 31)
+    require(remaining > 0, "intake-native-budget")
+    return worker, who, remaining
+
+
 class AdmissionBridge:
     """Trusted Root factory input only. There are no per-request policy hooks.
 
