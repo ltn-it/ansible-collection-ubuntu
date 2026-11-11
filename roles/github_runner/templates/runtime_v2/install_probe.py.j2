@@ -225,6 +225,7 @@ def installed_files(module_pins, client_pins, desired, complete):
 HELPERS = frozenset({"ephemeral_worker_local_mail.py", "ephemeral_worker_alarm.py", "ephemeral_worker_incus.py",
                      "ephemeral_worker_lease.py", "ephemeral_worker_watchdog.py", "ephemeral_worker_admission.py"})
 HELPER_ROOT = "/usr/local/lib/lightning-it/incus-operating-mail-helper"
+BINDINGS_ROOT = "/var/lib/lightning-it/incus-operating-bindings"
 
 
 def operating_configuration(value, complete=False):
@@ -255,6 +256,7 @@ def operating_configuration(value, complete=False):
             finally:
                 os.close(fd)
         if label == "watchdog":
+            require(config["bindings_directory"] == BINDINGS_ROOT)
             require(type(config["max_entries"]) is int and 1 <= config["max_entries"] <= 256)
         else:
             require(config["helper_sha256"] == value["helper_sha256"])

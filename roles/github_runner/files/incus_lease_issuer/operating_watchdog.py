@@ -6,7 +6,9 @@ spool lock cannot wait on the worker; unknown observations remain held.
 """
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import os
+from pathlib import Path
 import re
 import stat
 import time
@@ -130,6 +132,41 @@ def _lock(directory, name):
 
 def _record(spool, value):
     event_fields(value)
+    try:
+        archive = os.open("mail-archive", installation.DIR_FLAGS, dir_fd=spool)
+    except FileNotFoundError:
+        archive = None
+    if archive is not None:
+        try:
+            info = os.fstat(archive)
+            require(info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700, "watchdog-mail-archive-directory")
+            try:
+                sealed = _read(archive, value["event_id"] + ".json")[0]
+            except FileNotFoundError:
+                sealed = None
+            if sealed is not None:
+                require(type(sealed) is dict and set(sealed) == {"schema", "alarm", "receipt"}
+                        and type(sealed["schema"]) is int and sealed["schema"] == 1,
+                        "watchdog-mail-archive-schema")
+                original = event_fields(sealed["alarm"])
+                require(original == {**value, "observed_at": original["observed_at"]}
+                        and original["observed_at"] <= value["observed_at"], "watchdog-mail-archive-event")
+                body = ledger.canonical({"source_machine_id": original["source_machine_id"], "alarm": original})
+                receipt = sealed["receipt"]
+                require(type(receipt) is dict and type(receipt.get("dispatch_at")) is int
+                        and all(type(receipt.get(key)) is bool for key in
+                                ("local_mailbox_confirmed", "personal_acknowledged", "capacity_released"))
+                        and original["observed_at"] <= receipt["dispatch_at"] <= int(time.time())
+                        and receipt == {"schema": 2, "event_id": original["event_id"],
+                            "source_machine_id": original["source_machine_id"],
+                            "message_id": "<g06-operating-" + original["source_machine_id"] + "-" + original["event_id"] + "@localhost>",
+                            "body_sha256": hashlib.sha256(body).hexdigest(), "recipient": "root@localhost",
+                            "dispatch_at": receipt["dispatch_at"], "phase": "MAILBOX_CONFIRMED",
+                            "local_mailbox_confirmed": True, "personal_acknowledged": False,
+                            "capacity_released": False}, "watchdog-mail-archive-receipt")
+                return original["event_id"]
+        finally:
+            os.close(archive)
     name = "alarm-" + value["event_id"] + ".json"
     try:
         _save_once(spool, name, value)
@@ -138,6 +175,93 @@ def _record(spool, value):
         require(previous == {**value, "observed_at": previous["observed_at"]}
                 and previous["observed_at"] <= value["observed_at"], "watchdog-event-drift")
     return value["event_id"]
+
+
+def _closed_binding(value):
+    """Retirement needs the ORIGINAL sealed factory config and closed lease.
+
+    A tick result or a path alone never proves resource absence. No missing
+    lease, partial factory or foreign configuration is adopted as closed.
+    """
+    from . import policy_registry, run_factory
+    path = Path(value["runtime_config_path"])
+    require(path.parent.parent == Path(run_factory.ROOT)
+            and re.fullmatch("[0-9a-f]{64}", path.parent.name), "watchdog-factory-locator")
+    config, _ = run_factory._read_complete(path.parent)
+    origin = run_factory.read_configuration_origin(config)
+    require(config.runtime_config_path == str(path)
+            and config.runtime_config_sha256 == value["runtime_config_sha256"]
+            and config.manifest_sha256 == value["snapshot_manifest_sha256"], "watchdog-original-binding")
+    registry = policy_registry.load_registry(config.registry_path, config.registry_sha256)
+    selected = registry.select(origin["selector"])
+    with ledger.Ledger(selected.ledger_path, clock=time.time) as store:
+        matches = [store.read(identifier) for identifier in store.lease_ids()
+            if all(store.read(identifier)["identity"][key] == origin[key]
+                   for key in ("run_id", "job_id", "check_run_id"))
+            and store.read(identifier)["cell_sha256"] == selected.cell_sha256
+            and store.read(identifier)["policy_sha256"] == selected.custody_policy_sha256]
+        require(len(matches) <= 1, "watchdog-closed-binding-ambiguous")
+        if not matches or matches[0]["state"] != "closed":
+            return False
+        record = matches[0]
+        ledger.Ledger._cleanup_complete(list(record["effects"].values()))
+        ledger.Ledger._owned_instance_deleted(record)
+        require(type(record.get("closed_at")) is int and record["closed_at"] > 0,
+                "watchdog-closure-unconfirmed")
+    require(run_factory.read_configuration_origin(config) == origin, "watchdog-original-binding-drift")
+    return True
+
+
+def _page(bindings, names, maximum, config):
+    """Advance scheduling before work; never an effect/retry authority.
+
+    Fixed private cursor temporaries may be discarded after a crash: they
+    contain only a scheduling locator. Every cell effect still uses its own
+    original Root journal, so rotating a page can never adopt/replay an effect.
+    """
+    state_name = ".watchdog-state"
+    try:
+        os.mkdir(state_name, 0o700, dir_fd=bindings)
+        os.fsync(bindings)
+    except FileExistsError:
+        pass
+    state = _private_directory(config["bindings_directory"] + "/" + state_name)
+    try:
+        require(set(os.listdir(state)) <= {"cursor.json", "cursor.next"}, "watchdog-cursor-inventory")
+        last = ""
+        try:
+            previous = _read(state, "cursor.json")[0]
+            require(set(previous) == {"schema", "last", "source_machine_id", "source_boot_id"}
+                    and type(previous["schema"]) is int and previous["schema"] == 1
+                    and re.fullmatch("binding-[0-9a-f]{64}\\.json", previous["last"])
+                    and (previous["source_machine_id"], previous["source_boot_id"])
+                        == (config["source_machine_id"], config["source_boot_id"]), "watchdog-cursor-binding")
+            last = previous["last"]
+        except FileNotFoundError:
+            pass
+        page = ([name for name in names if name > last] + [name for name in names if name <= last])[:maximum]
+        if not page:
+            return []
+        try:
+            fd = os.open("cursor.next", installation.FILE_FLAGS, dir_fd=state)
+        except FileNotFoundError:
+            pass
+        else:
+            try:
+                _, _, stamp = installation._hash_file(fd, "cursor.next", 65536, private=True, keep=False)
+                require(installation._stamp(os.stat("cursor.next", dir_fd=state, follow_symlinks=False)) == stamp,
+                        "watchdog-cursor-raced")
+                os.unlink("cursor.next", dir_fd=state)
+                os.fsync(state)
+            finally:
+                os.close(fd)
+        _save_once(state, "cursor.next", {"schema": 1, "last": page[-1],
+            "source_machine_id": config["source_machine_id"], "source_boot_id": config["source_boot_id"]})
+        os.replace("cursor.next", "cursor.json", src_dir_fd=state, dst_dir_fd=state)
+        os.fsync(state)
+        return page
+    finally:
+        os.close(state)
 
 
 def tick(root_config_path, expected_sha256):
@@ -153,11 +277,12 @@ def tick(root_config_path, expected_sha256):
                 != (os.fstat(spool).st_dev, os.fstat(spool).st_ino), "watchdog-directory-alias")
         with _lock(spool, "watchdog.lock"):
             os.lseek(bindings, 0, os.SEEK_SET)
-            names = sorted(os.listdir(bindings))
-            require(len(names) <= config["max_entries"], "watchdog-entry-bound")
+            names = sorted(name for name in os.listdir(bindings) if name != ".watchdog-state")
+            require(all(re.fullmatch("binding-[0-9a-f]{64}\\.json", name) for name in names), "watchdog-binding-name")
+            page = _page(bindings, names, config["max_entries"], config)
             events = []
             pending, runtime_paths = [], set()
-            for name in names:
+            for name in page:
                 match = re.fullmatch("binding-([0-9a-f]{64})\\.json", name)
                 require(match is not None, "watchdog-binding-name")
                 value, digest, before = _read(bindings, name)
@@ -169,8 +294,9 @@ def tick(root_config_path, expected_sha256):
                 require(value["runtime_config_path"] not in runtime_paths, "watchdog-binding-alias")
                 runtime_paths.add(value["runtime_config_path"])
                 pending.append((name, value, before))
-            # Validate the complete directory before any runtime provider call.
+            # Validate the complete bounded page before any runtime provider call.
             # An unexpected later name must not permit earlier native effects.
+            retired = set()
             for name, value, before in pending:
                 require(_read(bindings, name)[2] == before
                         and _config(root_config_path, expected_sha256, keys)[1] == stamp,
@@ -199,10 +325,16 @@ def tick(root_config_path, expected_sha256):
                             and event["observed_at"] <= int(time.time()), "watchdog-result-binding")
                     events.append(_record(spool, event))
                 require(_read(bindings, name)[2] == before, "watchdog-binding-changed")
+                if _closed_binding(value):
+                    require(_read(bindings, name)[2] == before, "watchdog-binding-changed")
+                    os.unlink(name, dir_fd=bindings)
+                    os.fsync(bindings)
+                    retired.add(name)
             os.lseek(bindings, 0, os.SEEK_SET)
-            require(sorted(os.listdir(bindings)) == names
+            require(sorted(name for name in os.listdir(bindings) if name != ".watchdog-state")
+                        == [name for name in names if name not in retired]
                     and _config(root_config_path, expected_sha256, keys)[1] == stamp, "watchdog-config-changed")
-            return {"state": "WATCHDOG_TICK_COMPLETE", "bindings": len(names), "events": events,
+            return {"state": "WATCHDOG_TICK_COMPLETE", "bindings": len(page), "events": events,
                     "native_acceptance": False, "capacity_released": False}
     except Exception:
         raise Denied("operating-watchdog-held") from None

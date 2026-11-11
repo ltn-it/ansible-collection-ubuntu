@@ -8,6 +8,7 @@ retried or adopted. Native platform/capacity/custody qualification is separate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import PurePosixPath
 import time
@@ -31,6 +32,96 @@ class FinalizationReceipt:
     closed_at: int
     evidence_receipt_sha256: str
     receipt_sha256: str
+
+
+def _operating_evidence(runtime, registry, selector, store, owner, record, *, released):
+    """Seal only Root-bound operating diagnostics; never business evidence/PASS.
+
+    The original private spool is the publishing intent. A partial spool is
+    held, never adopted. Its completed receipt survives raw storage deletion.
+    """
+    from . import engine_policy, evidence_export, operating_custody, operating_export
+    descriptor = identity.decode_json(owner.engine_descriptor_bytes)
+    env = descriptor["environment"]
+    require(env.get("QUALITY_INPUT_PROFILE") == "operating", "finalization-operating-kind")
+    operating_custody.require_cleanup_allowed(store, owner.lease_id)
+    operating_custody._custody_record(record.get("custody"), record,
+                                     store.read_policy(record["policy_sha256"]))
+    terminal = record["native_terminal"]
+    start_id = owner.creators["engine-start"]["id"]
+    start = record["effects"][start_id]
+    actual = start["engine_exit"]
+    ledger._validate_engine_exit(actual, start)
+    require(actual["manifest_sha256"] == owner.engine_policy_sha256
+            and all(actual[name + "_state"] == "complete" for name in ("stdout", "stderr")),
+            "finalization-operating-original-exit")
+    operating_custody.validate_instance_record(record["owned_instance"], record, owner.lease_id)
+    binding = {"runtime_config_sha256": runtime.sha256, "lease_id": owner.lease_id,
+        "cell_sha256": record["cell_sha256"], "descriptor_sha256": owner.engine_descriptor_sha256,
+        "manifest_sha256": owner.engine_policy_sha256, "exit_sha256": ledger.digest(actual),
+        "native_terminal_sha256": ledger.digest(terminal), "custody_sha256": ledger.digest(record["custody"]),
+        "instance_sha256": ledger.digest(record["owned_instance"])}
+    directory = evidence_export._spool_directory(descriptor["engine"]["runroot"])
+    parent = engine_policy._directory(str(PurePosixPath(directory).parent), private=True)
+    fd = None
+    try:
+        name = PurePosixPath(directory).name
+        if name not in os.listdir(parent):
+            require(not released, "finalization-operating-spool-missing")
+            from . import engine_graph_prune
+            # This authenticates both capture bytes/inodes against the actual
+            # original exit before either raw storage or its hashes disappear.
+            diagnostics_sha = engine_graph_prune._diagnostics(owner, start)
+            output = engine_policy._directory(descriptor["output_path"], private=True)
+            try:
+                try:
+                    raw = evidence_export._read(output, "operating-result.json", operating_export.MAX_RAW)
+                except FileNotFoundError:
+                    raw = None
+            finally:
+                os.close(output)
+            expected = operating_export.ExpectedOperating(env["QUALITY_OPERATING_CASE"],
+                record["identity"]["run_id"], record["identity"]["caller_sha"],
+                record["identity"]["reusable_sha"], owner.incus["instance"], record["owned_instance"]["uuid"])
+            diagnostic = operating_export.normalize_operating(raw, expected, actual)
+            with evidence_export._quota(runtime, str(PurePosixPath(directory).parent)):
+                os.mkdir(name, 0o700, dir_fd=parent)
+                os.fsync(parent)
+                fd = engine_policy._directory(directory, private=True)
+                info = os.fstat(fd)
+                require(info.st_dev == os.fstat(parent).st_dev
+                        and evidence_export.storage_quota._mount_id(fd)
+                            == evidence_export.storage_quota._mount_id(parent), "finalization-operating-spool-mount")
+                value = {"schema": 1, "kind": "operating-finalization-diagnostic", "binding": binding,
+                    "diagnostic": diagnostic.value, "diagnostics_sha256": diagnostics_sha,
+                    "spool": {"device": info.st_dev, "inode": info.st_ino},
+                    "evidence_policy_complete": False, "quality_pass": False}
+                require(engine_graph_prune._diagnostics(owner, start) == diagnostics_sha,
+                        "finalization-operating-diagnostic-drift")
+                evidence_export._create(fd, "operating-finalization.json", ledger.canonical(value))
+        if fd is None:
+            fd = engine_policy._directory(directory, private=True)
+        with evidence_export._quota(runtime, directory):
+            require(os.listdir(fd) == ["operating-finalization.json"], "finalization-operating-spool-inventory")
+            raw = evidence_export._read(fd, "operating-finalization.json", engine_policy.MAX_DESCRIPTOR)
+            value = identity.decode_json(raw)
+            info = os.fstat(fd)
+            require(set(value) == {"schema", "kind", "binding", "diagnostic", "diagnostics_sha256", "spool",
+                                  "evidence_policy_complete", "quality_pass"}
+                    and type(value["schema"]) is int and value["schema"] == 1
+                    and value["kind"] == "operating-finalization-diagnostic" and value["binding"] == binding
+                    and value["evidence_policy_complete"] is False and value["quality_pass"] is False
+                    and value["spool"] == {"device": info.st_dev, "inode": info.st_ino}
+                    and ledger.canonical(value) == raw, "finalization-operating-spool-binding")
+            if not released:
+                from . import engine_graph_prune
+                require(value["diagnostics_sha256"] == engine_graph_prune._diagnostics(owner, start),
+                        "finalization-operating-diagnostic-drift")
+            return hashlib.sha256(raw).hexdigest()
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent)
 
 
 def _effect(record, operation, target):
@@ -135,22 +226,27 @@ class RootFinalizer:
                 # Acquisition and spool publication do not permit overwriting
                 # a partial archive. An explicit retained read survives deletion.
                 raw_released = _effect(record, "engine-release", "engine:"+lease_id)
-                exported = (evidence_export.read_existing(self._runtime.path, self._runtime.sha256,
-                    registry, selector, store, lease_id) if raw_released is not None else
-                    evidence_export.export_existing(self._runtime.path, self._runtime.sha256,
-                    registry, selector, store, lease_id))
                 descriptor = identity.decode_json(owner.engine_descriptor_bytes)
-                raw_paths = [descriptor["engine"]["storage_root"], descriptor["engine"]["runroot"],
-                             descriptor["output_path"], descriptor["context_path"]]
-                spool = descriptor["engine"]["runroot"] + ".public-evidence"
-                require(type(exported) is evidence_export.ExportReceipt and exported.evidence_policy_complete is True
-                        and str(PurePosixPath(exported.path).parent) == spool
-                        and all(exported.path != path and not exported.path.startswith(path+"/") for path in raw_paths),
-                        "finalization-evidence-spool-required")
+                if descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
+                    evidence_sha = _operating_evidence(self._runtime, registry, selector, store, owner, record,
+                                                      released=raw_released is not None)
+                else:
+                    exported = (evidence_export.read_existing(self._runtime.path, self._runtime.sha256,
+                        registry, selector, store, lease_id) if raw_released is not None else
+                        evidence_export.export_existing(self._runtime.path, self._runtime.sha256,
+                        registry, selector, store, lease_id))
+                    raw_paths = [descriptor["engine"]["storage_root"], descriptor["engine"]["runroot"],
+                                 descriptor["output_path"], descriptor["context_path"]]
+                    spool = descriptor["engine"]["runroot"] + ".public-evidence"
+                    require(type(exported) is evidence_export.ExportReceipt and exported.evidence_policy_complete is True
+                            and str(PurePosixPath(exported.path).parent) == spool
+                            and all(exported.path != path and not exported.path.startswith(path+"/") for path in raw_paths),
+                            "finalization-evidence-spool-required")
+                    evidence_sha = exported.receipt_sha256
                 if record["state"] == "closed":
-                    return FinalizationReceipt(lease_id, record["closed_at"], exported.receipt_sha256,
+                    return FinalizationReceipt(lease_id, record["closed_at"], evidence_sha,
                         ledger.digest({"lease_id": lease_id, "closed_at": record["closed_at"],
-                                       "effects": record["effects"], "evidence": exported.receipt_sha256}))
+                                       "effects": record["effects"], "evidence": evidence_sha}))
                 worker = ledger.Worker(**record["worker"])
                 # Normal run owner has stopped/reaped and withdrawn already.
                 # A finalizer never replays either effect; native readback is
@@ -218,9 +314,9 @@ class RootFinalizer:
                 store.close(lease_id)
                 closed = store.read(lease_id)
                 require(closed["state"] == "closed", "finalization-close-not-observed")
-                return FinalizationReceipt(lease_id, closed["closed_at"], exported.receipt_sha256,
+                return FinalizationReceipt(lease_id, closed["closed_at"], evidence_sha,
                     ledger.digest({"lease_id": lease_id, "closed_at": closed["closed_at"],
-                                   "effects": closed["effects"], "evidence": exported.receipt_sha256}))
+                                   "effects": closed["effects"], "evidence": evidence_sha}))
         except FinalizationUnknown:
             raise
         except Exception:

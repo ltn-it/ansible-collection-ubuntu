@@ -207,8 +207,17 @@ class RootInstalledRuntimeTests(unittest.TestCase):
             file.write_bytes(raw);file.chmod(0o600)
             selected[label+"_path"]=str(file);selected[label+"_sha256"]=hashlib.sha256(raw).hexdigest()
         with mock.patch.object(probe,"HELPER_ROOT",str(self.root/"not-installed")), \
+             mock.patch.object(probe,"BINDINGS_ROOT",str(binding),create=True), \
              mock.patch.object(probe.subprocess,"run",side_effect=AssertionError("no service or mail effects")):
             self.assertEqual(probe.operating_configuration(selected),[watchdog,mail])
+            other = self.root / "unpublished-bindings";other.mkdir(mode=0o700)
+            file=Path(selected["watchdog_path"])
+            wrong={**watchdog,"bindings_directory":str(other)}
+            raw=json.dumps(wrong,sort_keys=True,separators=(",",":")).encode()
+            file.write_bytes(raw);selected["watchdog_sha256"]=hashlib.sha256(raw).hexdigest()
+            with self.assertRaises(ValueError):probe.operating_configuration(selected)
+            raw=json.dumps(watchdog,sort_keys=True,separators=(",",":")).encode()
+            file.write_bytes(raw);selected["watchdog_sha256"]=hashlib.sha256(raw).hexdigest()
             changed={**mail,"source_boot_id":"0"*36}
             file=Path(selected["mail_path"]);raw=json.dumps(changed,sort_keys=True,separators=(",",":")).encode()
             file.write_bytes(raw);selected["mail_sha256"]=hashlib.sha256(raw).hexdigest()

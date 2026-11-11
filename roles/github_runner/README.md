@@ -524,6 +524,15 @@ mailbox remain operating acceptance requirements. A sendmail exit code alone is
 insufficient. No external recipient or personal acknowledgement is inferred from
 `root@localhost` delivery.
 
+Confirmed event/receipt pairs are archived together in a durable Root-private
+record before either active-spool file is removed. This record prevents repeat
+submission after interruption or repeated watchdog observations. Historical
+confirmations do not consume the 256 pending-event limit; each tick processes
+at most 256 records. Replacement staging is separate from the active inventory,
+so an interrupted cursor or receipt replacement cannot poison every later tick.
+The mailbox fixtures use only private temporary paths, including the unchanged
+pure configuration and mailbox readers.
+
 The installation tests use actual Root-owned files and isolated fresh Python
 imports; systemd observations in those tests are modeled. They do not prove
 native timer activation, local Postfix delivery, kernel isolation or a full
@@ -565,6 +574,14 @@ custody; any separate operator retention decision is bounded by 24 hours.
 Known stopped custody retains the full storage reservation. Unknown cleanup or
 unavailable original process proof quarantines it and does not release running
 capacity.
+
+The watchdog visits bounded fair pages and retires bindings only after checking
+the original sealed configuration and closed Root ledger. It uses the producer's
+fixed bindings directory; an empty alternative directory is not supervision.
+After an operating cell's actual custody expires, normal finalization preserves
+Root-verified diagnostic-only evidence before removing its owned resources and
+releasing its reservation. That receipt grants neither business-quality PASS nor
+permission to shorten retention.
 
 A distinct authenticated observer job reads the original final state without a
 new lease or VM effects. Ordinary final quality requires an EdDSA receipt for the

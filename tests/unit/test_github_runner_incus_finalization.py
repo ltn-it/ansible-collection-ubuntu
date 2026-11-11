@@ -354,3 +354,25 @@ class RootCompiledFixedEngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
+class RootOperatingFinalizationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import test_github_runner_incus_engine_graph_prune as fixtures
+        fixtures.RootGraphPruneTests.setUpClass()
+
+    def test_retained_operating_entry_never_demands_business_export_or_releases_early(self):
+        import test_github_runner_incus_engine_graph_prune as fixtures
+        from incus_lease_issuer import evidence_export
+        helper=fixtures.RootGraphPruneTests();helper.setUp();self.addCleanup(helper.doCleanups)
+        io=helper.io
+        before=list(io.server.requests)
+        with helper.model(), mock.patch.object(evidence_export,"export_existing",side_effect=AssertionError("not business")) as export:
+            with self.assertRaises(finalization.FinalizationDenied):
+                finalization.RootFinalizer(str(io.runtime),io.runtime_sha).finalize(
+                    helper.registry,fixtures.ready_fixtures.SELECTOR,helper.store,helper.lease)
+        self.assertFalse(export.called)
+        self.assertEqual(helper.store.read(helper.lease)["state"],"retained")
+        self.assertFalse(any(row[0]=="DELETE" for row in io.server.requests[len(before):]))

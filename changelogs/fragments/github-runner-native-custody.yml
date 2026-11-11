@@ -13,3 +13,9 @@ bugfixes:
   - >-
     github_runner - Persist owned cleanup once per emptied directory and reuse the native filesystem-stat
     symbol while preserving every actual descriptor, mount, identity and deadline check.
+  - >-
+    github_runner - Finalize retained operating cells from verified diagnostics without business-quality
+    acceptance, retire closed bindings through bounded fair supervision, and reject mismatched watchdog directories.
+  - >-
+    github_runner - Isolate interrupted mail replacements and archive confirmed events durably without replay,
+    so historical delivery records cannot exhaust pending notification capacity; keep mail fixtures private.

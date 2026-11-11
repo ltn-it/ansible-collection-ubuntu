@@ -74,6 +74,7 @@ class RootWatchdogTests(unittest.TestCase):
         self.native = mock.Mock(return_value={"state": "HELD", "events": [self.event], "native_acceptance": False})
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(watchdog, "_machine_boot", return_value=(MACHINE, BOOT)).start()
+        self.closed = mock.patch.object(watchdog, "_closed_binding", return_value=False).start()
         mock.patch.object(incus_lease_issuer, "operating_custody", SimpleNamespace(tick_runtime=self.native), create=True).start()
 
     def write_config(self):
@@ -164,3 +165,55 @@ class RootWatchdogTests(unittest.TestCase):
         self.native.return_value = {"state": "COMPLETE", "events": [], "native_acceptance": True}
         with self.assertRaises(Denied): self.tick()
         self.assertEqual(list(self.spool.glob("alarm-*.json")), [])
+
+    def test_history_over_limit_is_fair_bounded_and_closed_bindings_retire(self):
+        self.binding_path.unlink()
+        rows = []
+        for index in range(260):
+            row = {**self.binding, "runtime_config_path": str(self.root / ("runtime-%03d.json" % index))}
+            path = self.bindings / ("binding-" + ledger.digest(row) + ".json")
+            path.write_bytes(ledger.canonical(row));path.chmod(0o600)
+            rows.append((path, row))
+        self.config["max_entries"] = 256;self.write_config()
+        self.native.return_value = {"state": "CUSTODY_TICK_COMPLETE", "events": [], "native_acceptance": False}
+        first = self.tick()
+        self.assertEqual(first["bindings"],256)
+        initial = {call.args[0] for call in self.native.call_args_list}
+        self.assertEqual(len(initial),256)
+        self.native.reset_mock()
+        self.closed.return_value = True
+        second = self.tick()
+        self.assertEqual(second["bindings"],256)
+        later = {call.args[0] for call in self.native.call_args_list}
+        self.assertEqual(initial | later, {row["runtime_config_path"] for _,row in rows})
+        self.assertEqual(len(list(self.bindings.glob("binding-*.json"))),4)
+        self.tick()
+        self.assertEqual(list(self.bindings.glob("binding-*.json")),[])
+        self.assertTrue((self.bindings/".watchdog-state"/"cursor.json").is_file())
+
+    def test_cursor_interrupted_write_is_only_scheduling_not_native_authority(self):
+        self.tick()
+        state = self.bindings/".watchdog-state"
+        (state/"cursor.next").write_bytes(b'{"interrupted":')
+        (state/"cursor.next").chmod(0o600)
+        self.tick()
+        self.assertFalse((state/"cursor.next").exists())
+        self.assertEqual(self.native.call_count,2)
+
+    def test_confirmed_archive_suppresses_producer_duplicate_without_recreation(self):
+        archive = self.spool/"mail-archive";archive.mkdir(mode=0o700)
+        body = ledger.canonical({"source_machine_id": MACHINE,"alarm":self.event})
+        receipt = {"schema":2,"event_id":self.event["event_id"],"source_machine_id":MACHINE,
+            "message_id":"<g06-operating-"+MACHINE+"-"+self.event["event_id"]+"@localhost>",
+            "body_sha256":hashlib.sha256(body).hexdigest(),"recipient":"root@localhost",
+            "dispatch_at":self.event["observed_at"],"phase":"MAILBOX_CONFIRMED",
+            "local_mailbox_confirmed":True,"personal_acknowledged":False,"capacity_released":False}
+        path=archive/(self.event["event_id"]+".json")
+        value={"schema":1,"alarm":self.event,"receipt":receipt}
+        path.write_bytes(ledger.canonical(value));path.chmod(0o600)
+        self.tick()
+        self.assertEqual(list(self.spool.glob("alarm-*.json")),[])
+        value["receipt"]["phase"]="DISPATCH_INTENT"
+        path.write_bytes(ledger.canonical(value))
+        with self.assertRaises(Denied):self.tick()
+        self.assertEqual(list(self.spool.glob("alarm-*.json")),[])
