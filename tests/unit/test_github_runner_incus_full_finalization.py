@@ -7,6 +7,11 @@ modeled. Fresh native socket admission is separately exercised by entry tests.
 """
 from contextlib import contextmanager, nullcontext
 import hashlib
+import datetime as dt
+import io
+import tarfile
+import zipfile
+import time
 import ctypes
 import json
 import os
@@ -21,6 +26,7 @@ import test_github_runner_incus_refresh as refresh_fixtures
 import test_github_runner_incus_engine_policy as compiler_fixtures
 from incus_lease_issuer import (cell_contract, cleanup_storage, engine_executor, engine_policy,
     evidence_export, evidence_policy, finalization, identity, ledger, network_fence,
+    admission, generation_acquisition as acquisition, operating_custody, operating_upload,
     preparation, root_session, runtime_entry, runtime_rpc, storage_quota)
 
 
@@ -40,7 +46,8 @@ def fixture_evidence(details):
     base = output/"artifacts/cell-evidence"/suffix
     write(output/"artifacts/raw"/suffix/"configuration/lifecycle-result.json", {
         "schema_version": 1, "scenario": scenario, "target": target, "run_attempt": "1",
-        "test_exit_code": 0, "capture_exit_code": 0, "destroy_exit_code": 0,
+        "test_exit_code": 0, "capture_exit_code": 0, "destroy_exit_code": None,
+        "root_finalization": "pending",
         "effective_exit_code": 0, "infrastructure_error": False})
     props = {"commit_sha": env["QUALITY_INPUT_SOURCE_SHA"], "profile": profile, "scenario": scenario,
              "target": target, "run_attempt": "1", "roles": roles}
@@ -63,7 +70,12 @@ def fixture_evidence(details):
         "secret_scan":{"canary_detected_before_redaction":True,"clean":True,"files_scanned":2,
             "archive_members_scanned":0,"findings":[],"errors":[]},
         "security_evidence":{"required_for_release":[],"missing":[],"external_secret_findings":0,
-            "vulnerability_blocking_findings":0,"semantic_valid":False},"prerequisites":{},"blockers":[],"release_eligible":False}
+            "vulnerability_blocking_findings":0,"semantic_valid":False},"prerequisites":{},"blockers":[],"release_eligible":False,
+        "root_finalization":"pending","execution_success":True,"candidate_execution_passed":False}
+    write(base/"environment.json", {"generated_at":"2026-11-11T00:00:00Z", "repository":env["GITHUB_REPOSITORY"],
+        "commit_sha":env["QUALITY_INPUT_SOURCE_SHA"], "workflow_run_id":env["GITHUB_RUN_ID"], "workflow_attempt":"1",
+        "roles":sorted(roles.split(",")), "profiles":[profile.replace("_","-")], "scenarios":[scenario],
+        "targets":[target], "tool_versions":{}, "application_versions":{}})
     files = sorted(path for path in base.rglob("*") if path.is_file())
     source["checksums"]={"algorithm":"sha256","file":"checksums/SHA256SUMS","entry_count":len(files)+1}
     write(base/"manifest.json",source)
@@ -171,6 +183,57 @@ class RootFullCoreFinalizationTests(unittest.TestCase):
              mock.patch.object(cleanup_storage,"_cleanup_limits",side_effect=lambda cfg:(4096,cfg.operation_wait_seconds)):
             yield
 
+    def bind_original_terminal_and_upload(self, exported):
+        """Actual opaque factories/content verification; only native HTTPS/auth acquisition modeled."""
+        selected = self.registry.select("approved")
+        record = self.store.read(self.lease)
+        who, worker = identity.Identity(**record["identity"]), ledger.Worker(**record["worker"])
+        raw = io.BytesIO()
+        with tarfile.open(exported.path, "r:gz") as source, zipfile.ZipFile(raw, "w") as target:
+            for member in source:
+                if member.name.startswith("evidence/"):
+                    target.writestr(member.name.removeprefix("evidence/"), source.extractfile(member).read())
+        payload = raw.getvalue()
+        env=identity.decode_json(self.io.prepared.engine_descriptor_bytes)["environment"]
+        prefix="candidate-quality-result" if env["QUALITY_INPUT_TARGET_DISPOSITION"]=="candidate" else "quality-result"
+        artifact = {"id":81, "name":prefix+"-"+env["QUALITY_INPUT_SCENARIO"]+"-"+env["QUALITY_INPUT_TARGET"]+
+            "-"+who.caller_sha+"-attempt-1",
+            "digest":"sha256:"+hashlib.sha256(payload).hexdigest(),"size_in_bytes":len(payload),"expired":False,
+            "workflow_run":{"id":who.run_id,"repository_id":selected.identity.repository_id,
+                "head_repository_id":selected.identity.repository_id,"head_sha":who.caller_sha,"head_branch":"main"}}
+        supplied={"id":81,"digest_sha256":hashlib.sha256(payload).hexdigest(),"size_in_bytes":len(payload)}
+        def provider(path,*_args):
+            return {"total_count":1,"artifacts":[artifact]} if "/artifacts?" in path else artifact
+        def download(_url,fd,_unused,_deadline,_maximum,*,digest,size):
+            assert digest==hashlib.sha256(payload).hexdigest() and size==len(payload)
+            os.write(fd,payload);os.fsync(fd)
+        with mock.patch.object(admission,"require_intake_native",return_value=(worker,who,120)), \
+             mock.patch.object(acquisition,"_json",side_effect=provider), \
+             mock.patch.object(acquisition,"_redirect",return_value="https://offline-provider.invalid/fixture"), \
+             mock.patch.object(acquisition,"_download",side_effect=download):
+            proof=operating_upload.verify_uploaded_artifact(str(self.runtime),self.sha,self.registry,"approved",
+                self.store,self.lease,object(),object(),"offline-oidc","offline-api",supplied)
+            self.store.bind_uploaded_evidence(self.lease,proof)
+            operating_upload.finish_transport(self.store,self.lease,proof)
+        prefix=identity.API+"/repos/"+selected.identity.repository
+        actor={"id":next(iter(selected.identity.actor_ids)),"type":"User","login":"offline-fixture"}
+        job={"id":who.job_id,"run_id":who.run_id,"run_attempt":1,"head_sha":who.caller_sha,
+            "runner_id":who.runner_id,"name":selected.identity.required_native_job_name,"status":"completed",
+            "conclusion":"success","check_run_url":prefix+"/check-runs/"+str(who.check_run_id),
+            "completed_at":dt.datetime.fromtimestamp(int(time.time())-1,dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        run={"id":who.run_id,"run_attempt":1,"event":"push","head_branch":"main","head_sha":who.caller_sha,
+            "workflow_id":selected.identity.workflow_id,"path":selected.identity.workflow_path,
+            "repository":{"id":selected.identity.repository_id,"full_name":selected.identity.repository,
+                "private":False,"owner":{"id":selected.identity.owner_id}},"actor":actor,"triggering_actor":actor,
+            "referenced_workflows":[{"path":selected.identity.reusable_repository+"/"+selected.identity.reusable_path+
+                "@"+selected.identity.reusable_sha,"sha":selected.identity.reusable_sha}]}
+        check={"id":who.check_run_id,"head_sha":who.caller_sha,"status":"completed","conclusion":"success"}
+        routes={prefix+"/actions/runs/"+str(who.run_id):run,prefix+"/actions/jobs/"+str(who.job_id):job,
+            prefix+"/check-runs/"+str(who.check_run_id):check}
+        with mock.patch.object(identity,"HTTPSReader",return_value=mock.Mock(read=lambda url:ledger.canonical(routes[url]))):
+            terminal=operating_custody.observe_native_terminal(self.registry,"approved",self.store,self.lease)
+        self.store.bind_native_terminal(self.lease,terminal)
+
     def test_actual_signed_fixed_engine_exit_public_evidence_and_owned_cleanup_close(self):
         # Parent hosts the actual Unix fixture, child has ONE Python thread.
         child=os.fork()
@@ -191,6 +254,7 @@ class RootFullCoreFinalizationTests(unittest.TestCase):
                     assert observed.exit_code==0
                     exported=evidence_export.export_existing(str(self.runtime),self.sha,self.registry,"approved",self.store,self.lease)
                     assert exported.evidence_policy_complete is True
+                    self.bind_original_terminal_and_upload(exported)
                     result=finalization.RootFinalizer(str(self.runtime),self.sha).finalize(self.registry,"approved",self.store,self.lease)
                     assert self.store.read(self.lease)["state"]=="closed"
                     retained=evidence_export.read_existing(str(self.runtime),self.sha,self.registry,"approved",self.store,self.lease)
@@ -216,6 +280,395 @@ class RootFullCoreFinalizationTests(unittest.TestCase):
         result=json.loads((self.io.root/"full-flow-result.json").read_bytes())
         self.assertEqual(result["exit"],0);self.assertTrue(result["closed"]);self.assertFalse(result["native_podman_qualified"])
         self.assertEqual(self.store.read(self.lease)["state"],"closed")
+
+
+from contextlib import ExitStack
+from copy import deepcopy
+from dataclasses import replace
+import subprocess
+import tempfile
+import test_github_runner_incus_capacity as cap_fixtures
+import test_github_runner_incus_run_factory as factories
+import test_github_runner_incus_generation_publisher as archives
+import test_github_runner_incus_finalization as engines
+import test_github_runner_incus_mutation as mutations
+from incus_lease_issuer import (capacity, engine_graph_prune, operating_cells, operating_watchdog,
+    policy_registry, run_factory)
+
+
+def digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def _operating_native_terminal(registry, selector, store, lease):
+    record = store.read(lease); who, p = record["identity"], registry.select(selector).identity
+    prefix = identity.API + "/repos/" + p.repository
+    actor = {"id": next(iter(p.actor_ids)), "type": "User", "login": "offline-fixture"}
+    job = {"id": who["job_id"], "run_id": who["run_id"], "run_attempt": 1, "head_sha": who["caller_sha"],
+        "runner_id": who["runner_id"], "name": p.required_native_job_name, "status": "completed", "conclusion": "failure",
+        "check_run_url": prefix + "/check-runs/" + str(who["check_run_id"]),
+        "completed_at": dt.datetime.fromtimestamp(store._now() - 1, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    run = {"id": who["run_id"], "run_attempt": 1, "event": "push", "head_branch": "main", "head_sha": p.caller_sha,
+        "workflow_id": p.workflow_id, "path": p.workflow_path,
+        "repository": {"id": p.repository_id, "full_name": p.repository, "private": False, "owner": {"id": p.owner_id}},
+        "actor": actor, "triggering_actor": actor,
+        "referenced_workflows": [{"path": p.reusable_repository + "/" + p.reusable_path + "@" + p.reusable_sha, "sha": p.reusable_sha}]}
+    check = {"id": who["check_run_id"], "head_sha": who["caller_sha"], "status": "completed", "conclusion": "failure"}
+    routes = {prefix + "/actions/runs/" + str(who["run_id"]): run,
+              prefix + "/actions/jobs/" + str(who["job_id"]): job,
+              prefix + "/check-runs/" + str(who["check_run_id"]): check}
+    with mock.patch.object(identity, "HTTPSReader", return_value=mock.Mock(read=lambda u: ledger.canonical(routes[u]))):
+        proof = operating_custody.observe_native_terminal(registry, selector, store, lease)
+    store.bind_native_terminal(lease, proof)
+
+
+def _operating_snapshot(io):
+    directory = io.root / "operating-archive-stage"
+    directory.mkdir(mode=0o700)
+    fds = []
+    try:
+        for name, raw in zip(run_factory.run_intake.ARCHIVES,
+                             (io.pub.artifact_raw, io.pub.source_raw, io.pub.controller_raw)):
+            fd = os.open(directory / name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            fds.append(fd); os.write(fd, raw); os.fsync(fd)
+        acquired = replace(io.pub.acquired, artifact=replace(io.pub.artifact, workflow_id=214182490))
+        snapshot = run_factory.run_intake._validate_archives(acquired,
+            **dict(zip(("artifact_fd", "source_fd", "controller_fd"), fds)))
+    finally:
+        for fd in fds: os.close(fd)
+    return run_factory.run_intake.SealedRunSnapshot(str(directory), directory.stat().st_dev,
+                                                   directory.stat().st_ino, "7" * 64, snapshot)
+
+
+def operating_cleanup_fixture(mode):
+    """Actual factory/ELF/READY/opaque proof/retention/finalizer; native HTTP/kernel modeled."""
+    CASE, CASE2 = "failure", "broker-cancel"
+    UUID = "12345678-1234-4234-8234-123456789abc"
+    with ExitStack() as stack:
+        cap_fixtures.RootCapacityTests.setUpClass()
+        quota = cap_fixtures.RootCapacityTests(); stack.callback(quota.doCleanups); quota.setUp()
+        factories.RootConfigurationTests.setUpClass()
+        io = factories.RootConfigurationTests(); stack.callback(io.doCleanups); io.setUp()
+        # Every engine/Incus input is set BEFORE the actual per-job factory seals its first config.
+        tmp = stack.enter_context(tempfile.TemporaryDirectory(dir="/run/executable-proof"))
+        source, binary = Path(tmp) / "engine.c", Path(tmp) / "fixed-operating-engine"
+        code = engines.FIXED_ENGINE_C.replace('usleep(1000000);\n    return 0;', '''
+        const char *out=0;
+        for(int i=1;i<argc;i++) if(!strncmp(argv[i],"type=bind,source=",17) && strstr(argv[i],",destination=/quality")) out=argv[i]+17;
+        if(!out) return 90;
+        char ack[4096]; size_t size=strcspn(out,",");
+        if(size+40>=sizeof(ack)) return 91;
+        memcpy(ack,out,size);ack[size]=0;strcat(ack,"/control/root-operating-ready.json");
+        for(int n=0;n<1000 && access(ack,F_OK);n++) usleep(10000);
+        return access(ack,F_OK)==0?23:92;''')
+        source.write_text(code)
+        subprocess.run(["/usr/bin/cc", "-std=c11", "-D_DEFAULT_SOURCE", "-O2", str(source), "-o", str(binary)],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        binary.chmod(0o700)
+        # Unwind the nested unavailable-Podman file mocks in reverse setup order.
+        for q in (quota.pool_quota, quota.quota): q.io.mock_file.stop()
+        quota.io.fixture.fs.mock_file.stop()
+        stack.enter_context(mock.patch.object(engine_policy, "ENGINE", str(binary)))
+        stack.enter_context(mock.patch.object(ledger, "ENGINE_EXECUTABLE", str(binary)))
+        controller_files = archives.publisher._git_archive(io.pub.controller_raw, io.pub.controller)
+        controller_files[".github/actions/run-operating-drill/controller.py"] = b'"""Offline immutable controller archive; execution is the fixed ELF fixture."""\n'
+        io.pub.controller_raw, io.pub.controller = archives.git_input(archives.acquisition.VALIDATION,
+            1269461997, io.pub.controller.commit_sha, controller_files)
+        io.pub.acquired = replace(io.pub.acquired, controller=io.pub.controller)
+        snapshot = _operating_snapshot(io)
+        io.stage.stop()
+        stack.enter_context(mock.patch.object(run_factory.run_intake, "stage_run_snapshot", return_value=snapshot))
+        template = deepcopy(next(iter(io.helper.value["cells"].values())))
+        template.pop("matrix")
+        template.update(kind="operating", lease_seconds=900, job_timeout_seconds=5400)
+        template["engine"]["engine"] = {"executable": str(binary), "executable_sha256": digest(binary.read_bytes())}
+        template["engine"]["limits"]["timeout_seconds"] = 600
+        template["engine"]["paths"].update(storage=str(quota.quota.mount / "graph"),
+            runroot=str(quota.quota.mount / "run"), output=str(quota.quota.mount / "output"))
+        template["incus"]["project_limits"] = {"cpu": 1, "memory_bytes": operating_cells.MEMORY,
+            "disk_bytes": operating_cells.PROJECT_RESERVATION, "instances": 1, "virtual_machines": 1, "containers": 0}
+        io.helper.value["preparation"]["operation_wait_seconds"] = 1
+        io.helper.value["preparation"]["storage_quota_policy_path"] = str(quota.quota.path)
+        io.helper.value["preparation"]["storage_quota_policy_sha256"] = quota.quota.sha
+        io.helper.value["capacity"] = {**capacity.PROFILE, "pool_quota_policy_path": str(quota.pool_quota.path),
+                                      "pool_quota_policy_sha256": quota.pool_quota.sha}
+        rows = {}
+        for case in (CASE, CASE2):
+            row = deepcopy(template)
+            row.update(native_job_name="Operating custody / " + case, native_observer_job_name="Operating result / " + case,
+                       operating={"case": case, "target": operating_cells.TARGET, "image": operating_cells.IMAGE})
+            rows[operating_cells.selector(case)] = row
+        io.helper.value["cells"] = rows
+        io.helper.selector = operating_cells.selector(CASE)
+        io.helper.native.job["name"] = "Operating custody / " + CASE
+        io.helper.seal(); io.bootstrap = io.helper.bootstrap; io.selector = io.helper.selector
+        io.proof, io.token = io.helper.mint()
+        configuration = io.create(snapshot)
+        registry = policy_registry.load_registry(configuration.registry_path, configuration.registry_sha256)
+        store = ledger.Ledger(io.helper.store_path, clock=run_factory.time.time); stack.callback(store.shutdown)
+        proof, _token = io.helper.mint()
+        selected = registry.select(io.selector)
+        lease = store.prepare(proof.nonce, proof.worker, proof.identity, policy_sha256=selected.custody_policy_sha256,
+                              cell_sha256=selected.cell_sha256, deadline=selected.deadline)
+        original_handle = mutations.MutationFixture.handle
+        def image_routes(server, method, path, body):
+            if path.startswith("/1.0/images"):
+                if method == "GET" and path == "/1.0/images/" + operating_cells.IMAGE + "?project=default":
+                    return mutations.reply(mutations.envelope({"fingerprint": operating_cells.IMAGE, "type": "virtual-machine"}))
+                if path.startswith("/1.0/images?project="):
+                    if method == "POST":
+                        assert body["source"]["protocol"] == "incus"
+                        key = "/1.0/images/" + operating_cells.IMAGE + "?project=" + path.split("=", 1)[1]
+                        server.resources[key] = {"fingerprint": operating_cells.IMAGE, "type": "virtual-machine",
+                            "public": False, "auto_update": False, "aliases": []}
+                        server.resources[path] = ["/1.0/images/" + operating_cells.IMAGE]
+                        return mutations.reply(mutations.envelope({}))
+                    if path not in server.resources:
+                        return mutations.reply(mutations.envelope([]))
+            result=original_handle(server, method, path, body)
+            if method=="DELETE" and path.startswith("/1.0/instances/"):
+                project=path.split("?project=",1)[1]
+                server.resources["/1.0/instances?project="+project]=[]
+                server.resources.pop(path.replace("?project=","/state?project="),None)
+            if method=="DELETE" and path.startswith("/1.0/images/"):
+                server.resources["/1.0/images?project="+path.split("?project=",1)[1]]=[]
+            return result
+        stack.enter_context(mock.patch.object(mutations.MutationFixture, "handle", image_routes))
+        receipt = preparation.prepare(configuration.preparation_config_path, configuration.preparation_config_sha256,
+                                      registry, io.selector, store, lease)
+        prepared = cell_contract.prepare_cell(registry, io.selector, store, lease)
+        descriptor = identity.decode_json(prepared.engine_descriptor_bytes)
+        manifest = engine_policy.compile_engine_policy(prepared.engine_descriptor_path, prepared.engine_descriptor_sha256)
+        server = io.pub.base.server
+        target = prepared.incus
+        vm_url = "/1.0/instances/" + target["instance"] + "?project=" + target["project"]
+        labels = target["ownership"]
+        vm = {"name": target["instance"], "type": "virtual-machine", "config": {
+            "volatile.uuid": UUID, "volatile.base_image": operating_cells.IMAGE,
+            **{"user.lit-molecule-" + key: str(labels[value]) for key, value in
+               (("owner", "owner"), ("repository", "repository"), ("run-id", "run_id"),
+                ("attempt", "run_attempt"), ("scenario", "scenario"), ("target", "target"))}},
+            "expanded_config": {"limits.cpu": "1", "limits.memory": "2GiB"},
+            "expanded_devices": {"root": {"type": "disk", "path": "/", "pool": target["pool"], "size": "5GiB", "size.state": "500MiB"},
+                                 "eth0": {"type": "nic", "network": target["network"]}}}
+        server.resources[vm_url] = vm
+        server.resources["/1.0/instances?project=" + target["project"]] = [vm_url]
+        server.resources["/1.0/operations?project=" + target["project"] + "&recursion=1"] = {}
+        state_url = "/1.0/instances/" + target["instance"] + "/state?project=" + target["project"]
+        server.resources[state_url] = {"status": "Running", "status_code": 103, "pid": 4321}
+        control = Path(descriptor["output_path"]) / "control"; control.mkdir(mode=0o700)
+        (control / "operating-created.json").write_bytes(ledger.canonical({"schema": 1, "case": CASE,
+            "instance_name": target["instance"], "instance_uuid": UUID}))
+        (control / "operating-created.json").chmod(0o600)
+        for operation in ("fence-create",):
+            e = store.begin(lease, operation, "fence:" + lease)
+            store.bind_fence(lease, e, policy_sha256="d" * 64, boot_id=engine_executor.kernel.read_boot_id(),
+                            netns_device=4, netns_inode=4026533001, host_ifindex=301, peer_ifindex=2, nft_table_handle=1)
+            store.record(lease, e, "verified", evidence_sha256="d" * 64)
+        auth = store.read(lease)["authorizations"][-1]
+        e = store.begin(lease, "fence-renew", "fence:" + lease + ":" + auth["token_id_sha256"])
+        expiry = min(auth["valid_until"], prepared.expires_at)
+        store.bind_fence_authorization(lease, e, authorization_sha256=ledger.digest(auth), allow_expires_at=expiry,
+            issued_boot_ns=1000000000, expires_boot_ns=1000000000 + (expiry - int(time.time())) * 1000000000)
+        store.record(lease, e, "verified", evidence_sha256="d" * 64)
+        st = io.root.stat()
+        stack.enter_context(mock.patch.object(engine_executor, "_cgroup", return_value=(st.st_dev, st.st_ino)))
+        engine_executor._spawn(prepared, manifest, store)
+        ready = operating_custody.operating_ready_tick(configuration.preparation_config_path,
+            configuration.preparation_config_sha256, registry, io.selector, store, lease, receipt)
+        assert ready["instance_uuid"] == UUID
+        start = next(r for r in store.read(lease)["effects"].values() if r["operation"] == "engine-start")
+        owned = engine_executor._PROCESSES[start["engine_process"]["pid"]]
+        end = time.monotonic() + 5
+        while (owned.returncode is None or not owned.eof) and time.monotonic() < end: owned.pump(.01)
+        assert owned.returncode == 23 and owned.eof
+        owned.record_exit()
+        for operation, name in (("engine-stop", "engine:lit-lease-" + lease), ("fence-disable", "fence:" + lease)):
+            e = store.begin(lease, operation, name); store.record(lease, e, "verified", evidence_sha256="d" * 64)
+        server.resources[state_url] = {"status": "Stopped", "status_code": 102, "pid": 0}
+        _operating_native_terminal(registry, io.selector, store, lease)
+        def fence_remove(_path, _sha, owner, journal, _worker, _config):
+            if any(r["operation"]=="fence-remove" and r["state"]=="verified" for r in journal.read(lease)["effects"].values()): return
+            e = journal.begin(lease, "fence-remove", "fence:" + lease)
+            journal.record(lease, e, "verified", evidence_sha256="e" * 64)
+        stack.enter_context(mock.patch.object(engine_executor, "_drained"))
+        stack.enter_context(mock.patch.object(network_fence, "verify_disabled"))
+        stack.enter_context(mock.patch.object(network_fence, "remove", side_effect=fence_remove))
+        stack.enter_context(mock.patch.object(cleanup_storage, "_cleanup_limits", return_value=(4096, 20)))
+        operating_custody.retain_stopped(configuration.runtime_config_path, configuration.runtime_config_sha256,
+                                          registry, io.selector, store, lease)
+        graph = Path(descriptor["engine"]["storage_root"])
+        (graph / "modeled-layer").write_bytes(b"immutable public image fixture content")
+        with root_session._session(configuration.preparation_config_path, configuration.preparation_config_sha256) as session:
+            config = root_session._require_session(session)
+            owner = cell_contract.owned_cell_for_cleanup(registry, io.selector, store, lease)
+            engine_graph_prune.prune_graph(owner, store, config, session=session)
+        assert store.read(lease)["state"] == "retained" and not list(graph.iterdir())
+        # A distinct genuine native job proof produces the next config, sharing the same Root platform refs.
+        io.helper.selector = operating_cells.selector(CASE2)
+        io.helper.native.job.update(id=904, name="Operating custody / " + CASE2,
+            check_run_url=identity.API + "/repos/" + io.helper.native.policy.repository + "/check-runs/733")
+        io.helper.native.claims["check_run_id"] = "733"
+        io.selector = io.helper.selector
+        io.proof, io.token = io.helper.mint()
+        next_config = io.create(snapshot)
+        next_registry = policy_registry.load_registry(next_config.registry_path, next_config.registry_sha256)
+        server.extensions += ["resources", "storage"]
+        server.resources["/1.0/storage-pools/" + target["pool"]] = {"name": target["pool"], "driver": "dir", "status": "Created",
+            "config": {"source": str(quota.pool_quota.mount)}}
+        server.resources["/1.0/storage-pools/" + target["pool"] + "/resources"] = quota.resource
+        server.resources["/1.0/storage-pools/" + target["pool"] + "/volumes?recursion=1&all-projects=true"] = [
+            {"type": "virtual-machine", "content_type": "block", "project": target["project"], "name": target["instance"]}]
+        before = store.read(lease)
+        with quota.modeled_kernel(), root_session._session(next_config.preparation_config_path,
+                                                         next_config.preparation_config_sha256) as session:
+            observed = capacity.require_capacity(next_config.runtime_config_path, next_config.runtime_config_sha256,
+                                                 next_registry, io.selector, store, session=session)
+        assert observed.retained_reservation_bytes == 10 * capacity.GIB and observed.requested_pool_bytes == 10 * capacity.GIB
+        assert store.read(lease) == before
+        negatives = {}
+        try:
+            vm["config"]["volatile.uuid"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            with quota.modeled_kernel(), root_session._session(next_config.preparation_config_path,
+                                                             next_config.preparation_config_sha256) as session:
+                try:
+                    capacity.require_capacity(next_config.runtime_config_path, next_config.runtime_config_sha256,
+                                              next_registry, io.selector, store, session=session)
+                except identity.Denied as error:
+                    negatives["original_owned_uuid_drift"] = str(error)
+                else:
+                    raise AssertionError("borrowed retained VM UUID accepted")
+        finally:
+            vm["config"]["volatile.uuid"] = UUID
+        assert store.read(lease)==before
+        assert negatives=={"original_owned_uuid_drift":"capacity-retained-native-unsafe"}
+        # Actual 4h Root custody policy, no synthetic business exporter/receipt.
+        binding={"schema":1,"runtime_config_path":configuration.runtime_config_path,"runtime_config_sha256":configuration.runtime_config_sha256,"snapshot_manifest_sha256":configuration.manifest_sha256}
+        assert operating_watchdog._closed_binding(binding) is False
+        retained=store.read(lease); assert retained["custody"]["retain_until"]>=retained["native_terminal"]["completed_at"]+14400
+        original_clock=store.clock
+        store.clock=lambda:retained["custody"]["retain_until"]-1
+        deletes_before=[r for r in server.requests if r[0]=="DELETE"]
+        with mock.patch.object(evidence_export,"export_existing",side_effect=AssertionError("operating is not business evidence")):
+            try: finalization.RootFinalizer(configuration.runtime_config_path,configuration.runtime_config_sha256).finalize(registry,operating_cells.selector(CASE),store,lease)
+            except identity.Denied: pass
+            else: raise AssertionError("early retention cleanup permitted")
+        assert [r for r in server.requests if r[0]=="DELETE"]==deletes_before
+        store.clock=lambda:retained["custody"]["retain_until"]
+        # A same-case controller diagnostic with a foreign Source commit cannot
+        # authorize raw deletion, even though the original Root custody elapsed.
+        wrong_report=Path(descriptor["output_path"])/"operating-result.json"
+        wrong_report.write_bytes(ledger.canonical({"schema":1,"kind":"operating","case":CASE,
+            "run_id":retained["identity"]["run_id"],"run_attempt":1,"source_sha":"f"*40,
+            "controller_sha":retained["identity"]["reusable_sha"],"execution":{"raw_exit_code":23,"signal":None},
+            "instance":{"name":target["instance"],"uuid":UUID,"state":"Stopped"},
+            "observations":{"workload_failed":True,"broker_cancel_sent":False,"controller_heartbeat_ceased":False},
+            "root_finalization":"pending"}));wrong_report.chmod(0o600)
+        with quota.modeled_kernel():
+            try:finalization.RootFinalizer(configuration.runtime_config_path,configuration.runtime_config_sha256).finalize(registry,operating_cells.selector(CASE),store,lease)
+            except identity.Denied:pass
+            else:raise AssertionError("foreign operating diagnostic accepted")
+        assert store.read(lease)["state"]=="retained" and [r for r in server.requests if r[0]=="DELETE"]==deletes_before
+        assert not Path(descriptor["engine"]["runroot"]+".public-evidence").exists()
+        wrong_report.unlink() # Only this test's rejected untrusted fixture data; no unknown effect or spool existed.
+        from incus_lease_issuer import incus_admin, incus_mutation
+        op="22222222-3333-4444-8555-666666666666"
+        ops_url="/1.0/operations?project="+target["project"]+"&recursion=1"
+        old_handler=server.handle
+        leaf={"image_deleted":False,"operations_reads":0,"native_operation_reads":0}
+        def async_leaf(method,path,body):
+            if method=="DELETE" and path.startswith("/1.0/images/"):
+                reply=old_handler(method,path,body)
+                leaf["image_deleted"]=True
+                if mode=="unknown-delete":
+                    return b"HTTP/1.1 200 Fixture\r\nContent-Length: 3\r\n\r\nbad"
+                return mutations.reply(mutations.envelope({"id":op,"class":"task","status_code":103},
+                    type="async",status="Operation created",status_code=100,operation="/1.0/operations/"+op),202)
+            if method=="GET" and path=="/1.0/operations/"+op:
+                leaf["native_operation_reads"]+=1
+                return mutations.reply(mutations.envelope({"id":op,"class":"task","status_code":200,"err":""}))
+            if method=="GET" and path==ops_url and leaf["image_deleted"]:
+                leaf["operations_reads"]+=1
+                visible=mode in {"linger","persistent","foreign-active"}
+                if mode=="linger" and leaf["operations_reads"]>=3:visible=False
+                row={"id":op if mode!="foreign-active" else "99999999-9999-4999-8999-999999999999",
+                    "class":"task","status_code":103 if mode=="foreign-active" else 200,
+                    "status":"Running" if mode=="foreign-active" else "Success","err":""}
+                return mutations.reply(mutations.envelope({row["status"].lower():[row]} if visible else {}))
+            return old_handler(method,path,body)
+        server.handle=async_leaf
+        error=None
+        try:
+            with quota.modeled_kernel(), mock.patch.object(evidence_export,"export_existing",side_effect=AssertionError("operating not business evidence")):
+                finalization.RootFinalizer(configuration.runtime_config_path,configuration.runtime_config_sha256).finalize(registry,operating_cells.selector(CASE),store,lease)
+        except identity.Denied as e:error=type(e).__name__+":"+str(e)
+        record=store.read(lease)
+        effects=[{"operation":e["operation"],"state":e["state"],"target":e["target"],"incus_operation_id":e.get("incus_operation_id")} for e in record["effects"].values()]
+        writes=[(m,p) for m,p,_ in server.requests if m!="GET"]
+        project_deletes=[p for m,p in writes if m=="DELETE" and p=="/1.0/projects/"+target["project"]]
+        reentry_error=None
+        if error and any(row["state"]=="unknown" for row in record["effects"].values()):
+            before_retry=list(writes)
+            with quota.modeled_kernel():
+                try:finalization.RootFinalizer(configuration.runtime_config_path,configuration.runtime_config_sha256).finalize(registry,operating_cells.selector(CASE),store,lease)
+                except identity.Denied as e:reentry_error=type(e).__name__+":"+str(e)
+                else:raise AssertionError("unknown effect reentry accepted")
+            assert before_retry==[(m,p) for m,p,_ in server.requests if m!="GET"]
+        wait_result=None
+        capacity_result=None
+        if error is None:
+            # Closed reentry is read-only even though its image/project/raw data
+            # are gone; capacity releases the FULL old reservation only now.
+            before_closed_reentry=list(server.requests)
+            with quota.modeled_kernel():
+                finalization.RootFinalizer(configuration.runtime_config_path,configuration.runtime_config_sha256).finalize(
+                    registry,operating_cells.selector(CASE),store,lease)
+            assert not any(m!="GET" for m,_p,_b in server.requests[len(before_closed_reentry):])
+            server.resources["/1.0/storage-pools/"+target["pool"]+"/volumes?recursion=1&all-projects=true"]=[]
+            with quota.modeled_kernel(),root_session._session(next_config.preparation_config_path,next_config.preparation_config_sha256) as session:
+                observed_after=capacity.require_capacity(next_config.runtime_config_path,next_config.runtime_config_sha256,
+                    next_registry,io.selector,store,session=session)
+            assert observed_after.retained_reservation_bytes==0
+            capacity_result={"retained_reservation_bytes":0}
+        if error:
+            with quota.modeled_kernel(),root_session._session(next_config.preparation_config_path,next_config.preparation_config_sha256) as session:
+                try:capacity.require_capacity(next_config.runtime_config_path,next_config.runtime_config_sha256,next_registry,io.selector,store,session=session)
+                except identity.Denied as e:capacity_result={"denied":str(e)}
+                else:raise AssertionError("held cleanup released capacity")
+        if mode=="immediate":assert record["state"]=="closed" and error is None
+        elif mode == "linger":
+            assert record["state"] == "closed" and error is None
+        elif mode in {"persistent","foreign-active"}:
+            assert error and not any(e["operation"]=="project-delete" for e in effects)
+            assert any(e["operation"]=="image-delete" and e["state"]=="verified" for e in effects)
+        else:
+            assert any(e["operation"]=="image-delete" and e["state"]=="unknown" for e in effects)
+            assert not any(e["operation"]=="project-delete" for e in effects)
+        result={"mode":mode,"actual_finalizer_error":error,"ledger_state":record["state"],"effects":effects,
+            "leaf_observations":leaf,"project_DELETE_requests":project_deletes,"supported_wait_quiet":wait_result,
+            "supported_wait_seconds":locals().get("wait_elapsed"),"capacity":capacity_result,"reentry_error":reentry_error,
+            "no_retry_writes":True,"native_acceptance":False,"source_model":"actual factory/RootREADY/ELF23/opaque terminal/4h policy/retention/prune/next capacity; only HTTP operation lifecycle modeled"}
+        stack.close()
+        return result
+
+@unittest.skipUnless(sys.platform=="linux" and os.geteuid()==0,"private proper-EE Root only")
+class RootAsyncImageFinalizationTests(unittest.TestCase):
+    def test_immediate_async_image_success_closes(self):
+        self.assertEqual(operating_cleanup_fixture("immediate")["ledger_state"], "closed")
+
+    def test_lingering_owned_success_disappears_before_project_intent_and_closes(self):
+        self.assertEqual(operating_cleanup_fixture("linger")["ledger_state"], "closed")
+
+    def test_foreign_active_operation_holds_before_project_intent_or_delete(self):
+        result=operating_cleanup_fixture("foreign-active")
+        self.assertEqual(result["project_DELETE_requests"], [])
+
+    def test_own_completed_operation_timeout_holds_before_project_intent_or_delete(self):
+        result=operating_cleanup_fixture("persistent")
+        self.assertEqual(result["project_DELETE_requests"], [])
+
+    def test_unknown_applied_image_delete_is_never_retried(self):
+        result=operating_cleanup_fixture("unknown-delete")
+        self.assertTrue(result["no_retry_writes"])
 
 
 if __name__=="__main__":unittest.main()

@@ -582,6 +582,9 @@ After an operating cell's actual custody expires, normal finalization preserves
 Root-verified diagnostic-only evidence before removing its owned resources and
 releasing its reservation. That receipt grants neither business-quality PASS nor
 permission to shorten retention.
+Completed owned image-delete tasks must actually leave the native operations
+map before Root records a new project-delete intent. Foreign tasks, failed tasks
+and bounded-wait expiry hold cleanup; unknown writes are never retried.
 
 A distinct authenticated observer job reads the original final state without a
 new lease or VM effects. Ordinary final quality requires an EdDSA receipt for the

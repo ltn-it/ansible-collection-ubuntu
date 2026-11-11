@@ -299,6 +299,11 @@ class RootFinalizer:
                     require(len(copies) == 1 and copies[0]["state"] == "verified", "finalization-image-copy-held")
                     self._remote_delete(session, registry, selector, store, owner, cleanup, "image-delete",
                         copies[0]["target"], "image", cleanup.image_delete)
+                    if project_deleted is None:
+                        # A successful native task may remain listed briefly.
+                        # Prove whole-project quiet BEFORE a new delete intent;
+                        # a foreign/failed task or timeout never authorizes it.
+                        cleanup.wait_quiet(config.operation_wait_seconds)
                 self._remote_delete(session, registry, selector, store, owner, cleanup, "project-delete",
                     "project:"+target["project"], "project", cleanup.project_delete)
                 require(cleanup.readback("profile")["state"] == "absent_observed", "finalization-default-profile-returned")

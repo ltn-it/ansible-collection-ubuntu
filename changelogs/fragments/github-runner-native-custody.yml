@@ -22,3 +22,6 @@ bugfixes:
   - >-
     github_runner - Preserve validated ordinary diagnostic delivery across typed finalization holds while
     retaining the exact original owner and denying trust, archive and partial-stream failures.
+  - >-
+    github_runner - Wait for completed owned image-delete tasks to disappear before recording project
+    deletion, preserving unknown-effect holds and strict proof-based cleanup fixtures.
