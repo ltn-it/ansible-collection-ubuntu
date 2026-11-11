@@ -184,7 +184,17 @@ def _bytes(value, disk=False):
     return result
 
 
+
+def _cell_fields(value):
+    if value.get("kind") == "operating":
+        return engine._keys(value, {"schema", "kind", "candidate", "controller", "operating", "github", "engine", "incus"})
+    return engine._keys(value, {"schema", "candidate", "controller", "matrix", "github", "engine", "incus"})
+
+
 def _environment(value, native, who):
+    if value.get("kind") == "operating":
+        from . import operating_cells
+        return operating_cells.environment(value, native, who)
     matrix = engine._keys(value["matrix"], MATRIX_KEYS)
     receiver = identity.validation_main_receiver(native)
     github = engine._keys(value["github"], {"job", "workflow", "run_id"} if receiver else {"job", "workflow"})
@@ -339,7 +349,7 @@ def owned_fence_for_cleanup(registry, selector, store, lease_id):
         require(type(lease_id) is str and ledger.ID.fullmatch(lease_id), "cell-lease-id")
         record = store.read(lease_id)
         who, worker = record["identity"], record["worker"]
-        require(record["state"] in {"prepared", "cancelled"}
+        require(record["state"] in {"prepared", "cancelled", "retained"}
                 and record["cell_sha256"] == selected.cell_sha256
                 and record["policy_sha256"] == selected.custody_policy_sha256
                 and record["expires_at"] == selected.deadline, "cell-cleanup-binding")
@@ -380,7 +390,7 @@ def prepare_cell(registry, selector, store, lease_id):
         _store(policy, store)
         record = _lease(policy, store, lease_id)
         value, proof, stamp = _sealed(policy.cell_config_path, policy.cell_sha256)
-        engine._keys(value, {"schema", "candidate", "controller", "matrix", "github", "engine", "incus"})
+        _cell_fields(value)
         require(type(value["schema"]) is int and value["schema"] == 1, "cell-schema")
         candidate = engine._keys(value["candidate"], {"repository", "source_sha", "artifact", "archive_sha256"})
         controller = engine._keys(value["controller"], {"repository", "source_sha", "archive_sha256", "files"})
@@ -394,7 +404,7 @@ def prepare_cell(registry, selector, store, lease_id):
         descriptor = _descriptor(value["engine"], env, policy.identity, lease_id, record["expires_at"], record["created_at"])
         require(descriptor["archives"]["candidate"]["sha256"] == engine._hash(candidate["archive_sha256"])
                 and descriptor["archives"]["controller"]["sha256"] == engine._hash(controller["archive_sha256"]), "cell-archive-binding")
-        require(type(controller["files"]) is dict and set(controller["files"]) == engine.CONTROLLER_FILES
+        require(type(controller["files"]) is dict and set(controller["files"]) == engine.controller_files(env)
                 and all(engine._hash(v) for v in controller["files"].values())
                 and descriptor["trees"]["controller"]["files"] == controller["files"]
                 and descriptor["trees"]["controller"]["directories"] == [], "cell-controller-files")
@@ -439,7 +449,20 @@ def bind_engine(prepared, store, manifest):
         raise Denied("cell-engine-binding-denied") from None
 
 
+@dataclass(frozen=True)
+class OwnedCellForObservation(OwnedCellForCleanup):
+    """Live read-only scope. No remote mutation accepts this type."""
+
+
+def owned_cell_for_observation(registry, selector, store, lease_id):
+    return _owned_cell(registry, selector, store, lease_id, live=True)
+
+
 def owned_cell_for_cleanup(registry, selector, store, lease_id):
+    return _owned_cell(registry, selector, store, lease_id, live=False)
+
+
+def _owned_cell(registry, selector, store, lease_id, *, live):
     """Revalidate fixed Root semantics and original native creator receipts.
 
     No current JWT/authorization or surviving context/runroot is required. A
@@ -457,7 +480,7 @@ def owned_cell_for_cleanup(registry, selector, store, lease_id):
     record = store.read(lease_id)
     who, worker = record["identity"], record["worker"]
     native = selected.identity
-    require(record["state"] in {"prepared", "cancelled", "closed"}
+    require(record["state"] in {"prepared", "cancelled", "retained", "closed"}
             and record["cell_sha256"] == selected.cell_sha256
             and record["policy_sha256"] == selected.custody_policy_sha256
             and record["expires_at"] == selected.deadline
@@ -466,7 +489,7 @@ def owned_cell_for_cleanup(registry, selector, store, lease_id):
             and who["runner_id"] == native.runner_id == worker["runner_id"]
             and who["service_uid"] == native.service_uid == worker["uid"], "cell-cleanup-binding")
     value, proof, stamp = _sealed(selected.cell_config_path, selected.cell_sha256)
-    engine._keys(value, {"schema", "candidate", "controller", "matrix", "github", "engine", "incus"})
+    _cell_fields(value)
     require(type(value["schema"]) is int and value["schema"] == 1, "cell-schema")
     candidate = engine._keys(value["candidate"], {"repository", "source_sha", "artifact", "archive_sha256"})
     controller = engine._keys(value["controller"], {"repository", "source_sha", "archive_sha256", "files"})
@@ -478,7 +501,7 @@ def owned_cell_for_cleanup(registry, selector, store, lease_id):
     descriptor = _descriptor(value["engine"], env, native, lease_id, record["expires_at"], record["created_at"])
     require(descriptor["archives"]["candidate"]["sha256"] == engine._hash(candidate["archive_sha256"])
             and descriptor["archives"]["controller"]["sha256"] == engine._hash(controller["archive_sha256"])
-            and type(controller["files"]) is dict and set(controller["files"]) == engine.CONTROLLER_FILES
+            and type(controller["files"]) is dict and set(controller["files"]) == engine.controller_files(env)
             and descriptor["trees"]["controller"]["files"] == controller["files"]
             and descriptor["trees"]["controller"]["directories"] == [], "cell-cleanup-source-binding")
     incus = _incus(value["incus"], env, lease_id, selected.cell_sha256)
@@ -503,9 +526,17 @@ def owned_cell_for_cleanup(registry, selector, store, lease_id):
             require(effect["target"] == expected[operation], "cell-cleanup-creator-target")
         creators[operation] = {"id": identifier, "target": effect["target"], "sha256": ledger.digest(effect)}
     start = record["effects"][creators["engine-start"]["id"]]
-    require(all(key in start for key in ("engine_process", "engine_container_id", "engine_capture", "engine_exit")),
+    require(all(key in start for key in ("engine_process", "engine_container_id", "engine_capture")),
             "cell-cleanup-engine-untracked")
-    ledger._validate_engine_exit(start["engine_exit"], start)
+    if live:
+        require(value.get("kind") == "operating" and record["state"] == "prepared" and "engine_exit" not in start
+                and int(time.time()) < min(record["expires_at"], record["authorizations"][-1]["valid_until"]),
+                "cell-observation-not-live")
+        ledger._validate_engine_process(start["engine_process"])
+        ledger._validate_engine_capture(start["engine_capture"])
+    else:
+        require("engine_exit" in start, "cell-cleanup-engine-untracked")
+        ledger._validate_engine_exit(start["engine_exit"], start)
     manifest_sha = start["engine_capture"]["manifest_sha256"]
     require("fence" in record["effects"][creators["fence-create"]["id"]], "cell-cleanup-fence-untracked")
     again, after, after_stamp = _sealed(selected.cell_config_path, selected.cell_sha256)
@@ -522,6 +553,7 @@ def owned_cell_for_cleanup(registry, selector, store, lease_id):
         "expires_at": record["expires_at"], "candidate": candidate, "controller": controller,
         "engine_descriptor_path": descriptor_path, "engine_descriptor_sha256": hashlib.sha256(raw).hexdigest(), "incus": incus}
     canonical = engine._canonical(original)
-    return OwnedCellForCleanup(registry, selector, lease_id, selected.cell_sha256, selected.deadline,
+    owner_type = OwnedCellForObservation if live else OwnedCellForCleanup
+    return owner_type(registry, selector, lease_id, selected.cell_sha256, selected.deadline,
         identity.policy_digest(native), descriptor_path, raw, hashlib.sha256(raw).hexdigest(), manifest_sha,
         incus_bytes, creator_bytes, hashlib.sha256(canonical).hexdigest(), canonical, ledger.digest(binding))

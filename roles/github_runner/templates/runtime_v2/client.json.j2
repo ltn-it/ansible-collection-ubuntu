@@ -1,1 +1,4 @@
-{{ {'schema': 2, 'socket_path': '/run/lightning-it/incus-runtime-v2/socket'} | to_nice_json }}
+{{ ({'schema': 2, 'socket_path': '/run/lightning-it/incus-runtime-v2/socket',
+     'signing_public_key_hex': github_runner_runtime_v2_signing_public_key_hex}
+    if github_runner_runtime_v2_bootstrap else
+    {'schema': 2, 'socket_path': '/run/lightning-it/incus-runtime-v2/socket'}) | to_nice_json }}

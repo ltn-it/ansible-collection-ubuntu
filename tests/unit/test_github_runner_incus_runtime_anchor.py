@@ -37,6 +37,7 @@ class RuntimeAnchorBoundary(unittest.TestCase):
             play = [{'hosts': 'localhost', 'connection': 'local', 'gather_facts': False,
                      'vars': {'ansible_remote_tmp': str(directory / 'remote'),
                               'ansible_python_interpreter': sys.executable,
+                              'github_runner_runtime_v2_bootstrap': False,
                               'github_runner_runtime_v2_configuration_path': value['config_path'],
                               'github_runner_runtime_v2_configuration_sha256': value['config_sha256']},
                      'tasks': [{'name': 'Render the real installation anchor', 'ansible.builtin.template':

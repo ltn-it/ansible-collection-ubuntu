@@ -75,6 +75,30 @@ class RootFinalizationTests(unittest.TestCase):
             target["project"], target["network"], "default", target["pool"], (fingerprint,)))
         return incus_mutation.RootIncusCleanup(client, self.owner, self.store)
 
+    def test_early_safety_denial_is_finalization_denied_without_a_new_effect(self):
+        """Exception domain only; real native fault/journal cases are composed separately."""
+        from incus_lease_issuer import emergency_stop
+        before = self.store.read(self.lease)
+        with mock.patch.object(emergency_stop.RootEmergencyStop, "stop",
+                               side_effect=emergency_stop.EmergencyStopDenied("fixture-read-held")):
+            with self.assertRaises(finalization.FinalizationDenied):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+        self.assertEqual(self.store.read(self.lease), before)
+
+    def test_early_safety_unknown_keeps_unknown_type_before_destructive_attempt(self):
+        from incus_lease_issuer import emergency_stop
+        before = self.store.read(self.lease)
+        with mock.patch.object(emergency_stop.RootEmergencyStop, "stop",
+                               side_effect=emergency_stop.EmergencyStopUnknown("fixture-native-unknown")):
+            with self.assertRaises(finalization.FinalizationUnknown):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+        self.assertEqual(self.store.read(self.lease), before)
+
+    def test_initial_record_failure_is_in_the_existing_finalizer_domain(self):
+        with mock.patch.object(self.store, "read", side_effect=Denied("fixture-record-held")):
+            with self.assertRaises(finalization.FinalizationDenied):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+
     def deletes(self):
         return [request for request in self.server.requests if request[0] == "DELETE"]
 
@@ -82,6 +106,71 @@ class RootFinalizationTests(unittest.TestCase):
         return self.finalizer._remote_delete(session, self.registry, "approved", self.store, self.owner,
             cleanup, "certificate-revoke", self.owner.creator_targets["certificate-create"],
             "certificate", cleanup.certificate_delete)
+
+    def test_cancelled_real_entry_revokes_access_but_does_not_release_retained_storage(self):
+        """Real finalizer/Ledger/Unix Incus boundary; kernel/export are models.
+
+        Cancellation is recorded by the existing Root Ledger API. This is an
+        offline failure-policy regression, never native job/VM acceptance.
+        """
+        from incus_lease_issuer import cleanup_storage, engine_executor, evidence_export, network_fence
+        self.store.cancel(self.lease, "cancelled")
+        descriptor = identity.decode_json(self.owner.engine_descriptor_bytes)
+        exported = evidence_export.ExportReceipt(
+            descriptor["engine"]["runroot"] + ".public-evidence/evidence.zip",
+            "a" * 64, 100, 1, "b" * 64, True)
+        start = self.store.read(self.lease)["effects"][self.owner.creators["engine-start"]["id"]]
+        with mock.patch.object(engine_policy, "ENGINE", self.engine.original), \
+             mock.patch.object(evidence_export, "export_existing", return_value=exported), \
+             mock.patch.object(network_fence, "verify_disabled"), \
+             mock.patch.object(engine_executor, "_retained", return_value=(object(), None, start)), \
+             mock.patch.object(engine_executor, "_drained"), \
+             mock.patch.object(cleanup_storage, "release_engine", side_effect=RuntimeError("destructive-release-observed")) as release:
+            with self.assertRaises(Denied):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+        self.assertEqual(release.call_count, 0, "cancelled cell storage released before custody elapsed")
+        self.assertNotEqual(self.store.read(self.lease)["state"], "closed")
+        # Certificate withdrawal is allowed immediately; retained storage is not.
+        self.assertTrue(any(row["operation"] == "certificate-revoke" and row["state"] == "verified"
+                            for row in self.store.read(self.lease)["effects"].values()))
+
+    def test_actual_vm_stops_and_is_privately_bound_before_pending_terminal_hold(self):
+        """Real Unix VM inventory and durable ledger, not native acceptance."""
+        from incus_lease_issuer import cleanup_storage, engine_executor, evidence_export, network_fence
+        value = self.owner.incus
+        url = "/1.0/instances/" + value["instance"] + "?project=" + value["project"]
+        state_url = "/1.0/instances/" + value["instance"] + "/state?project=" + value["project"]
+        own = value["ownership"]
+        uuid = "12345678-1234-1234-1234-123456789abc"
+        self.server.resources["/1.0/instances?project=" + value["project"]] = [url]
+        self.server.resources[url] = {"name": value["instance"], "type": "virtual-machine", "config": {
+            "volatile.uuid": uuid, "user.lit-molecule-owner": own["owner"],
+            "user.lit-molecule-repository": own["repository"], "user.lit-molecule-run-id": str(own["run_id"]),
+            "user.lit-molecule-attempt": str(own["run_attempt"]), "user.lit-molecule-scenario": own["scenario"],
+            "user.lit-molecule-target": own["target"]}}
+        self.server.resources[state_url] = {"status": "Stopped", "status_code": 102, "pid": 0}
+        descriptor = identity.decode_json(self.owner.engine_descriptor_bytes)
+        exported = evidence_export.ExportReceipt(descriptor["engine"]["runroot"] + ".public-evidence/evidence.zip",
+            "a" * 64, 100, 1, "b" * 64, True)
+        start = self.store.read(self.lease)["effects"][self.owner.creators["engine-start"]["id"]]
+        with mock.patch.object(engine_policy, "ENGINE", self.engine.original), \
+             mock.patch.object(evidence_export, "export_existing", return_value=exported), \
+             mock.patch.object(network_fence, "verify_disabled"), \
+             mock.patch.object(engine_executor, "_retained", return_value=(object(), None, start)), \
+             mock.patch.object(engine_executor, "_drained"), \
+             mock.patch.object(cleanup_storage, "release_engine") as release:
+            with self.assertRaises(Denied):
+                self.finalizer.finalize(self.registry, "approved", self.store, self.lease)
+        record = self.store.read(self.lease)
+        self.assertEqual(record["owned_instance"]["uuid"], uuid)
+        self.assertFalse(any(row["operation"] == "instance-create" for row in record["effects"].values()))
+        self.assertFalse(any(row[0] == "DELETE" and row[1] == url for row in self.server.requests))
+        self.assertFalse(release.called)
+        self.assertTrue(any(row["operation"] == "certificate-revoke" and row["state"] == "verified"
+                            for row in record["effects"].values()))
+        # A fabricated request-shaped ownership record is never accepted.
+        with self.assertRaises(Denied):
+            self.store.bind_observed_instance(self.lease, record["owned_instance"])
 
     def test_real_original_certificate_scope_revoke_and_read_only_verified_reentry(self):
         with mock.patch.object(engine_policy, "ENGINE", self.engine.original), \
@@ -98,6 +187,35 @@ class RootFinalizationTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["state"], "verified")
         self.assertIn("certificate_revocation", matches[0])
+
+    def test_completed_own_native_task_must_actually_disappear_before_quiet_project(self):
+        import test_github_runner_incus_mutation as transport
+        self.server.async_mode, self.server.operation_code = True, 200
+        with mock.patch.object(engine_policy, "ENGINE", self.engine.original), \
+             root_session._session(str(self.io.config), self.io.sha) as session:
+            cleanup = self.cleanup(root_session._require_session(session))
+            self.revoke(cleanup, session)
+            writes = len(self.deletes())
+            path = "/1.0/operations?project=" + self.owner.incus["project"] + "&recursion=1"
+            own = {"success": [{"id": transport.OPERATION, "class": "task", "status_code": 200, "status": "Success", "err": ""}]}
+            self.server.resources[path] = own
+            original = self.server.handle
+            polls = []
+            def observe(method, url, body):
+                if method == "GET" and url == path:
+                    polls.append(1)
+                    if len(polls) >= 3:
+                        self.server.resources[path] = {}
+                return original(method, url, body)
+            self.server.handle = observe
+            self.assertEqual(cleanup.wait_quiet(1)["state"], "quiet_observed")
+            self.assertGreaterEqual(len(polls), 3)
+            self.assertEqual(len(self.deletes()), writes)
+            self.server.resources[path] = {"success": [{**own["success"][0], "id": "99999999-9999-9999-9999-999999999999"}]}
+            self.server.handle = original
+            with self.assertRaisesRegex(Denied, "mutation-project-operation-held"):
+                cleanup.wait_quiet(1)
+            self.assertEqual(len(self.deletes()), writes)
 
     def test_actual_applied_delete_with_lost_response_remains_unknown_no_retry(self):
         self.server.mutation_reply = b"HTTP/1.1 200 Fixture\r\nContent-Length: 3\r\n\r\nbad"
@@ -260,3 +378,25 @@ class RootCompiledFixedEngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
+class RootOperatingFinalizationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import test_github_runner_incus_engine_graph_prune as fixtures
+        fixtures.RootGraphPruneTests.setUpClass()
+
+    def test_retained_operating_entry_never_demands_business_export_or_releases_early(self):
+        import test_github_runner_incus_engine_graph_prune as fixtures
+        from incus_lease_issuer import evidence_export
+        helper=fixtures.RootGraphPruneTests();helper.setUp();self.addCleanup(helper.doCleanups)
+        io=helper.io
+        before=list(io.server.requests)
+        with helper.model(), mock.patch.object(evidence_export,"export_existing",side_effect=AssertionError("not business")) as export:
+            with self.assertRaises(finalization.FinalizationDenied):
+                finalization.RootFinalizer(str(io.runtime),io.runtime_sha).finalize(
+                    helper.registry,fixtures.ready_fixtures.SELECTOR,helper.store,helper.lease)
+        self.assertFalse(export.called)
+        self.assertEqual(helper.store.read(helper.lease)["state"],"retained")
+        self.assertFalse(any(row[0]=="DELETE" for row in io.server.requests[len(before):]))

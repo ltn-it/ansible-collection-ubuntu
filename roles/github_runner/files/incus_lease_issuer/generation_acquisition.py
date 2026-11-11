@@ -168,7 +168,9 @@ class _HTTP:
         require(parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password
                 and parsed.port is None and not parsed.fragment, "acquisition-origin")
         require((bearer is not None and parsed.hostname == API)
-                or (bearer is None and (parsed.hostname in {"codeload.github.com", "results-receiver.actions.githubusercontent.com"}
+                or (bearer is None and ((parsed.hostname == API and
+                    (parsed.path == "/repos/" + VALIDATION or parsed.path.startswith("/repos/" + VALIDATION + "/")))
+                    or parsed.hostname in {"codeload.github.com", "results-receiver.actions.githubusercontent.com"}
                     or re.fullmatch(r"[a-z0-9]{3,24}\.blob\.core\.windows\.net", parsed.hostname))), "acquisition-origin")
         self.connection = http.client.HTTPSConnection(parsed.hostname, timeout=min(10, _remaining(deadline)),
                                                      context=ssl.create_default_context())
@@ -299,6 +301,8 @@ def _repository(item, token, deadline):
     value = _json("/repos/"+item.repository, token, deadline)
     require(value.get("id") == item.repository_id and type(value.get("id")) is int
             and value.get("full_name") == item.repository, "acquisition-repository-mismatch")
+    if token is None:
+        require(item.repository == VALIDATION and value.get("private") is False, "acquisition-public-controller-only")
 
 
 def _tree(item, request, token, deadline):

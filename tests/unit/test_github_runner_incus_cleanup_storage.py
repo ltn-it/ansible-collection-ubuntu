@@ -114,6 +114,92 @@ class RootDeletionPrimitiveTests(unittest.TestCase):
                 self.inventory()
         self.assertEqual(leaf.read_bytes(), b"owned")
 
+    def test_149119_actual_entries_use_one_durable_barrier_per_directory(self):
+        """Real tmpfs deletion/count regression, NOT native Source timing."""
+        directories, files = 128, 149119 - 128
+        for index in range(directories):
+            parent = self.tree / ("layer-" + str(index))
+            parent.mkdir(mode=0o700)
+            count = files // directories + (index < files % directories)
+            for leaf in range(count):
+                fd = os.open(parent / str(leaf), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(fd)
+        end = time.monotonic() + 60
+        inventory = cleanup._inventory_tree(self.fd, end, 149119)
+        self.assertEqual(len(inventory[0]), 149119)
+        actual_fsync, barriers = os.fsync, {}
+        def barrier(fd):
+            inode = os.fstat(fd).st_ino
+            barriers[inode] = barriers.get(inode, 0) + 1
+            actual_fsync(fd)
+        with mock.patch.object(cleanup.os, "fsync", new=barrier):
+            cleanup._remove_tree(self.fd, inventory, end)
+        self.assertEqual(os.listdir(self.fd), [])
+        self.assertEqual(len(barriers), directories + 1)
+        self.assertEqual(sum(barriers.values()), directories + 1)
+
+    def test_each_empty_child_is_durable_before_rmdir_and_root_barrier_is_last(self):
+        paths = [self.tree / "a", self.tree / "a/nested", self.tree / "b"]
+        for path in paths:
+            path.mkdir(mode=0o700)
+            (path / "file").write_bytes(b"owned")
+        (self.tree / "file").write_bytes(b"owned")
+        names = {path.stat().st_ino: path.relative_to(self.tree).parts for path in [self.tree, *paths]}
+        events, actual_fsync, actual_rmdir = [], os.fsync, os.rmdir
+        def barrier(fd):
+            self.assertEqual(os.listdir(fd), [])
+            events.append(("fsync", names[os.fstat(fd).st_ino]))
+            actual_fsync(fd)
+        def remove(name, *, dir_fd):
+            events.append(("rmdir", names[os.fstat(dir_fd).st_ino] + (name,)))
+            actual_rmdir(name, dir_fd=dir_fd)
+        inventory = self.inventory()
+        with mock.patch.object(cleanup.os, "fsync", new=barrier), \
+             mock.patch.object(cleanup.os, "rmdir", new=remove):
+            self.remove(inventory)
+        for path in (path.relative_to(self.tree).parts for path in paths):
+            self.assertLess(events.index(("fsync", path)), events.index(("rmdir", path)))
+            self.assertLess(events.index(("rmdir", path)), events.index(("fsync", path[:-1])))
+        self.assertEqual(events[-1], ("fsync", ()))
+        self.assertEqual(len([event for event in events if event[0] == "fsync"]), 4)
+
+    def test_deadline_after_child_barrier_denies_before_rmdir(self):
+        child = self.tree / "child"; child.mkdir(mode=0o700)
+        (child / "file").write_bytes(b"owned")
+        inventory = self.inventory()
+        now, actual_fsync = [1.0], os.fsync
+        def barrier(fd):
+            actual_fsync(fd)
+            now[0] = 3.0
+        with mock.patch.object(cleanup.os, "fsync", new=barrier), \
+             mock.patch.object(cleanup.time, "monotonic", new=lambda: now[0]):
+            with self.assertRaisesRegex(Denied, "cleanup-storage-budget"):
+                cleanup._remove_tree(self.fd, inventory, 2.0)
+        self.assertTrue(child.is_dir())
+        self.assertEqual(list(child.iterdir()), [])
+
+    def test_fsync_failure_never_reports_completed_deletion(self):
+        child = self.tree / "child"; child.mkdir(mode=0o700)
+        (child / "file").write_bytes(b"owned")
+        inventory = self.inventory()
+        with mock.patch.object(cleanup.os, "fsync", side_effect=OSError("modeled storage failure")):
+            with self.assertRaises(OSError): self.remove(inventory)
+        self.assertTrue(child.is_dir())
+        self.assertEqual(list(child.iterdir()), [])
+
+    def test_mount_drift_after_inventory_denies_before_any_delete(self):
+        child = self.tree / "child"; child.mkdir(mode=0o700)
+        leaf = child / "file"; leaf.write_bytes(b"owned")
+        inventory = self.inventory()
+        original, inode = cleanup.storage_quota._mount_id, child.stat().st_ino
+        def mounted(fd):
+            actual = original(fd)
+            return actual + 1 if os.fstat(fd).st_ino == inode else actual
+        with mock.patch.object(cleanup.storage_quota, "_mount_id", side_effect=mounted):
+            with self.assertRaisesRegex(Denied, "directory-replaced"):
+                self.remove(inventory)
+        self.assertEqual(leaf.read_bytes(), b"owned")
+
 
 if __name__ == "__main__":
     unittest.main()

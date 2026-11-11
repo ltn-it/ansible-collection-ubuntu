@@ -31,7 +31,7 @@ AUDIENCE = "urn:lightning-it:legacy-incus:"
 # Fixed trusted implementation path; never a request/configuration parameter.
 ENGINE_EXECUTABLE = "/usr/bin/podman"
 MAX_CAPTURE_STREAM_BYTES = 64 * 1024 * 1024
-RUNTIME_OPERATIONS = frozenset({"run", "heartbeat", "status", "cancel", "recover"})
+RUNTIME_OPERATIONS = frozenset({"run", "heartbeat", "status", "cancel", "recover", "record-upload"})
 CERTIFICATE_AUTHORIZER_PROFILE = "incus-7.6-tls-8f5e6c2235f6424ec59d3dc06f12e344a4a416e2"
 
 
@@ -80,23 +80,37 @@ def _runtime_scope(operation, cell_sha256, identity_policy_sha256):
     return {"operation": operation, "cell_sha256": cell_sha256,
             "identity_policy_sha256": identity_policy_sha256}
 CREATES = {
+    "image-copy": "image-delete",
     "certificate-create": "certificate-revoke", "instance-create": "instance-destroy",
     "network-create": "network-delete", "project-create": "project-delete",
     "context-create": "context-delete", "engine-start": "engine-stop",
     "engine-prepare": "engine-release",
     "fence-create": "fence-remove",
 }
-PROVISIONING = frozenset({"network-create", "project-create", "profile-configure", "context-create", "context-publish",
+PROVISIONING = frozenset({"image-copy", "network-create", "project-create", "profile-configure", "context-create", "context-publish",
                           "engine-prepare", "engine-start", "fence-create"})
 WITHDRAWALS = frozenset({"fence-disable"})
-ONCE = PROVISIONING | WITHDRAWALS | {"instance-stop"}
+ONCE = PROVISIONING | WITHDRAWALS | {"instance-stop", "operating-ready", "engine-graph-prune"}
 CLEANUPS = frozenset(CREATES.values())
 OBSERVATIONS = frozenset({"test", "capture", "evidence-upload"})
 OPERATIONS = frozenset(CREATES) | CLEANUPS | OBSERVATIONS | WITHDRAWALS | {
-    "profile-configure", "context-publish", "context-refresh", "fence-renew", "instance-stop"}
-INCUS_OPERATIONS = frozenset({"network-create", "network-delete", "project-create", "project-delete",
+    "profile-configure", "context-publish", "context-refresh", "fence-renew", "instance-stop", "operating-ready", "engine-graph-prune"}
+INCUS_OPERATIONS = frozenset({"image-copy", "image-delete", "network-create", "network-delete", "project-create", "project-delete",
                               "profile-configure", "certificate-create", "certificate-revoke",
                               "instance-create", "instance-destroy", "instance-stop"})
+
+
+def _graph_prune_binding(value, effect, lease):
+    fields = {"graph_device", "graph_inode", "diagnostics_sha256", "manifest_sha256", "exit_sha256"}
+    require(type(value) is dict and set(value) == fields and effect["operation"] == "engine-graph-prune"
+            and type(value["graph_device"]) is int and value["graph_device"] >= 0
+            and type(value["graph_inode"]) is int and value["graph_inode"] > 0
+            and all(type(value[key]) is str and HEX.fullmatch(value[key])
+                    for key in ("diagnostics_sha256", "manifest_sha256", "exit_sha256")), "engine-cache-binding")
+    starts = [row for row in lease["effects"].values() if row["operation"] == "engine-start"]
+    require(len(starts) == 1 and "engine_exit" in starts[0] and "engine_capture" in starts[0]
+            and value["manifest_sha256"] == starts[0]["engine_capture"]["manifest_sha256"]
+            and value["exit_sha256"] == digest(starts[0]["engine_exit"]), "engine-cache-original-capture")
 
 
 def _native_uuid(value):
@@ -211,6 +225,10 @@ def _validate_host_api_authorization(value, lease, effect):
 def _target_valid(operation, target):
     if type(target) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}", target):
         return False
+    if operation in {"image-copy", "image-delete"}:
+        from . import operating_cells
+        return bool(re.fullmatch(r"image:[A-Za-z0-9][A-Za-z0-9_-]{0,62}:" + operating_cells.IMAGE, target)
+                    and not target.startswith("image:default:"))
     if operation == "instance-stop":
         return bool(re.fullmatch(r"instance:[A-Za-z0-9][A-Za-z0-9_-]{0,62}:[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", target))
     if operation in {"project-create", "project-delete"}:
@@ -227,7 +245,7 @@ def _target_valid(operation, target):
         return bool(re.fullmatch(r"context:[0-9a-f]{64}", target))
     if operation == "context-refresh":
         return bool(re.fullmatch(r"context:[0-9a-f]{64}:[0-9a-f]{64}", target))
-    if operation in {"engine-prepare", "engine-release"}:
+    if operation in {"engine-prepare", "engine-release", "engine-graph-prune"}:
         return bool(re.fullmatch(r"engine:[0-9a-f]{32}", target))
     if operation in {"engine-start", "engine-stop"}:
         return bool(re.fullmatch(r"engine:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", target))
@@ -467,7 +485,7 @@ class Ledger:
             certificate_revocations = set()
             fence_host_interfaces = set()
             for key, lease in state["leases"].items():
-                require(ID.fullmatch(key) and lease["state"] in {"prepared", "cancelled", "closed"}, "ledger-corrupt")
+                require(ID.fullmatch(key) and lease["state"] in {"prepared", "cancelled", "retained", "closed"}, "ledger-corrupt")
                 worker = Worker(**lease["worker"])
                 worker.validate()
                 who = Identity(**lease["identity"])
@@ -477,13 +495,39 @@ class Ledger:
                             (who.run_id, who.job_id, who.check_run_id, who.runner_id, who.service_uid, who.valid_until))
                         and who.runner_id == worker.runner_id and who.service_uid == worker.uid, "ledger-corrupt")
                 policy = state["policies"][lease["policy_sha256"]]
+                if "owned_instance" in lease:
+                    from . import operating_custody
+                    operating_custody.validate_instance_record(lease["owned_instance"], lease, key)
+                if "native_poll_after" in lease:
+                    require(type(lease["native_poll_after"]) is int and lease["native_poll_after"] > 0, "ledger-corrupt")
+                if "native_terminal" in lease:
+                    from . import operating_custody
+                    operating_custody._terminal_record(lease["native_terminal"], lease)
+                if "uploaded_evidence" in lease:
+                    from . import operating_upload
+                    operating_upload.validate_record(lease["uploaded_evidence"], lease)
+                    require(lease.get("capture_receipt_sha256") == lease["uploaded_evidence"]["capture_receipt_sha256"],
+                            "ledger-corrupt")
+                if "upload_verification" in lease:
+                    from . import operating_upload
+                    operating_upload.validate_verification(lease["upload_verification"])
+                if "upload_transport" in lease:
+                    transport = lease["upload_transport"]
+                    require(type(transport) is dict and set(transport) == {"state", "stage_sha256"}
+                            and transport["state"] in {"intent", "verified"}
+                            and type(transport["stage_sha256"]) is str and HEX.fullmatch(transport["stage_sha256"])
+                            and "uploaded_evidence" in lease, "ledger-corrupt")
                 require(HEX.fullmatch(lease["cell_sha256"]) and type(lease["created_at"]) is int
                         and type(lease["expires_at"]) is int
                         and 0 < lease["expires_at"] - lease["created_at"] <= policy["max_lease_seconds"], "ledger-corrupt")
                 invocation = (who.run_id, who.check_run_id)
                 require(invocation not in used_invocations, "ledger-corrupt")
                 used_invocations.add(invocation)
-                if lease["state"] != "closed":
+                if "custody" in lease:
+                    from . import operating_custody
+                    operating_custody._custody_record(lease["custody"], lease, policy)
+                require((lease["state"] == "retained") == ("custody" in lease and lease["state"] != "closed"), "ledger-corrupt")
+                if lease["state"] not in {"closed", "retained"}:
                     require(who.runner_id not in live_runners and who.service_uid not in live_uids, "ledger-corrupt")
                     live_runners.add(who.runner_id)
                     live_uids.add(who.service_uid)
@@ -501,6 +545,12 @@ class Ledger:
                     token_links[token] = key
                 require(authorizations[0]["token_id_sha256"] == who.token_id_sha256
                         and authorizations[0]["audience"] == who.audience, "ledger-corrupt")
+                if "authorization_expired_at" in lease:
+                    expiry = lease["authorization_expired_at"]
+                    require(type(expiry) is int and expiry == min(lease["expires_at"], authorizations[-1]["valid_until"])
+                            and lease.get("cancel_reason") == "authorization_expired"
+                            and type(lease.get("cancelled_at")) is int and lease["cancelled_at"] >= expiry
+                            and lease["state"] in {"cancelled", "retained", "closed"}, "ledger-corrupt")
                 effect_targets, provisioned = set(), set()
                 for effect_key, effect in lease["effects"].items():
                     require(ID.fullmatch(effect_key) and effect["operation"] in OPERATIONS
@@ -585,8 +635,12 @@ class Ledger:
                         fingerprint = effect["certificate_revocation"]["current_fingerprint"]
                         require(fingerprint not in certificate_revocations, "ledger-corrupt")
                         certificate_revocations.add(fingerprint)
-                    if effect["operation"] in {"engine-prepare", "engine-release"}:
+                    if effect["operation"] in {"engine-prepare", "engine-release", "engine-graph-prune"}:
                         require(effect["target"] == "engine:" + key, "ledger-corrupt")
+                    if "graph_prune" in effect:
+                        _graph_prune_binding(effect["graph_prune"], effect, lease)
+                    if effect["operation"] == "engine-graph-prune" and effect["state"] == "verified":
+                        require("graph_prune" in effect, "engine-cache-binding-missing")
                     if effect["operation"] in {"engine-start", "engine-stop"}:
                         require(effect["target"] == "engine:lit-lease-" + key, "ledger-corrupt")
                     if effect["operation"] in {"fence-create", "fence-remove", "fence-disable", "fence-renew"}:
@@ -614,11 +668,16 @@ class Ledger:
                                     and effect["target"] == "profile:" + other["target"].removeprefix("project:") + ":default"
                                     for other in effects), "ledger-corrupt")
                     if effect["operation"] in CLEANUPS:
-                        require(any(CREATES.get(other["operation"]) == effect["operation"]
+                        observed_instance = lease.get("owned_instance")
+                        owned_target = ("instance:" + observed_instance["project"] + ":" + observed_instance["name"]
+                                        if observed_instance is not None else None)
+                        require((effect["operation"] == "instance-destroy" and effect["target"] == owned_target)
+                                or any(CREATES.get(other["operation"]) == effect["operation"]
                                     and other["target"] == effect["target"] and other["state"] == "verified"
                                     for other in effects), "ledger-corrupt")
                 if lease["state"] == "closed":
                     cls._cleanup_complete(list(lease["effects"].values()))
+                    cls._owned_instance_deleted(lease)
             host_slots, host_policies = set(), set()
             for lease in state["leases"].values():
                 effects = list(lease["effects"].values())
@@ -648,7 +707,7 @@ class Ledger:
                     lease = state["leases"][challenge["lease_id"]]
                     if "runtime_identity" in challenge:
                         who = Identity(**challenge["runtime_identity"])
-                        require(runtime is not None and runtime["operation"] in {"status", "cancel", "recover"}
+                        require(runtime is not None and runtime["operation"] in {"status", "cancel", "recover", "record-upload"}
                                 and who.policy_sha256 == runtime["identity_policy_sha256"]
                                 and runtime["cell_sha256"] == lease["cell_sha256"]
                                 and challenge["worker"] == lease["worker"]
@@ -754,7 +813,7 @@ class Ledger:
                 previous = lease["identity"]
                 require(not (previous["run_id"] == identity.run_id
                              and previous["check_run_id"] == identity.check_run_id), "invocation-replay")
-                require(lease["state"] == "closed" or (previous["runner_id"] != identity.runner_id
+                require(lease["state"] in {"closed", "retained"} or (previous["runner_id"] != identity.runner_id
                         and previous["service_uid"] != identity.service_uid), "runner-lease-unsettled")
             if runtime is not None:
                 self._require_exclusive_preparation(state)
@@ -837,12 +896,12 @@ class Ledger:
         now = self._now()
         self._refresh_input(nonce, worker, identity, now)
         scope = _runtime_scope(operation, cell_sha256, identity_policy_sha256)
-        require(operation in {"status", "cancel", "recover"}
+        require(operation in {"status", "cancel", "recover", "record-upload"}
                 and identity.policy_sha256 == identity_policy_sha256, "runtime-proof-operation")
         require(type(policy_sha256) is str and HEX.fullmatch(policy_sha256)
                 and type(deadline) is int and deadline > 0, "runtime-root-binding")
-        require((operation == "recover" and lease_id is None)
-                or (operation != "recover" and type(lease_id) is str and ID.fullmatch(lease_id)),
+        require((operation in {"recover", "record-upload"} and lease_id is None)
+                or (operation not in {"recover", "record-upload"} and type(lease_id) is str and ID.fullmatch(lease_id)),
                 "runtime-proof-locator")
         with self._transaction() as state:
             require(policy_sha256 in state["policies"], "unknown-custody-policy")
@@ -902,9 +961,119 @@ class Ledger:
         with self._transaction() as state:
             return copy.deepcopy(self._lease(state, identifier))
 
+    def defer_terminal_poll(self, identifier):
+        """One bounded public-status backoff; it never alters a lease deadline."""
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            now = self._now()
+            if lease.get("native_poll_after", 0) <= now:
+                lease["native_poll_after"] = now + 60
+
+    def bind_native_terminal(self, identifier, proof):
+        """Persist only a registered fresh original-job native terminal proof."""
+        from . import operating_custody
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            value = operating_custody.require_terminal_proof(proof, identifier, lease)
+            if "native_terminal" in lease:
+                prior = {k: v for k, v in lease["native_terminal"].items() if k not in {"observed_at", "native_sha256"}}
+                current = {k: v for k, v in value.items() if k not in {"observed_at", "native_sha256"}}
+                require(prior == current, "custody-native-terminal-rebind")
+                return copy.deepcopy(lease["native_terminal"])
+            lease["native_terminal"] = value
+            return copy.deepcopy(value)
+
+    def bind_observed_instance(self, identifier, proof):
+        """Bind actual native VM in the unique Root-created project, not CREATE."""
+        from . import operating_custody
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            value = operating_custody.require_instance_proof(proof, identifier, lease)
+            if "owned_instance" in lease:
+                prior = lease["owned_instance"]
+                require(all(prior[k] == value[k] for k in ("lease_id", "cell_sha256", "name", "project", "uuid")),
+                        "custody-owned-instance-replaced")
+                return copy.deepcopy(prior)
+            lease["owned_instance"] = value
+            return copy.deepcopy(value)
+
+    def bind_engine_graph_prune(self, identifier, effect_id, *, graph_device, graph_inode,
+                                diagnostics_sha256, manifest_sha256, exit_sha256):
+        """Immutable raw-diagnostic binding BEFORE any cache child unlink."""
+        value = dict(graph_device=graph_device, graph_inode=graph_inode, diagnostics_sha256=diagnostics_sha256,
+                     manifest_sha256=manifest_sha256, exit_sha256=exit_sha256)
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            effect = lease["effects"].get(effect_id)
+            require(type(effect) is dict and effect["operation"] == "engine-graph-prune"
+                    and effect["state"] == "intent" and effect["target"] == "engine:" + identifier
+                    and "graph_prune" not in effect, "engine-cache-binding-held")
+            _graph_prune_binding(value, effect, lease)
+            effect["graph_prune"] = value
+
+    def begin_upload_verification(self, identifier, stage_sha256, owner):
+        """Quarantine before any private ZIP-stage filesystem effect."""
+        from . import operating_upload
+        value = {"state": "intent", "stage_sha256": stage_sha256, **owner}
+        operating_upload.validate_verification(value)
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            require(lease["state"] in {"prepared", "cancelled"} and "upload_verification" not in lease,
+                    "upload-verification-held")
+            lease["upload_verification"] = value
+            return copy.deepcopy(lease)
+
+    def bind_uploaded_evidence(self, identifier, proof):
+        """Accept only same-job native ZIP/Root-content proof, never metadata JSON."""
+        from . import operating_upload
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            require("uploaded_evidence" not in lease, "upload-already-bound")
+            value = operating_upload.require_upload_proof(proof, identifier, lease)
+            lease["uploaded_evidence"] = value
+            lease["capture_receipt_sha256"] = value["capture_receipt_sha256"]
+            return copy.deepcopy(value)
+
+    def begin_upload_transport_cleanup(self, identifier, proof):
+        from . import operating_upload
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            stage = operating_upload.require_bound_upload(proof, identifier, lease)
+            require("upload_transport" not in lease, "upload-transport-cleanup-held")
+            lease["upload_transport"] = {"state": "intent", "stage_sha256": stage}
+
+    def finish_upload_transport_cleanup(self, identifier, proof, expected_stage):
+        from . import operating_upload
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            stage = operating_upload.require_bound_upload(proof, identifier, lease)
+            require(stage == expected_stage and lease.get("upload_transport") == {"state": "intent", "stage_sha256": stage},
+                    "upload-transport-cleanup-held")
+            lease["upload_transport"]["state"] = "verified"
+            require(lease.get("upload_verification", {}).get("state") == "intent", "upload-verification-held")
+            lease["upload_verification"]["state"] = "verified"
+
+    def bind_retained_custody(self, identifier, proof):
+        """Release running capacity only after registered actual safety proof."""
+        from . import operating_custody
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            require(lease["state"] in {"prepared", "cancelled"} and "custody" not in lease,
+                    "custody-retained-reentry")
+            value = operating_custody.require_retained_proof(proof, identifier, lease, state["policies"][lease["policy_sha256"]])
+            lease.update(state="retained", custody=value)
+            return copy.deepcopy(value)
+
+    def lease_ids(self):
+        """Root bounded snapshot locators, never admission authority."""
+        with self._transaction() as state:
+            require(len(state["leases"]) <= 4096, "custody-ledger-inventory-limit")
+            return tuple(sorted(state["leases"]))
+
     @staticmethod
     def _require_exclusive_preparation(state, identifier=None):
-        require(all(key == identifier or lease["state"] == "closed"
+        from . import operating_custody
+        require(all(key == identifier or lease["state"] == "closed" or operating_custody.known_retention(lease)
                     for key, lease in state["leases"].items()), "engine-other-pilot-lease-active")
 
     def require_exclusive_preparation(self, identifier):
@@ -937,7 +1106,7 @@ class Ledger:
             require(not any(e["operation"] == operation and e["target"] == target for e in effects), "effect-replay")
             if operation in ONCE:
                 require(not any(e["operation"] == operation for e in effects), "provisioning-replay")
-            if operation in {"engine-prepare", "engine-release"}:
+            if operation in {"engine-prepare", "engine-release", "engine-graph-prune"}:
                 require(target == "engine:" + identifier, "engine-lease-target")
             if operation in {"engine-start", "engine-stop"}:
                 require(target == "engine:lit-lease-" + identifier, "engine-lease-target")
@@ -969,10 +1138,29 @@ class Ledger:
                             for e in effects), "profile-project-not-owned")
             if operation in CLEANUPS:
                 creator = next(k for k, v in CREATES.items() if v == operation)
-                require(any(e["operation"] == creator and e["target"] == target
-                            and e["state"] == "verified" for e in effects), "cleanup-not-owned")
+                observed = lease.get("owned_instance")
+                if operation == "instance-destroy" and observed is not None:
+                    from . import operating_custody
+                    require(target == "instance:" + observed["project"] + ":" + observed["name"], "cleanup-not-owned")
+                    self._instance_stop_scope(identifier, target, effects)
+                    operating_custody.cleanup_allowed_record(lease, state["policies"][lease["policy_sha256"]], now)
+                else:
+                    require(any(e["operation"] == creator and e["target"] == target
+                                and e["state"] == "verified" for e in effects), "cleanup-not-owned")
+                if operation in {"project-delete", "engine-release"}:
+                    self._owned_instance_deleted(lease)
             elif operation == "instance-stop":
                 self._instance_stop_scope(identifier, target, effects)
+            elif operation == "engine-graph-prune":
+                from . import operating_custody
+                require(target == "engine:" + identifier and lease["state"] == "retained", "engine-cache-not-retained")
+                operating_custody._custody_record(lease.get("custody"), lease, state["policies"][lease["policy_sha256"]])
+                require(operating_custody.known_retention(lease), "engine-cache-unknown-retention")
+            elif operation == "operating-ready":
+                require(target == "operating:" + identifier and lease["state"] == "prepared"
+                        and "owned_instance" in lease and now < min(lease["expires_at"], lease["authorizations"][-1]["valid_until"])
+                        and any(row["operation"] == "engine-start" and row["state"] == "verified" for row in effects),
+                        "operating-ready-not-active")
             elif operation not in WITHDRAWALS:
                 require(lease["state"] == "prepared" and now < lease["expires_at"]
                         and now < lease["authorizations"][-1]["valid_until"], "lease-not-active")
@@ -1016,6 +1204,7 @@ class Ledger:
             live.add("context-publish")
         needed = {
             "project-create": {"network-create"},
+            "image-copy": {"network-create", "project-create", "profile-configure"},
             "profile-configure": {"network-create", "project-create"},
             "context-create": {"network-create", "project-create", "profile-configure"},
             "context-publish": {"network-create", "project-create", "profile-configure", "context-create", "certificate-create"},
@@ -1041,9 +1230,11 @@ class Ledger:
             "instance-destroy": {"engine-start"},
             "context-delete": {"engine-start", "engine-prepare", "certificate-create"},
             "engine-release": {"engine-start"},
+            "engine-graph-prune": {"engine-start", "certificate-create", "fence-create"},
             "fence-remove": {"engine-start"},
-            "project-delete": {"engine-start", "instance-create", "certificate-create", "context-create"},
-            "network-delete": {"engine-start", "instance-create", "project-create", "certificate-create"},
+            "project-delete": {"engine-start", "instance-create", "certificate-create", "context-create", "image-copy"},
+            "network-delete": {"engine-start", "instance-create", "project-create", "certificate-create", "image-copy"},
+            "image-delete": {"engine-start", "instance-create", "certificate-create"},
         }
         require(not (blockers.get(operation, set()) & live), "effect-dependent-resource")
 
@@ -1424,8 +1615,28 @@ class Ledger:
         require(reason in {"cancelled", "job_ended", "runner_lost", "token_revoked"}, "invalid-cancel-reason")
         with self._transaction() as state:
             lease = self._lease(state, identifier)
-            require(lease["state"] != "closed", "lease-closed")
+            require(lease["state"] in {"prepared", "cancelled"}, "lease-not-active")
             lease.update(state="cancelled", cancel_reason=reason, cancelled_at=self._now())
+
+    def expire_authorization(self, identifier):
+        """Root clock/last actual authorization, never a job expiry assertion."""
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            deadline = min(lease["expires_at"], lease["authorizations"][-1]["valid_until"])
+            require(self._now() >= deadline, "authorization-not-expired")
+            require(lease["state"] in {"prepared", "cancelled"}, "lease-not-active")
+            if lease["state"] == "prepared":
+                lease.update(state="cancelled", cancel_reason="authorization_expired", cancelled_at=self._now(),
+                             authorization_expired_at=deadline)
+            return copy.deepcopy(lease)
+
+    @staticmethod
+    def _owned_instance_deleted(lease):
+        observed = lease.get("owned_instance")
+        if observed is not None:
+            target = "instance:" + observed["project"] + ":" + observed["name"]
+            require(any(row["operation"] == "instance-destroy" and row["target"] == target and row["state"] == "verified"
+                        for row in lease["effects"].values()), "cleanup-owned-instance-unconfirmed")
 
     @staticmethod
     def _cleanup_complete(effects):
@@ -1442,4 +1653,5 @@ class Ledger:
             lease = self._lease(state, identifier)
             require(lease["state"] != "closed", "lease-closed")
             self._cleanup_complete(list(lease["effects"].values()))
+            self._owned_instance_deleted(lease)
             lease.update(state="closed", closed_at=self._now())

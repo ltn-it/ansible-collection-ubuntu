@@ -167,16 +167,22 @@ def _members(output_fd, details, bounds):
     lifecycle = identity.decode_json(lifecycle_raw)
     keys = {"schema_version", "scenario", "target", "run_attempt", "test_exit_code", "capture_exit_code",
             "destroy_exit_code", "effective_exit_code", "infrastructure_error"}
+    pending = env.get("QUALITY_FAILURE_CUSTODY") == "retain-failed-v1"
+    if pending:
+        keys.add("root_finalization")
+        require(lifecycle.get("root_finalization") == "pending" and lifecycle.get("destroy_exit_code") is None,
+                "export-root-finalization-pending")
     require(type(lifecycle) is dict and set(lifecycle) == keys and type(lifecycle["schema_version"]) is int
             and lifecycle["schema_version"] == 1 and lifecycle["scenario"] == scenario
             and lifecycle["target"] == target and lifecycle["run_attempt"] == "1"
             and type(lifecycle["infrastructure_error"]) is bool, "export-lifecycle-schema")
-    for key in ("test_exit_code", "capture_exit_code", "destroy_exit_code", "effective_exit_code"):
+    code_keys = ("test_exit_code", "capture_exit_code") if pending else ("test_exit_code", "capture_exit_code", "destroy_exit_code")
+    for key in (*code_keys, "effective_exit_code"):
         _integer(lifecycle[key], 255)
-    expected = next((lifecycle[key] for key in ("test_exit_code", "capture_exit_code", "destroy_exit_code")
-                     if lifecycle[key] != 0), 0)
-    require(lifecycle["effective_exit_code"] == expected and lifecycle["infrastructure_error"]
-            == (lifecycle["capture_exit_code"] != 0 or lifecycle["destroy_exit_code"] != 0), "export-lifecycle-logic")
+    expected = next((lifecycle[key] for key in code_keys if lifecycle[key] != 0), 0)
+    infrastructure = lifecycle["capture_exit_code"] != 0 or (not pending and lifecycle["destroy_exit_code"] != 0)
+    require(lifecycle["effective_exit_code"] == expected and lifecycle["infrastructure_error"] == infrastructure,
+            "export-lifecycle-logic")
     base = "artifacts/cell-evidence/" + suffix
     manifest_raw = _read(output_fd, base + "manifest.json", bounds["max_member_bytes"])
     source = identity.decode_json(manifest_raw)
@@ -257,10 +263,27 @@ def _inventory(root, maximum):
                 require(len(found) <= maximum, "export-inventory-limit")
         require(_stamp(before) == _stamp(os.fstat(fd)), "export-inventory-drift")
     walk(root)
-    require(all(name == "manifest.json" or name == "role-coverage.yml"
+    require(all(name in {"manifest.json", "role-coverage.yml", "environment.json"}
                 or PurePosixPath(name).parts[0] in evidence_policy.EVIDENCE_DIRECTORIES for name in found),
             "export-unknown-evidence-category")
     return found
+
+
+
+def _environment_document(value, env):
+    require(type(value) is dict and set(value) == {"generated_at", "repository", "commit_sha", "workflow_run_id",
+        "workflow_attempt", "roles", "profiles", "scenarios", "targets", "tool_versions", "application_versions"}
+        and value["repository"] == env["GITHUB_REPOSITORY"] and value["commit_sha"] == env["QUALITY_INPUT_SOURCE_SHA"]
+        and value["workflow_run_id"] == env["GITHUB_RUN_ID"] and value["workflow_attempt"] == "1"
+        and value["roles"] == sorted(env["QUALITY_INPUT_ROLES"].split(","))
+        and value["profiles"] == [env["QUALITY_INPUT_PROFILE"].replace("_", "-")]
+        and value["scenarios"] == [env["QUALITY_INPUT_SCENARIO"]] and value["targets"] == [env["QUALITY_INPUT_TARGET"]]
+        and type(value["generated_at"]) is str and 0 < len(value["generated_at"]) <= 64, "export-environment-binding")
+    for key in ("tool_versions", "application_versions"):
+        require(type(value[key]) is dict and len(value[key]) <= 256
+                and all(type(name) is str and type(version) is str and 0 < len(name) <= 128 and len(version) <= 512
+                        and not any(ord(c) < 32 for c in name + version) for name, version in value[key].items()),
+                "export-environment-version")
 
 
 def _scan_blob(raw, name, bounds, forbidden, budget, depth=0):
@@ -413,7 +436,12 @@ def _full_members(output_fd, details, bounds, directory, forbidden):
                 "export-checksum-mismatch")
         manifest = identity.decode_json(payloads["manifest.json"])
         require(manifest["checksums"]["entry_count"] == len(checksums), "export-checksum-count")
-        require(not evidence_policy._manifest_structure_failures(manifest), "export-manifest-schema")
+        require(not evidence_policy._manifest_structure_failures(manifest,
+            preliminary=env.get("QUALITY_FAILURE_CUSTODY") == "retain-failed-v1"), "export-manifest-schema")
+        if env.get("QUALITY_FAILURE_CUSTODY") == "retain-failed-v1":
+            require("environment.json" in payloads, "export-environment-required")
+        if "environment.json" in payloads:
+            _environment_document(identity.decode_json(payloads["environment.json"]), env)
         roles = sorted(env["QUALITY_INPUT_ROLES"].split(","))
         require(roles and sorted(row["role"] for row in manifest["results"]) == roles
                 and all(row["profile"] == env["QUALITY_INPUT_PROFILE"].replace("_", "-")
@@ -464,7 +492,8 @@ def _full_members(output_fd, details, bounds, directory, forbidden):
             "source_policy_sha256": "0c1dc5877ecb93fd55a9418ff360383c51e356c82c0bdc9268613f7e3c35e2ab",
             "source_manifest_sha256": hashlib.sha256(payloads["manifest.json"]).hexdigest(),
             "required_junit": env["QUALITY_INPUT_JUNIT_REQUIRED"] == "true",
-            "required_allure": env["QUALITY_INPUT_ALLURE_REQUIRED"] == "true"})
+            "required_allure": env["QUALITY_INPUT_ALLURE_REQUIRED"] == "true",
+            **({"root_finalization": "pending"} if env.get("QUALITY_FAILURE_CUSTODY") == "retain-failed-v1" else {})})
         require(len(members) <= bounds["max_members"] and sum(map(len, members.values()))
                 <= bounds["max_total_evidence_bytes"], "export-full-member-limit")
         return members

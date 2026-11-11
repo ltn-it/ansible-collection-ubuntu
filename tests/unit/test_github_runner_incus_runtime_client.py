@@ -67,7 +67,7 @@ def terminal(operation="run"):
             "cleanup": {"state": "hold"}, "receipt_sha256": "c" * 64}
 
 
-def full_evidence(*, failed=False, corrupt=False, missing_recording=False, wrong_policy=False):
+def full_evidence(*, failed=False, corrupt=False, missing_recording=False, wrong_policy=False, pending=False):
     totals = {"tests": 1, "failures": int(failed), "errors": 0, "skipped": 0}
     lifecycle = {"schema_version": 1, "scenario": "fixture_heavy", "target": "ubuntu24.04", "run_attempt": "1",
                  "test_exit_code": int(failed), "capture_exit_code": 0, "destroy_exit_code": 0,
@@ -84,9 +84,18 @@ def full_evidence(*, failed=False, corrupt=False, missing_recording=False, wrong
                             "status": "failure" if failed else "passed", "duration_seconds": 0}]}],
         "matrix": {"actual_count": 1, "expected": [{"profile": "heavy", "scenario": "fixture_heavy", "target": "ubuntu24.04",
             "run_attempt": "1", "roles": ["example"], "status": "failed" if failed else "passed"}]}}
+    if pending:
+        lifecycle.update(root_finalization="pending", destroy_exit_code=None)
+        manifest.update(root_finalization="pending", execution_success=not failed,
+                        candidate_execution_passed=False, release_eligible=False)
     original = {"junit/probe.xml": b'<testsuite tests="1"><testcase classname="example" name="fixture"/></testsuite>',
         "allure-results/probe-result.json": json.dumps({"status": "passed", "attachments": [{"source": "recording.webm"}]}).encode(),
         "allure-results/recording.webm": b"sanitized-recording-fixture", "logs/scenario.log": b"sanitized details"}
+    if pending:
+        original["environment.json"] = json.dumps({"generated_at": "2026-11-11T00:00:00Z",
+            "repository": manifest["repository"], "commit_sha": manifest["commit_sha"], "workflow_run_id": "501",
+            "workflow_attempt": "1", "roles": ["example"], "profiles": ["heavy"], "scenarios": ["fixture_heavy"],
+            "targets": ["ubuntu24.04"], "tool_versions": {}, "application_versions": {}}).encode()
     if missing_recording:
         del original["allure-results/recording.webm"]
     manifest["checksums"] = {"algorithm": "sha256", "file": "checksums/SHA256SUMS", "entry_count": len(original) + 1}
@@ -104,7 +113,8 @@ def full_evidence(*, failed=False, corrupt=False, missing_recording=False, wrong
         "runtime/evidence-policy.json": json.dumps({"schema": 1, "evidence_policy_complete": True,
             "scope": "full-sanitized-cell-transfer", "source_policy_sha256": "f" * 64 if wrong_policy else client.EVIDENCE_POLICY_SHA256,
             "source_manifest_sha256": hashlib.sha256(original["manifest.json"]).hexdigest(),
-            "required_junit": True, "required_allure": True}).encode()})
+            "required_junit": True, "required_allure": True,
+            **({"root_finalization": "pending"} if pending else {})}).encode()})
     result = io.BytesIO()
     with tarfile.open(fileobj=result, mode="w:gz", format=tarfile.USTAR_FORMAT) as archive:
         for name, raw in sorted(members.items()):
@@ -199,6 +209,8 @@ class RootRuntimeClientTests(unittest.TestCase):
         self.heartbeat_seen = threading.Event()
         self.requests, self.errors, self.connections = [], [], []
         self.mode, self.payload = "normal", evidence()
+        cache = mock.patch.dict(client._CONFIGURATIONS, {}, clear=True)
+        cache.start(); self.addCleanup(cache.stop)
         self.cleanup_state = "hold"
         self.worker = threading.Thread(target=self.accept, daemon=True)
         self.worker.start()
@@ -246,14 +258,24 @@ class RootRuntimeClientTests(unittest.TestCase):
                 return  # check() closes without sending a selector or auth.
             selector = receive(connected)
             operation = selector["operation"]
-            connected.sendall(frame({"schema": 2, "type": "challenge", "operation": operation, "nonce": NONCE,
-                "audience": self.auth.AUDIENCE + NONCE, "expires_at": int(time.time()) + 60}))
+            intake = self.mode == "intake" and "configuration" not in selector
+            nonce = ("a" * 64 if intake else NONCE)
+            connected.sendall(frame({"schema": 2, "type": "challenge", "operation": operation, "nonce": nonce,
+                "audience": self.auth.AUDIENCE + nonce, "expires_at": int(time.time()) + 60,
+                **({"phase": "intake"} if intake else {})}))
             auth = receive(connected)
             self.requests.append((selector, auth))
             self.assertEqual(connected.recv(1), b"")
             self.assertEqual(auth["token"], TOKEN)
             self.assertEqual(auth["api_token"], API)
-            self.assertEqual(auth["nonce"], NONCE)
+            self.assertEqual(auth["nonce"], nonce)
+            if intake:
+                connected.sendall(frame({"schema": 2, "type": "intake-ready", "operation": operation,
+                    "cell": selector["cell"], "configuration": "f" * 64, "deadline": int(time.time()) + 300,
+                    "lease_created": False}))
+                return
+            if self.mode == "intake":
+                self.assertEqual(selector["configuration"], "f" * 64)
             if self.mode == "drop":
                 return
             if self.mode == "denied":
@@ -272,6 +294,21 @@ class RootRuntimeClientTests(unittest.TestCase):
                     "authorization_expires_at": int(time.time()) + (2 if self.mode == "heartbeat" else 120)}))
                 if self.mode == "heartbeat":
                     self.assertTrue(self.heartbeat_seen.wait(5))
+            if self.mode == "operating" and operation == "run":
+                case = self.operating_case
+                uuid = "12345678-1234-1234-1234-123456789abc"
+                connected.sendall(frame({"schema": 2, "type": "operating-ready", "operation": "run",
+                    "lease_id": LEASE, "case": case, "instance_uuid": uuid}))
+                if case == "broker-cancel":
+                    self.assertTrue(self.heartbeat_seen.wait(5), "client must request genuine broker cancel only after READY")
+                receipt = {"schema": 1, "kind": "operating", "case": case, "selector": "operating-" + case,
+                    "run_id": 501, "run_attempt": 1, "source_sha": "e" * 40, "controller_sha": "c" * 40,
+                    "lease_id": LEASE, "instance_uuid": uuid, "raw_exit": {"code": 23 if case == "failure" else 143, "signal": None},
+                    "vm_state": "stopped", "access": "withdrawn", "retention_seconds": 14400,
+                    "terminal_at": None, "retain_until": None, "cutoff": None, "state": "safety-proved-retention-armed"}
+                connected.sendall(frame({"schema": 2, "type": "operating-terminal", "operation": "run", "lease_id": LEASE,
+                                         "receipt": receipt}))
+                return
             value = terminal(operation)
             value["cleanup"] = {"state": self.cleanup_state}
             if self.mode == "drift":
@@ -302,11 +339,78 @@ class RootRuntimeClientTests(unittest.TestCase):
         finally:
             connected.close()
 
+    def test_final_receipt_real_eddsa_requires_installed_pin_and_exact_original_native_tuple(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+        key = Ed25519PrivateKey.generate()
+        public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        config = {"schema": 2, "socket_path": str(self.path), "signing_public_key_hex": public.hex()}
+        self.config.write_text(json.dumps(config)); self.config.chmod(0o644)
+        now = int(time.time())
+        payload = {"schema": 1, "purpose": "urn:lightning-it:g06:final-quality:v1", "state": "closed",
+            "lease_id": LEASE, "repository": "ltn-it/ansible-collection-supplementary", "repository_id": 1103407173,
+            "run_id": 501, "run_attempt": 1, "source_sha": "e" * 40, "controller_sha": "c" * 40,
+            "profile": "heavy", "scenario": "fixture_heavy", "target": "ubuntu24.04",
+            "execution": {"job_id": 904, "check_run_id": 732, "conclusion": "success", "completed_at": now - 10},
+            "artifact": {"id": 991, "name": "quality-result-fixture_heavy-ubuntu24.04-e-1", "digest_sha256": "a" * 64,
+                         "size_in_bytes": 100}, "capture_receipt_sha256": "b" * 64,
+            "cleanup": {"state": "verified", "ledger_sha256": "d" * 64, "closed_at": now - 5,
+                        "resource_absence_sha256": "f" * 64}, "custody_policy_sha256": "a" * 64,
+            "cell_sha256": "b" * 64, "engine_policy_sha256": "c" * 64, "signer_public_key_hex": public.hex(), "issued_at": now}
+        def signed(value):
+            encode = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+            header = {"alg": "EdDSA", "typ": "lit-incus-final-quality+jwt", "kid": hashlib.sha256(public).hexdigest()}
+            message = encode(json.dumps(header, sort_keys=True, separators=(",", ":")).encode()) + "." + encode(
+                json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+            return {"schema": 1, "receipt": value, "signature": message + "." + encode(key.sign(message.encode()))}
+        with mock.patch.dict(os.environ, {"GITHUB_SHA": "e" * 40, "GITHUB_REPOSITORY_ID": "1103407173"}):
+            envelope = signed(payload)
+            self.assertEqual(client._final_receipt(envelope, "heavy", "fixture_heavy", "ubuntu24.04"), payload)
+            for change in ({"run_id": 502}, {"run_attempt": True}, {"signer_public_key_hex": "0" * 64},
+                           {"cleanup": {**payload["cleanup"], "closed_at": now - 20}}):
+                with self.subTest(change=change), self.assertRaises(client.ClientDenied):
+                    client._final_receipt(signed({**payload, **change}), "heavy", "fixture_heavy", "ubuntu24.04")
+            altered = {**envelope, "receipt": {**payload, "run_id": 502}}
+            with self.assertRaises(client.ClientDenied):
+                client._final_receipt(altered, "heavy", "fixture_heavy", "ubuntu24.04")
+            foreign = Ed25519PrivateKey.generate().public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+            self.config.write_text(json.dumps({**config, "signing_public_key_hex": foreign.hex()}))
+            with self.assertRaises(client.ClientDenied):
+                client._final_receipt(envelope, "heavy", "fixture_heavy", "ubuntu24.04")
+
+    def test_operating_failure_and_broker_case_require_root_ready_and_publish_no_quality_pass(self):
+        self.mode = "operating"
+        output = self.output()
+        with mock.patch.dict(os.environ, {"GITHUB_SHA": "e" * 40}):
+            for case in ("failure", "broker-cancel"):
+                self.operating_case = case
+                result = client.run_operating(case)
+                self.assertEqual(result["state"], "safety-proved-retention-armed")
+                receipt = json.loads(Path(result["operating_receipt"]).read_bytes())
+                self.assertEqual(receipt["case"], case)
+                self.assertIsNone(receipt["terminal_at"])
+                self.assertNotIn("quality", result["operating_artifact"])
+        self.assertEqual([request[0]["operation"] for request in self.requests], ["run", "run", "cancel"])
+        self.assertEqual(self.requests[-1][1]["lease_id"], LEASE)
+        self.assertNotIn("final-quality", output.read_text())
+        self.assertFalse(self.errors)
+
     def test_check_is_local_only_no_oidc_authentication_or_lease(self):
         result = client.check()
         self.assertEqual(result["state"], "local-prerequisites-only")
         self.auth._oidc.assert_not_called()
         self.assertEqual(self.requests, [])
+
+    def test_private_intake_is_separate_connection_and_fresh_oidc_before_actual_run(self):
+        self.mode = "intake"
+        result = client.run_cell("registered-cell")
+        self.assertTrue(result["transport_only"])
+        self.assertEqual(len(self.requests), 2)
+        self.assertNotIn("configuration", self.requests[0][0])
+        self.assertEqual(self.requests[1][0]["configuration"], "f" * 64)
+        self.assertEqual(self.auth._oidc.call_args_list,
+            [mock.call(self.auth.AUDIENCE + "a" * 64), mock.call(self.auth.AUDIENCE + NONCE)])
+        self.assertFalse(self.errors)
 
     def test_same_socket_challenge_auth_and_complete_capture_is_transport_only(self):
         result = client.run_cell("registered-cell")
@@ -438,6 +542,20 @@ class RootRuntimeClientTests(unittest.TestCase):
             with redirect_stdout(stream):
                 self.assertEqual(client.main(["run-cell", "--selector", "registered-cell"]), 1)
             self.assertIn("package-directory=", output.read_text())
+
+    def test_pending_execution_returns_only_typed_preliminary_success_with_cleanup_still_held(self):
+        output = self.output()
+        self.payload = full_evidence(pending=True)
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            self.assertEqual(client.main(["run-cell", "--selector", "registered-cell"]), 0)
+        value = json.loads(stream.getvalue())
+        self.assertEqual(value["root_finalization"], "pending")
+        self.assertEqual(value["cleanup"], {"state": "hold"})
+        self.assertIn("execution-state=awaiting-native-end", output.read_text())
+        self.payload = full_evidence(pending=True, failed=True)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(client.main(["run-cell", "--selector", "registered-cell"]), 1)
 
     def test_incomplete_policy_and_corrupt_source_checksum_never_publish(self):
         output = self.output()

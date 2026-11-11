@@ -5,7 +5,7 @@
 - name: Prepare explicitly selected disabled runtime-v2 files
   when: github_runner_runtime_v2_install
   vars:
-    github_runner_runtime_v2_assets:
+    github_runner_runtime_v2_base_assets:
       - template: runtime_v2/entry.py.j2
         path: /usr/local/lib/lit-incus-runtime-v2/runtime_v2_entry.py
         mode: "0600"
@@ -30,6 +30,50 @@
         path: /usr/lib/tmpfiles.d/lit-incus-runtime-v2.conf
         mode: "0644"
         sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/tmpfiles.j2') | hash('sha256') }}"
+    github_runner_runtime_v2_operating_assets:
+      - template: runtime_v2/operating_watchdog_entry.py.j2
+        path: /usr/local/lib/lit-incus-runtime-v2/operating_watchdog_entry.py
+        mode: "0600"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/operating_watchdog_entry.py.j2') | hash('sha256') }}"
+      - template: runtime_v2/operating_watchdog_anchor.json.j2
+        path: /etc/lit/incus-lease-issuer/operating-watchdog-anchor.json
+        mode: "0600"
+        sha256: >-
+          {{ lookup('ansible.builtin.template', 'runtime_v2/operating_watchdog_anchor.json.j2') | hash('sha256') }}
+      - template: runtime_v2/operating_watchdog.service.j2
+        path: /etc/systemd/system/lit-incus-operating-watchdog.service
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/operating_watchdog.service.j2') | hash('sha256') }}"
+      - template: runtime_v2/operating_watchdog.timer.j2
+        path: /etc/systemd/system/lit-incus-operating-watchdog.timer
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/operating_watchdog.timer.j2') | hash('sha256') }}"
+      - template: runtime_v2/operating_mail_entry.py.j2
+        path: /usr/local/lib/lit-incus-runtime-v2/operating_mail_entry.py
+        mode: "0600"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/operating_mail_entry.py.j2') | hash('sha256') }}"
+      - template: runtime_v2/operating_mail_anchor.json.j2
+        path: /etc/lit/incus-lease-issuer/operating-mail-anchor.json
+        mode: "0600"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/operating_mail_anchor.json.j2') | hash('sha256') }}"
+      - template: runtime_v2/operating_mail.service.j2
+        path: /etc/systemd/system/lit-incus-operating-mail.service
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/operating_mail.service.j2') | hash('sha256') }}"
+      - template: runtime_v2/operating_mail.timer.j2
+        path: /etc/systemd/system/lit-incus-operating-mail.timer
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/operating_mail.timer.j2') | hash('sha256') }}"
+    github_runner_runtime_v2_assets: >-
+      {{ github_runner_runtime_v2_base_assets
+         + (github_runner_runtime_v2_operating_assets if github_runner_runtime_v2_operating_install else []) }}
+    github_runner_runtime_v2_operating_probe: >-
+      {{ {'watchdog_path': github_runner_runtime_v2_watchdog_configuration_path,
+          'watchdog_sha256': github_runner_runtime_v2_watchdog_configuration_sha256,
+          'mail_path': github_runner_runtime_v2_mail_configuration_path,
+          'mail_sha256': github_runner_runtime_v2_mail_configuration_sha256,
+          'helper_sha256': github_runner_runtime_v2_mail_helper_sha256}
+         if github_runner_runtime_v2_operating_install else none }}
   block:
     - name: Require complete source-package module inventory
       ansible.builtin.assert:
@@ -65,6 +109,18 @@
             == lookup('ansible.builtin.file', role_path ~ '/files/incus_job_client.py', rstrip=false) | hash('sha256')
       changed_when: false
 
+    - name: Require complete as-built pure mail helper hashes
+      ansible.builtin.assert:
+        that:
+          - >-
+            item.value == lookup('ansible.builtin.file',
+            role_path ~ '/files/' ~ item.key, rstrip=false) | hash('sha256')
+      loop: "{{ github_runner_runtime_v2_mail_helper_sha256 | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+      when: github_runner_runtime_v2_operating_install
+
     - name: Refuse active unknown foreign or unsealed target state before copying
       ansible.builtin.command:
         argv:
@@ -80,6 +136,8 @@
           - "{{ github_runner_runtime_v2_module_sha256 | to_json }}"
           - "{{ github_runner_runtime_v2_client_sha256 | to_json }}"
           - "{{ github_runner_runtime_v2_assets | items2dict(key_name='path', value_name='sha256') | to_json }}"
+          - "{{ github_runner_runtime_v2_signing_public_key_hex }}"
+          - "{{ github_runner_runtime_v2_operating_probe | to_json }}"
       changed_when: false
       check_mode: false
       no_log: true
@@ -105,6 +163,31 @@
       loop_control:
         label: "{{ item.path }}"
       when: not ansible_check_mode
+
+    - name: Create private operating mail helper directory
+      ansible.builtin.file:
+        path: /usr/local/lib/lightning-it/incus-operating-mail-helper
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when:
+        - not ansible_check_mode
+        - github_runner_runtime_v2_operating_install
+
+    - name: Copy exactly pinned pure mail helper closure
+      ansible.builtin.copy:
+        src: "{{ item.key }}"
+        dest: "/usr/local/lib/lightning-it/incus-operating-mail-helper/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ github_runner_runtime_v2_mail_helper_sha256 | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when:
+        - not ansible_check_mode
+        - github_runner_runtime_v2_operating_install
 
     - name: Copy exactly pinned private runtime-v2 modules
       ansible.builtin.copy:
@@ -169,6 +252,8 @@
           - "{{ github_runner_runtime_v2_module_sha256 | to_json }}"
           - "{{ github_runner_runtime_v2_client_sha256 | to_json }}"
           - "{{ github_runner_runtime_v2_assets | items2dict(key_name='path', value_name='sha256') | to_json }}"
+          - "{{ github_runner_runtime_v2_signing_public_key_hex }}"
+          - "{{ github_runner_runtime_v2_operating_probe | to_json }}"
       changed_when: false
       no_log: true
       when: not ansible_check_mode

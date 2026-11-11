@@ -90,6 +90,22 @@ def sealed(path, expected=None, private=True):
         os.close(parent)
 
 
+def private_metadata(path):
+    """Check the existing signer without reading, hashing or exporting its bytes."""
+    parent = directory(str(PurePosixPath(path).parent))
+    try:
+        fd = os.open(PurePosixPath(path).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) == 0o600 and 0 < info.st_size <= 16384)
+            return info.st_dev, info.st_ino, info.st_size
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
 def state(unit):
     result = subprocess.run(["/usr/bin/systemctl", "show", "--no-pager", unit,
         "--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,DropInPaths"],
@@ -108,7 +124,9 @@ def state(unit):
 
 def inactive():
     require(not os.path.lexists(SOCKET))  # Foreign/stale socket is never removed/adopted.
-    for unit in ("lit-incus-runtime-v2.socket","lit-incus-runtime-v2@.service"):
+    for unit in ("lit-incus-runtime-v2.socket","lit-incus-runtime-v2@.service",
+                 "lit-incus-operating-watchdog.service", "lit-incus-operating-watchdog.timer",
+                 "lit-incus-operating-mail.service", "lit-incus-operating-mail.timer"):
         state(unit)
     result = subprocess.run(["/usr/bin/systemctl","list-units","--all","--plain","--no-legend","--no-pager",
         "lit-incus-runtime-v2@*.service"], stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
@@ -120,14 +138,24 @@ def inactive():
         state(unit)
 
 
-def configurations(path, digest, group):
+def configurations(path, digest, group, public_pin=None):
     runtime = decode(sealed(path,digest))
-    require(runtime["schema"] == 2 and type(runtime["schema"]) is int)
-    registry = decode(sealed(runtime["registry_path"],runtime["registry_sha256"]))
-    prep = decode(sealed(runtime["preparation_config_path"],runtime["preparation_config_sha256"]))
-    require(prep["registry_path"] == runtime["registry_path"] and prep["registry_sha256"] == runtime["registry_sha256"])
-    require(registry["api_read_token_path"] is None and 1 <= len(registry["cells"]) <= 2)
-    collector, service = registry["collector"], registry["collector"]["service"]
+    require(type(runtime["schema"]) is int)
+    bootstrap = runtime["schema"] == 1
+    if bootstrap:
+        require(set(runtime) == {"schema", "source_identity", "source_workflow_sha256", "collector", "ledger_path",
+                "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"})
+        prep, collector, store = runtime["preparation"], runtime["collector"], runtime["ledger_path"]
+        require(type(public_pin) is str and SHA.fullmatch(public_pin)
+                and public_pin == prep["signing_public_key_hex"])
+    else:
+        require(runtime["schema"] == 2 and public_pin in {None, ""})
+        registry = decode(sealed(runtime["registry_path"],runtime["registry_sha256"]))
+        prep = decode(sealed(runtime["preparation_config_path"],runtime["preparation_config_sha256"]))
+        require(prep["registry_path"] == runtime["registry_path"] and prep["registry_sha256"] == runtime["registry_sha256"])
+        require(registry["api_read_token_path"] is None and 1 <= len(registry["cells"]) <= 2)
+        collector, store = registry["collector"], registry["ledger_path"]
+    service = collector["service"]
     account, selected_group = pwd.getpwnam(service["service_user"]), grp.getgrnam(group)
     require(account.pw_uid > 0 and selected_group.gr_gid > 0 and account.pw_gid == selected_group.gr_gid
             and service["installation"]["service_uid"] == account.pw_uid)
@@ -145,16 +173,16 @@ def configurations(path, digest, group):
     sealed(service["installation"]["manifest_path"])
     for dropin in service["dropins"]:
         sealed(dropin["path"],dropin["sha256"],private=False)
-    for cell in registry["cells"].values():
-        body = decode(sealed(cell["cell_config_path"],cell["cell_sha256"]))
-        pin = body["incus"]["server_certificate"]
-        sealed(pin["path"],pin["sha256"])
+    if not bootstrap:
+        for cell in registry["cells"].values():
+            body = decode(sealed(cell["cell_config_path"],cell["cell_sha256"]))
+            pin = body["incus"]["server_certificate"]
+            sealed(pin["path"],pin["sha256"])
     for key in ("network_fence_policy", "host_api_fence_policy", "storage_quota_policy"):
         decode(sealed(prep[key+"_path"],prep[key+"_sha256"]))
-    sealed(prep["signing_key_path"])
+    private_metadata(prep["signing_key_path"])
     lock = sealed(prep["lock_path"])
     require(lock == b"")
-    store = registry["ledger_path"]
     marker = decode(sealed(store+"/.initialized"))
     state = decode(sealed(store+"/state.json"))
     sealed(store+"/lock")
@@ -170,7 +198,8 @@ def installed_files(module_pins, client_pins, desired, complete):
     if fd is not None:
         try:
             require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700
-                    and set(os.listdir(fd)) <= {"incus_lease_issuer","runtime_v2_entry.py"})
+                    and set(os.listdir(fd)) <= {"incus_lease_issuer"}
+                    | {PurePosixPath(path).name for path in desired if str(PurePosixPath(path).parent) == PRIVATE})
         finally:
             os.close(fd)
     package = PRIVATE+"/incus_lease_issuer"
@@ -189,18 +218,78 @@ def installed_files(module_pins, client_pins, desired, complete):
             sealed(target,digest,private=False)
     for target,digest in desired.items():
         if complete or os.path.lexists(target):
-            sealed(target,digest,private=target.startswith(PRIVATE) or target.endswith("runtime-v2-anchor.json"))
+            sealed(target,digest,private=target.startswith(PRIVATE) or target.endswith("-anchor.json")
+                   or target.startswith("/usr/local/lib/lightning-it/incus-operating-mail-helper/"))
+
+
+HELPERS = frozenset({"ephemeral_worker_local_mail.py", "ephemeral_worker_alarm.py", "ephemeral_worker_incus.py",
+                     "ephemeral_worker_lease.py", "ephemeral_worker_watchdog.py", "ephemeral_worker_admission.py"})
+HELPER_ROOT = "/usr/local/lib/lightning-it/incus-operating-mail-helper"
+BINDINGS_ROOT = "/var/lib/lightning-it/incus-operating-bindings"
+
+
+def operating_configuration(value, complete=False):
+    """Read-only bindings; never tick, submit mail, create a lease or activate units."""
+    require(type(value) is dict and set(value) == {"watchdog_path", "watchdog_sha256", "mail_path", "mail_sha256", "helper_sha256"}
+            and type(value["helper_sha256"]) is dict and set(value["helper_sha256"]) == HELPERS)
+    for digest in value["helper_sha256"].values():
+        require(type(digest) is str and SHA.fullmatch(digest))
+    configs = []
+    for label, extra in (("watchdog", {"bindings_directory", "max_entries"}), ("mail", {"helper_sha256"})):
+        raw = sealed(value[label+"_path"],value[label+"_sha256"])
+        config = decode(raw)
+        require(type(config) is dict and set(config) == {"schema", "source_machine_id", "source_boot_id", "spool_directory"} | extra
+                and type(config["schema"]) is int and config["schema"] == 1
+                and json.dumps(config,sort_keys=True,separators=(",",":"),allow_nan=False).encode() == raw)
+        require(config["source_machine_id"] == sealed("/etc/machine-id",private=False).decode("ascii").strip())
+        # procfs boot_id is a kernel-provided regular Root file with a reported size of zero.
+        fd = os.open("/proc/sys/kernel/random/boot_id", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            require(os.fstat(fd).st_uid == 0)
+            require(config["source_boot_id"] == os.read(fd,128).decode("ascii").strip())
+        finally:
+            os.close(fd)
+        for key in ({"spool_directory", "bindings_directory"} if label == "watchdog" else {"spool_directory"}):
+            fd = directory(config[key])
+            try:
+                require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700)
+            finally:
+                os.close(fd)
+        if label == "watchdog":
+            require(config["bindings_directory"] == BINDINGS_ROOT)
+            require(type(config["max_entries"]) is int and 1 <= config["max_entries"] <= 256)
+        else:
+            require(config["helper_sha256"] == value["helper_sha256"])
+        configs.append(config)
+    require(configs[0]["spool_directory"] == configs[1]["spool_directory"])
+    fd = directory(HELPER_ROOT,missing=not complete)
+    if fd is not None:
+        try:
+            require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700 and set(os.listdir(fd)) == HELPERS)
+        finally:
+            os.close(fd)
+        for name,digest in value["helper_sha256"].items():
+            sealed(HELPER_ROOT+"/"+name,digest)
+    if complete:
+        from incus_lease_issuer import operating_local_mail
+        # Verify the actual local-only MTA without sending or consuming an event.
+        operating_local_mail._local_only(operating_local_mail._helpers(value["helper_sha256"]))
+    return configs
 
 
 def main():
     try:
-        require(os.geteuid() == 0 and len(sys.argv) == 8)
+        require(os.geteuid() == 0 and len(sys.argv) in {8,9,10})
         phase,config_path,digest,group = sys.argv[1:5]
         require(phase in {"before","after"})
         module_pins,client_pins,desired = map(decode,sys.argv[5:8])
         require(module_pins and set(client_pins) == {"incus-runtime-client","incus_job_client.py"})
         inactive()
-        configurations(config_path,digest,group)
+        public_pin = sys.argv[8] if len(sys.argv) >= 9 else None
+        operating = decode(sys.argv[9]) if len(sys.argv) == 10 else None
+        if operating is not None:
+            operating_configuration(operating)
+        config = configurations(config_path,digest,group,public_pin)
         for path in (PRIVATE,PUBLIC,"/etc/lit/incus-lease-issuer","/etc/lightning-it",
                      "/run/lightning-it/incus-runtime-v2","/etc/systemd/system","/usr/lib/tmpfiles.d"):
             fd=directory(path,missing=True)
@@ -211,12 +300,21 @@ def main():
         if phase == "after":
             sys.dont_write_bytecode=True
             sys.path.insert(0,PRIVATE)
-            from incus_lease_issuer.runtime_rpc import RuntimeRPC
-            dispatcher = RuntimeRPC(config_path,digest)
-            from incus_lease_issuer import preparation, signed_context
-            root = preparation._config(dispatcher._config.preparation_config_path,
-                                       dispatcher._config.preparation_config_sha256)[0]
-            signed_context.RootSigner(root.signing_key_path,root.signing_public_key)
+            if config["schema"] == 1:
+                from incus_lease_issuer.run_factory import load_bootstrap
+                selected = load_bootstrap(config_path,digest)
+                require(selected.value["preparation"]["signing_public_key_hex"] == public_pin)
+                client = decode(sealed("/etc/lightning-it/incus-runtime-client.json",private=False))
+                require(client == {"schema":2,"socket_path":SOCKET,"signing_public_key_hex":public_pin})
+            else:
+                from incus_lease_issuer.runtime_rpc import RuntimeRPC
+                dispatcher = RuntimeRPC(config_path,digest)
+                from incus_lease_issuer import preparation
+                root = preparation._config(dispatcher._config.preparation_config_path,
+                                           dispatcher._config.preparation_config_sha256)[0]
+                private_metadata(root.signing_key_path)
+        if operating is not None and phase == "after":
+            operating_configuration(operating,complete=True)
         print("runtime-v2-disabled-installation-validated")
         return 0
     except Exception:

@@ -263,6 +263,26 @@ class RootSigner:
             raise Denied("context-signing-denied") from None
 
 
+    def issue_final_receipt(self, registry, selector, store, lease_id):
+        """Sign ONLY actual closed operating proof, never a supplied payload.
+
+        The original provisioned public pin is external authority. This new
+        purpose does not reissue expired engine access or sign pending quality.
+        """
+        from . import operating_custody
+        payload = operating_custody.final_receipt_payload(registry, selector, store, lease_id,
+                                                         self._public.hex())
+        key = self._load()
+        header = {"alg": "EdDSA", "typ": "lit-incus-final-quality+jwt",
+                  "kid": hashlib.sha256(self._public).hexdigest()}
+        signing = _base(ledger.canonical(header)) + "." + _base(ledger.canonical(payload))
+        expected = operating_custody.final_receipt_payload(registry, selector, store, lease_id,
+                                                          self._public.hex(), issued_at=payload["issued_at"])
+        require(expected == payload, "final-receipt-provenance-drift")
+        token = signing + "." + _base(key.sign(signing.encode("ascii")))
+        return {"schema": 1, "receipt": payload, "signature": token}
+
+
 def _decode_signed(token, pinned_public_key):
     require(type(token) is str and 0 < len(token) <= 16384, "context-token-size")
     pieces = token.split(".")

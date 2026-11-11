@@ -447,6 +447,35 @@ class RootAdmissionBridgeTests(unittest.TestCase):
                 admission._require_native(proof, server, self.policy)
 
 
+    def test_intake_ticket_revalidates_actual_assignment_without_extending_original_expiry(self):
+        body = self.admit_body(self.challenge())
+        before = (self.store_path / "state.json").read_bytes()
+        with _pair() as (server, client), _pair() as (other, unused):
+            ticket = admission.verify_intake_native(server, self.policy, body["nonce"], body["token"], body["api_token"])
+            worker, who, remaining = admission.require_intake_native(
+                ticket, server, self.policy, body["token"], body["api_token"])
+            self.assertEqual(worker, self.worker)
+            self.assertGreater(remaining, 0)
+            self.assertLessEqual(remaining, who.valid_until - fixtures.NOW - 31)
+            self.assertNotIn(body["token"], repr(ticket))
+            self.assertNotIn(body["api_token"], repr(ticket))
+            for supplied, socket in ((replace(ticket), server), (ticket, other)):
+                with self.assertRaises(Denied):
+                    admission.require_intake_native(supplied, socket, self.policy, body["token"], body["api_token"])
+            with mock.patch.object(admission.time, "monotonic", return_value=ticket.expires_monotonic + 1):
+                with self.assertRaises(Denied):
+                    admission.require_intake_native(ticket, server, self.policy, body["token"], body["api_token"])
+        self.assertEqual((self.store_path / "state.json").read_bytes(), before)
+
+    def test_intake_ticket_rechecks_provider_and_rejects_ended_original_job(self):
+        body = self.admit_body(self.challenge())
+        with _pair() as (server, client):
+            ticket = admission.verify_intake_native(server, self.policy, body["nonce"], body["token"], body["api_token"])
+            self.fixture.job.update(status="completed", conclusion="success")
+            with self.assertRaises(Denied):
+                admission.require_intake_native(ticket, server, self.policy, body["token"], body["api_token"])
+
+
 class _pair:
     def __init__(self, kind=socket.SOCK_STREAM):
         self.kind = kind

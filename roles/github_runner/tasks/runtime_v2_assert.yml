@@ -3,6 +3,10 @@
   ansible.builtin.assert:
     that:
       - github_runner_runtime_v2_install is boolean
+      - github_runner_runtime_v2_bootstrap is boolean
+      - github_runner_runtime_v2_operating_install is boolean
+      - not github_runner_runtime_v2_operating_install or github_runner_runtime_v2_install
+      - not github_runner_runtime_v2_operating_install or github_runner_runtime_v2_bootstrap
     fail_msg: Runtime-v2 installation must be explicitly selected with a boolean.
   changed_when: false
 
@@ -24,6 +28,17 @@
     fail_msg: >-
       Runtime-v2 requires an existing sealed configuration, explicit as-built module/client hashes,
       and an existing dedicated protected-runner group. Installation is not activation authority.
+  changed_when: false
+  when: github_runner_runtime_v2_install
+
+- name: Require independent public signer pin for bootstrap observer verification
+  ansible.builtin.assert:
+    that:
+      - >-
+        (github_runner_runtime_v2_bootstrap
+        and github_runner_runtime_v2_signing_public_key_hex is match('^[0-9a-f]{64}$'))
+        or (not github_runner_runtime_v2_bootstrap and github_runner_runtime_v2_signing_public_key_hex == '')
+    fail_msg: Bootstrap mode requires the independently verified public signer pin, never private key bytes.
   changed_when: false
   when: github_runner_runtime_v2_install
 
@@ -51,3 +66,40 @@
     label: "{{ item.key }}"
   changed_when: false
   when: github_runner_runtime_v2_install
+
+- name: Validate explicit disabled operating observer installation inputs
+  ansible.builtin.assert:
+    that:
+      - github_runner_runtime_v2_mail_helper_sha256 is mapping
+      - >-
+        github_runner_runtime_v2_mail_helper_sha256.keys() | list | sort
+        == ['ephemeral_worker_admission.py', 'ephemeral_worker_alarm.py', 'ephemeral_worker_incus.py',
+            'ephemeral_worker_lease.py', 'ephemeral_worker_local_mail.py', 'ephemeral_worker_watchdog.py']
+    fail_msg: Operating observers require exactly the six pinned pure mail helper files.
+  changed_when: false
+  when: github_runner_runtime_v2_operating_install
+
+- name: Validate explicit operating observer configuration locators
+  ansible.builtin.assert:
+    that:
+      - item.path is match('^/[A-Za-z0-9_./-]+$')
+      - not (item.path | regex_search('(^|/)\.\.?(/|$)|//'))
+      - item.sha256 is match('^[0-9a-f]{64}$')
+  loop:
+    - path: "{{ github_runner_runtime_v2_watchdog_configuration_path }}"
+      sha256: "{{ github_runner_runtime_v2_watchdog_configuration_sha256 }}"
+    - path: "{{ github_runner_runtime_v2_mail_configuration_path }}"
+      sha256: "{{ github_runner_runtime_v2_mail_configuration_sha256 }}"
+  changed_when: false
+  when: github_runner_runtime_v2_operating_install
+
+- name: Validate operating mail helper digest pins
+  ansible.builtin.assert:
+    that:
+      - item.value is string
+      - item.value is match('^[0-9a-f]{64}$')
+  loop: "{{ github_runner_runtime_v2_mail_helper_sha256 | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+  when: github_runner_runtime_v2_operating_install
