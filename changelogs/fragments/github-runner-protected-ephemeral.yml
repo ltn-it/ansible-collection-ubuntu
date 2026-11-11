@@ -1,0 +1,6 @@
+---
+minor_changes:
+  - >-
+    github_runner - allow fresh protected entries to request ephemeral registration,
+    verify the persisted lifecycle flag before service publication, and refuse a
+    second start after an ephemeral listener exits.

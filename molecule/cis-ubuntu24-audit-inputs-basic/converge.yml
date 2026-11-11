@@ -1,0 +1,23 @@
+---
+- name: Require offline archive admission before checkout or vendor access
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Exercise a missing offline archive without mutating the controller
+      block:
+        - name: Invoke the real archive admission tasks with an absent artifact
+          ansible.builtin.include_role:
+            name: lit.ubuntu.cis_ubuntu24
+            tasks_from: audit_archive.yml
+          vars:
+            audit_conf_source: /nonexistent-reviewed-audit.tar.gz  # noqa: var-naming[no-role-prefix]
+            audit_conf_dest: /nonexistent-reviewed-audit-target  # noqa: var-naming[no-role-prefix]
+            cis_ubuntu24_audit_transport_sha256: '{{ "0" * 64 }}'
+        - name: Refuse unexpected admission of absent content
+          ansible.builtin.fail:
+            msg: An absent audit archive was accepted.
+      rescue:
+        - name: Require rejection before canonical target inspection or execution
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Require the independently admitted audit transport digest'

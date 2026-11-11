@@ -1,0 +1,8 @@
+---
+local_mail_enabled: false
+local_mail_initialize: false
+local_mail_install_packages: true
+local_mail_manage_service: true
+local_mail_package_version: ""
+local_mail_package_file: ""
+local_mail_package_sha256: ""

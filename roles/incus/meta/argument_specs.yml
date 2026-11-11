@@ -1,5 +1,14 @@
 ---
 argument_specs:
+  runtime_packages:
+    short_description: Run one explicitly reviewed Incus and container-engine package transaction
+    options:
+      incus_runtime_packages_request_path:
+        type: path
+        required: true
+      incus_runtime_packages_request_sha256:
+        type: str
+        required: true
   main:
     short_description: Install and configure Incus on Ubuntu
     options:

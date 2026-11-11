@@ -1,0 +1,30 @@
+---
+- name: Exercise the side-effect-free AIDE input contract
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Accept the declared native target facts without changing the controller
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: aide_target_assert.yml
+      vars:
+        ansible_facts:
+          distribution: Ubuntu
+          distribution_major_version: '24'
+          service_mgr: systemd
+
+    - name: Accept absent optional policy without changing the controller
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: aide_assert.yml
+
+    - name: Accept a declared mutable-data policy
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: aide_assert.yml
+      vars:
+        cis_ubuntu24_aide_exclusions:
+          - path: /var/lib/example/overlay
+            reason: Mutable overlay data.
+          - path: /srv/services/example/data
+            reason: Mutable application data.

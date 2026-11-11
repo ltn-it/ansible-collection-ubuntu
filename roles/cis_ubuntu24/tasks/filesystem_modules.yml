@@ -1,0 +1,85 @@
+---
+- name: Validate module policy inputs at the preparation entrypoint
+  ansible.builtin.import_tasks: filesystem_modules_assert.yml
+
+- name: Verify live dependencies before changing module configuration
+  ansible.builtin.import_tasks: filesystem_modules_preflight.yml
+
+- name: Inspect the native module configuration directory
+  ansible.builtin.stat:
+    path: /etc/modprobe.d
+    follow: false
+    get_checksum: false
+  register: cis_ubuntu24_filesystem_directory
+
+- name: Require a safe root-owned native module configuration directory
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_filesystem_directory.stat.isdir | default(false)
+      - not (cis_ubuntu24_filesystem_directory.stat.islnk | default(false))
+      - cis_ubuntu24_filesystem_directory.stat.uid == 0
+      - cis_ubuntu24_filesystem_directory.stat.gid == 0
+      - cis_ubuntu24_filesystem_directory.stat.mode in ['0755', '0750', '0700']
+
+- name: Inspect only the owned unused-filesystem fragment
+  ansible.builtin.stat:
+    path: /etc/modprobe.d/60-lit-unused-filesystems.conf
+    follow: false
+    checksum_algorithm: sha256
+  register: cis_ubuntu24_filesystem_previous
+
+- name: Read the prior regular fragment for ownership verification and rollback
+  when: cis_ubuntu24_filesystem_previous.stat.isreg | default(false)
+  ansible.builtin.slurp:
+    src: /etc/modprobe.d/60-lit-unused-filesystems.conf
+  register: cis_ubuntu24_filesystem_previous_content
+
+- name: Refuse foreign or unsafe existing module configuration
+  ansible.builtin.assert:
+    that:
+      - >-
+        not cis_ubuntu24_filesystem_previous.stat.exists
+        or
+        (
+          cis_ubuntu24_filesystem_previous.stat.isreg | default(false)
+          and not (cis_ubuntu24_filesystem_previous.stat.islnk | default(false))
+          and cis_ubuntu24_filesystem_previous.stat.nlink == 1
+          and cis_ubuntu24_filesystem_previous.stat.uid == 0
+          and cis_ubuntu24_filesystem_previous.stat.gid == 0
+          and cis_ubuntu24_filesystem_previous.stat.mode == '0644'
+          and
+          (cis_ubuntu24_filesystem_previous_content.content | default('') | b64decode)
+          is match('^# Managed by lit[.]ubuntu[.]cis_ubuntu24; unused filesystem modules[.]')
+        )
+
+- name: Install and verify only the reviewed unused-filesystem fragment
+  block:
+    - name: Render the root-owned non-executable filesystem module policy
+      ansible.builtin.template:
+        src: filesystem-modules.conf.j2
+        dest: /etc/modprobe.d/60-lit-unused-filesystems.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Verify the effective module policy before upstream execution
+      ansible.builtin.import_tasks: filesystem_modules_verify.yml
+  rescue:
+    - name: Restore the exact previous owned module policy
+      when: cis_ubuntu24_filesystem_previous.stat.exists
+      ansible.builtin.copy:
+        content: "{{ cis_ubuntu24_filesystem_previous_content.content | b64decode }}"
+        dest: /etc/modprobe.d/60-lit-unused-filesystems.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Remove only the newly created module policy
+      when: not cis_ubuntu24_filesystem_previous.stat.exists
+      ansible.builtin.file:
+        path: /etc/modprobe.d/60-lit-unused-filesystems.conf
+        state: absent
+
+    - name: Stop without loading or unloading any kernel module
+      ansible.builtin.fail:
+        msg: Effective module policy validation failed; the owned fragment was restored without changing kernel modules.

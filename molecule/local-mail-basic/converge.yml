@@ -1,0 +1,28 @@
+---
+- name: Validate local mail default and fail-fast contract without a service
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Preserve disabled local mail behavior
+      ansible.builtin.include_role:
+        name: lit.ubuntu.local_mail
+
+    - name: Reject enabled local mail without an exact package version
+      block:
+        - name: Run actual role prechecks with missing version
+          ansible.builtin.include_role:
+            name: lit.ubuntu.local_mail
+          vars:
+            local_mail_enabled: true
+            local_mail_package_version: ""
+        - name: Reject an unexpectedly accepted version
+          ansible.builtin.fail:
+            msg: Missing version unexpectedly accepted.
+      rescue:
+        - name: Require the exact role version failure before target changes
+          ansible.builtin.assert:
+            that:
+              - >-
+                ansible_failed_result.msg ==
+                'Supply the exact approved Ubuntu Postfix version before enabling local mail.'
+            quiet: true

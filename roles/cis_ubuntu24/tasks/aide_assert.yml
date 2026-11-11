@@ -1,0 +1,63 @@
+---
+- name: Validate AIDE exclusion and rebaseline container types
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_aide_exclusions is sequence
+      - cis_ubuntu24_aide_exclusions is not string
+      - cis_ubuntu24_aide_exclusions is not mapping
+      - cis_ubuntu24_aide_rebaseline is mapping
+    fail_msg: AIDE exclusions must be a list and rebaseline must be a mapping.
+
+- name: Validate narrowly scoped AIDE mutable directory exclusions
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | sort == ['path', 'reason']
+      - item.path is string
+      - item.path is match('^/([A-Za-z0-9_][A-Za-z0-9_.-]*/){2,}[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - item.path.split('/') | intersect(['.', '..']) | length == 0
+      - not (item.path is match('^/(etc|usr|bin|sbin|boot|lib|lib64|root|home|proc|sys|dev|run)(/|$)'))
+      - item.reason is string
+      - item.reason | trim | length > 0
+      - item.reason | regex_search('[\x00-\x1f\x7f]') is none
+    fail_msg: >-
+      AIDE exclusions require exact normalized mutable data directories with
+      at least three components and a single-line reason; system trees,
+      traversal, wildcards, trailing slashes and unknown fields are rejected.
+  loop: "{{ cis_ubuntu24_aide_exclusions }}"
+  loop_control:
+    label: "{{ item.path | default('<invalid path>') }}"
+
+- name: Reject duplicate AIDE exclusion paths
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cis_ubuntu24_aide_exclusions | map(attribute='path') | unique | length)
+        == (cis_ubuntu24_aide_exclusions | length)
+    fail_msg: AIDE exclusion paths must be unique.
+
+- name: Validate optional exact AIDE rebaseline approval binding
+  when: cis_ubuntu24_aide_rebaseline | length > 0
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_aide_rebaseline.keys() | sort == ['approval_reference', 'database_sha256', 'exclusions_sha256']
+      - cis_ubuntu24_aide_rebaseline.database_sha256 is string
+      - cis_ubuntu24_aide_rebaseline.exclusions_sha256 is string
+      - cis_ubuntu24_aide_rebaseline.database_sha256 is match('^[a-f0-9]{64}$')
+      - cis_ubuntu24_aide_rebaseline.exclusions_sha256 is match('^[a-f0-9]{64}$')
+      - cis_ubuntu24_aide_rebaseline.approval_reference is string
+      - cis_ubuntu24_aide_rebaseline.approval_reference | trim | length > 0
+      - cis_ubuntu24_aide_rebaseline.approval_reference | regex_search('[\x00-\x1f\x7f]') is none
+    fail_msg: AIDE rebaseline requires the exact database and exclusion SHA256 values and a reviewed approval reference.
+
+- name: Require a real apply for guarded AIDE preparation
+  when:
+    - cis_ubuntu24_execution_mode == 'remediate'
+    - cis_ubuntu24_aide_exclusions | length > 0
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+    fail_msg: >-
+      Guarded AIDE preparation requires an actual apply on the isolated test
+      target before delivery; check mode cannot validate package installation
+      or the installed parser and is rejected before mutations.

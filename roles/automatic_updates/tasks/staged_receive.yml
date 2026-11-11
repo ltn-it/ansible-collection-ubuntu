@@ -1,0 +1,102 @@
+---
+- name: Validate independent receiver identity archive digest and fresh private destination
+  ansible.builtin.assert:
+    that:
+      - automatic_updates_staged_expected_machine_id is match('^[0-9a-f]{32}$')
+      - automatic_updates_staged_expected_archive_sha256 is match('^[0-9a-f]{64}$')
+      - automatic_updates_staged_delivery_directory is match('^/[^\n\r]+$')
+      - automatic_updates_staged_receive_directory is match('^/[^\n\r]+$')
+      - not ansible_check_mode
+
+- name: Read target receiver identity before any staged write
+  ansible.builtin.slurp:
+    src: /etc/machine-id
+  register: automatic_updates_staged_receiver_identity
+
+- name: Require the independently admitted receiver
+  ansible.builtin.assert:
+    that:
+      - >-
+        automatic_updates_staged_receiver_identity.content | b64decode | trim ==
+        automatic_updates_staged_expected_machine_id
+
+- name: Inspect the authenticated archive on the controller without accepting its signatures
+  ansible.builtin.command:
+    argv:
+      - '{{ ansible_playbook_python }}'
+      - '{{ role_path }}/files/apt_staged_bundle.py'
+      - --inspect-archive
+      - '{{ automatic_updates_staged_delivery_directory }}/bundle.tar.gz'
+      - --request
+      - '{{ automatic_updates_staged_delivery_directory }}/request.json'
+      - --expected-archive-sha256
+      - '{{ automatic_updates_staged_expected_archive_sha256 }}'
+  register: automatic_updates_staged_archive_frame
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: Require the authenticated bundle to name the independently admitted target
+  ansible.builtin.assert:
+    that:
+      - >-
+        (automatic_updates_staged_archive_frame.stdout | from_json).machine_id ==
+        automatic_updates_staged_expected_machine_id
+
+- name: Read receiver capacity from the existing destination filesystem
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - 'import shutil,sys;print(shutil.disk_usage(sys.argv[1]).free)'
+      - '{{ automatic_updates_staged_receive_directory | dirname }}'
+  register: automatic_updates_staged_receiver_capacity
+  changed_when: false
+
+- name: Require capacity for archive decoded data and retained free-space reserve
+  ansible.builtin.assert:
+    that:
+      - >-
+        automatic_updates_staged_receiver_capacity.stdout | int >
+        (automatic_updates_staged_archive_frame.stdout | from_json).archive_bytes +
+        (automatic_updates_staged_archive_frame.stdout | from_json).unpacked_bytes + 134217728
+
+- name: Inspect prior receiver attempt without following links
+  ansible.builtin.stat:
+    path: '{{ automatic_updates_staged_receive_directory }}'
+    follow: false
+  register: automatic_updates_staged_receiver_previous
+
+- name: Refuse collision or replay of an existing receiver attempt
+  ansible.builtin.assert:
+    that: [not automatic_updates_staged_receiver_previous.stat.exists]
+
+- name: Create only the new protected receiver staging directory
+  ansible.builtin.file:
+    path: '{{ automatic_updates_staged_receive_directory }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Transfer only the admitted archive and independent request
+  ansible.builtin.copy:
+    src: '{{ automatic_updates_staged_delivery_directory }}/{{ item }}'
+    dest: '{{ automatic_updates_staged_receive_directory }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '0600'
+  loop: [request.json, bundle.tar.gz]
+
+- name: Decode and independently verify signed data without importing package state
+  ansible.builtin.script:
+    cmd: >-
+      {{ (role_path ~ '/files/apt_staged_bundle.py') | quote }}
+      --receive {{ (automatic_updates_staged_receive_directory ~ '/bundle.tar.gz') | quote }}
+      --request {{ (automatic_updates_staged_receive_directory ~ '/request.json') | quote }}
+      --bundle {{ (automatic_updates_staged_receive_directory ~ '/bundle') | quote }}
+      --expected-archive-sha256 {{ automatic_updates_staged_expected_archive_sha256 | quote }}
+      --expected-machine-id {{ automatic_updates_staged_expected_machine_id | quote }}
+    executable: /usr/bin/python3
+  register: automatic_updates_staged_reception
+  changed_when: true

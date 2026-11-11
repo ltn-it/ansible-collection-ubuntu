@@ -1,0 +1,171 @@
+---
+- name: Prepare the private physical handoff helper without runner effects
+  hosts: "{{ github_runner_physical_library_target | default('localhost') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    github_runner_physical_library_root: /usr/local/lib/github-runner-protected
+    github_runner_physical_library_source: "{{ playbook_dir }}/../roles/github_runner"
+  tasks:
+    - name: Require one selected physical host and an authorized operation reference
+      ansible.builtin.assert:
+        that:
+          - github_runner_physical_library_target is defined
+          - github_runner_physical_library_target is string
+          - github_runner_physical_library_target is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
+          - github_runner_physical_library_target not in ['all', 'ungrouped', 'localhost', '127.0.0.1']
+          - ansible_play_hosts_all == [github_runner_physical_library_target]
+          - github_runner_physical_library_machine_id | default('') is match('^[0-9a-f]{32}$')
+          - github_runner_physical_library_operation_reference | default('') | trim | length > 0
+          - github_runner_physical_library_root == '/usr/local/lib/github-runner-protected'
+          - github_runner_physical_library_source == playbook_dir ~ '/../roles/github_runner'
+        fail_msg: Helper preparation requires one bound physical host and an authorized operation reference.
+
+    - name: Read the actual selected machine identity
+      ansible.builtin.slurp:
+        src: /etc/machine-id
+      register: github_runner_physical_library_actual_machine
+
+    - name: Require the exact selected machine
+      ansible.builtin.assert:
+        that:
+          - >-
+            github_runner_physical_library_actual_machine.content | b64decode | trim
+            == github_runner_physical_library_machine_id
+
+    - name: Initialize the exact source-package helper inventory
+      ansible.builtin.set_fact:
+        github_runner_physical_library_files:
+          protected_provision.py: >-
+            {{ lookup('ansible.builtin.file', github_runner_physical_library_source
+            ~ '/templates/protected_provision.py.j2', rstrip=false) | hash('sha256') }}
+
+    - name: Bind all packaged private Python modules
+      ansible.builtin.set_fact:
+        github_runner_physical_library_files: >-
+          {{ github_runner_physical_library_files | combine({
+          'incus_lease_issuer/' ~ (item | basename):
+          lookup('ansible.builtin.file', item, rstrip=false) | hash('sha256')}) }}
+      loop: >-
+        {{ lookup('ansible.builtin.fileglob', github_runner_physical_library_source
+        ~ '/files/incus_lease_issuer/*.py', wantlist=true) | sort }}
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Require a complete as-built helper inventory
+      ansible.builtin.assert:
+        that:
+          - github_runner_physical_library_files | length > 10
+          - "'incus_lease_issuer/native_fence.py' in github_runner_physical_library_files"
+          - "'incus_lease_issuer/registration_service.py' in github_runner_physical_library_files"
+
+    - name: Bind the preparation receipt and read-only verifier
+      ansible.builtin.set_fact:
+        github_runner_physical_library_binding:
+          schema: 1
+          machine_id: "{{ github_runner_physical_library_machine_id }}"
+          operation_reference: "{{ github_runner_physical_library_operation_reference }}"
+          files: "{{ github_runner_physical_library_files }}"
+        github_runner_physical_library_probe: |
+          import hashlib,json,os,stat,sys
+          from pathlib import Path
+          expected=json.loads(sys.stdin.read());base=Path('/usr/local/lib/github-runner-protected')
+          assert os.geteuid()==0 and Path('/etc/machine-id').read_text().strip()==expected['machine_id']
+          for path in (base.parent,*base.parent.parents):
+              s=path.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022
+          if not os.path.lexists(base):
+              assert sys.argv[1]=='before';print(json.dumps({'fresh':True}));raise SystemExit(0)
+          s=base.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700
+          receipt=base/'.library-binding.json'
+          if os.path.lexists(receipt):
+              s=receipt.lstat()
+              assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1
+              assert stat.S_IMODE(s.st_mode)==0o600 and s.st_size<65536
+              assert json.loads(receipt.read_bytes())==expected
+          else:
+              assert sys.argv[1]=='after','Uncertain or foreign helper directory; do not overwrite'
+          files=set();directories=set()
+          for root,children,leaves in os.walk(base,followlinks=False):
+              for name in children:
+                  p=Path(root)/name;s=p.lstat()
+                  assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022
+                  directories.add(p.relative_to(base).as_posix())
+              for name in leaves:
+                  p=Path(root)/name;relative=p.relative_to(base).as_posix();s=p.lstat()
+                  assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and not s.st_mode&0o022
+                  if relative=='.library-binding.json':continue
+                  assert relative in expected['files'],'Unrecognized helper asset; do not overwrite'
+                  assert hashlib.sha256(p.read_bytes()).hexdigest()==expected['files'][relative]
+                  if relative=='protected_provision.py':assert stat.S_IMODE(s.st_mode)==0o700
+                  files.add(relative)
+          assert files==set(expected['files']) and directories=={'incus_lease_issuer'}
+          print(json.dumps({'fresh':False,'files_verified':len(files),'runner_effects':False}))
+
+    - name: Refuse foreign or uncertain helper state before any effects
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -B, -c, "{{ github_runner_physical_library_probe }}", before]
+        stdin: "{{ github_runner_physical_library_binding | to_json }}"
+        stdin_add_newline: false
+      changed_when: false
+      check_mode: false
+      register: github_runner_physical_library_before
+
+    - name: Create the new private helper directory
+      ansible.builtin.file:
+        path: "{{ github_runner_physical_library_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Install exact packaged private modules
+      ansible.builtin.copy:
+        src: "{{ github_runner_physical_library_source }}/files/incus_lease_issuer"
+        dest: "{{ github_runner_physical_library_root }}/"
+        owner: root
+        group: root
+        mode: preserve
+        directory_mode: '0700'
+      when: not ansible_check_mode or not (github_runner_physical_library_before.stdout | from_json).fresh
+
+    - name: Install the literal private provisioner without invoking it
+      ansible.builtin.copy:
+        src: "{{ github_runner_physical_library_source }}/templates/protected_provision.py.j2"
+        dest: "{{ github_runner_physical_library_root }}/protected_provision.py"
+        owner: root
+        group: root
+        mode: '0700'
+      when: not ansible_check_mode or not (github_runner_physical_library_before.stdout | from_json).fresh
+
+    - name: Verify every installed byte and filesystem boundary
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -B, -c, "{{ github_runner_physical_library_probe }}", after]
+        stdin: "{{ github_runner_physical_library_binding | to_json }}"
+        stdin_add_newline: false
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Record the exact completed library preparation
+      ansible.builtin.copy:
+        content: "{{ github_runner_physical_library_binding | to_nice_json }}\n"
+        dest: "{{ github_runner_physical_library_root }}/.library-binding.json"
+        owner: root
+        group: root
+        mode: '0600'
+      when: not ansible_check_mode or not (github_runner_physical_library_before.stdout | from_json).fresh
+
+    - name: Verify the actual installed native CLI import boundary
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - >-
+            import sys; sys.path.insert(0, '/usr/local/lib/github-runner-protected');
+            from protected_provision import main; raise SystemExit(main())
+          - --help
+      changed_when: false
+      when: not ansible_check_mode

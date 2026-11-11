@@ -1,0 +1,33 @@
+---
+- name: Require rejection of the invalid input case
+  block:
+    - name: Exercise actual role input assertions
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: aide_assert.yml
+      vars:
+        cis_ubuntu24_aide_exclusions: "{{ cis_ubuntu24_test_case.exclusions | default([]) }}"
+        cis_ubuntu24_aide_rebaseline: "{{ cis_ubuntu24_test_case.rebaseline | default({}) }}"
+
+    - name: Reject an accidentally accepted invalid input
+      ansible.builtin.fail:
+        msg: Invalid AIDE input was unexpectedly accepted.
+  rescue:
+    - name: Verify rejection came from the role assertion
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_task.action == 'ansible.builtin.assert'
+          - "'Validate' in ansible_failed_task.name or 'Reject duplicate' in ansible_failed_task.name"
+          - >-
+            ansible_failed_result.msg.startswith('AIDE exclusions must')
+            or ansible_failed_result.msg.startswith('AIDE exclusions require')
+            or ansible_failed_result.msg.startswith('AIDE exclusion paths must')
+            or ansible_failed_result.msg.startswith('AIDE rebaseline requires')
+            or
+            (
+              ansible_failed_result.results | default([])
+              | selectattr('failed', 'defined')
+              | selectattr('failed') | map(attribute='msg')
+              | select('match', '^AIDE exclusions require')
+              | list | length > 0
+            )

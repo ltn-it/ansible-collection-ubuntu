@@ -1,0 +1,20 @@
+---
+- name: Validate the staged metadata verification interface
+  ansible.builtin.assert:
+    that:
+      - automatic_updates_staged_bundle is string
+      - automatic_updates_staged_bundle is match('^/[^\n\r]+$')
+      - automatic_updates_staged_request is string
+      - automatic_updates_staged_request is match('^/[^\n\r]+$')
+    fail_msg: An admitted absolute bundle directory and independent request file are required.
+
+- name: Verify the signed staged metadata without importing package state
+  ansible.builtin.script:
+    cmd: >-
+      {{ (role_path ~ '/files/apt_staged_bundle.py') | quote }}
+      --bundle {{ automatic_updates_staged_bundle | quote }}
+      --request {{ automatic_updates_staged_request | quote }}
+    executable: /usr/bin/python3
+  register: automatic_updates_staged_verification
+  changed_when: false
+  check_mode: false

@@ -1,0 +1,128 @@
+---
+- name: Validate the vendor execution path before archive admission
+  ansible.builtin.import_tasks: audit_execution_path.yml
+
+- name: Read the exact controller audit archive without following links
+  ansible.builtin.stat:
+    path: '{{ audit_conf_source }}'
+    follow: false
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: cis_ubuntu24_audit_archive_source
+
+- name: Require the independently admitted audit transport digest
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_audit_archive_source.stat.isreg | default(false)
+      - not (cis_ubuntu24_audit_archive_source.stat.islnk | default(false))
+      - >-
+        cis_ubuntu24_audit_archive_source.stat.checksum | default('') ==
+        cis_ubuntu24_audit_transport_sha256
+    fail_msg: Refusing an unbound or changed offline audit archive before vendor execution.
+
+- name: Require a canonical already staged audit checkout destination
+  ansible.builtin.command:
+    argv: [/usr/bin/realpath, -e, '--', '{{ audit_conf_dest }}/UBUNTU24-CIS-Audit']
+  register: cis_ubuntu24_audit_archive_realpath
+  changed_when: false
+
+- name: Inspect the staged audit directory and executable ownership
+  ansible.builtin.stat:
+    path: '{{ audit_conf_dest }}/UBUNTU24-CIS-Audit{{ item }}'
+    follow: false
+  loop: ['', /run_audit.sh]
+  register: cis_ubuntu24_audit_archive_checkout
+
+- name: Require the protected executable before any root audit invocation
+  ansible.builtin.assert:
+    that:
+      - >-
+        cis_ubuntu24_audit_archive_realpath.stdout ==
+        audit_conf_dest ~ '/UBUNTU24-CIS-Audit'
+      - cis_ubuntu24_audit_archive_checkout.results[0].stat.isdir | default(false)
+      - cis_ubuntu24_audit_archive_checkout.results[1].stat.isreg | default(false)
+      - not (item.stat.islnk | default(false))
+      - item.stat.uid == 0
+      - item.stat.gid == 0
+      - item.stat.mode == '0755'
+  loop: '{{ cis_ubuntu24_audit_archive_checkout.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+
+- name: Validate checkout ancestry and all Git metadata before invoking Git
+  ansible.builtin.script:
+    cmd: >-
+      {{ (role_path ~ '/files/audit_archive_matches_checkout.py') | quote }} --git-inputs
+      {{ (audit_conf_dest ~ '/UBUNTU24-CIS-Audit') | quote }}
+      {{ cis_ubuntu24_audit_dependency.commit | quote }}
+    executable: /usr/bin/python3
+  changed_when: false
+
+- name: Read actual staged commit origin and cleanliness without fetching remote content
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/bin/env', '-i', 'PATH=/usr/bin:/bin', 'HOME=/nonexistent',
+          'GIT_CONFIG_NOSYSTEM=1', 'GIT_CONFIG_GLOBAL=/dev/null', 'GIT_CONFIG_SYSTEM=/dev/null',
+          'GIT_CONFIG_COUNT=0', 'GIT_CONFIG_PARAMETERS=', 'GIT_ATTR_NOSYSTEM=1', 'GIT_NO_REPLACE_OBJECTS=1',
+          'GIT_DIR=' ~ audit_conf_dest ~ '/UBUNTU24-CIS-Audit/.git',
+          'GIT_COMMON_DIR=' ~ audit_conf_dest ~ '/UBUNTU24-CIS-Audit/.git',
+          'GIT_WORK_TREE=' ~ audit_conf_dest ~ '/UBUNTU24-CIS-Audit',
+          'GIT_INDEX_FILE=' ~ audit_conf_dest ~ '/UBUNTU24-CIS-Audit/.git/index',
+          'GIT_OBJECT_DIRECTORY=' ~ audit_conf_dest ~ '/UBUNTU24-CIS-Audit/.git/objects',
+          '/usr/bin/git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+          '-C', audit_conf_dest ~ '/UBUNTU24-CIS-Audit'] + item }}
+  loop:
+    - [rev-parse, --verify, 'HEAD^{commit}']
+    - [remote, get-url, origin]
+    - [status, --porcelain=v1, --untracked-files=all]
+  register: cis_ubuntu24_audit_archive_git
+  changed_when: false
+
+- name: Require the same exact reviewed audit revision and origin as Git mode
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_audit_archive_git.results[0].stdout | trim == cis_ubuntu24_audit_dependency.commit
+      - cis_ubuntu24_audit_archive_git.results[1].stdout | trim == cis_ubuntu24_audit_dependency.repository
+      - cis_ubuntu24_audit_archive_git.results[2].stdout | trim | length == 0
+    fail_msg: Offline transport does not relax the reviewed audit provenance.
+
+- name: Compare the transport with the admitted checkout without extracting over it
+  block:
+    - name: Allocate private managed-side transport verification scratch
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: lit-cis-audit-transport-
+      register: cis_ubuntu24_audit_transport_scratch
+
+    - name: Transfer only the bound archive into private scratch
+      ansible.builtin.copy:
+        src: '{{ audit_conf_source }}'
+        dest: '{{ cis_ubuntu24_audit_transport_scratch.path }}/transport.tar'
+        mode: '0600'
+
+    - name: Require exact transported bytes and the same complete audit working tree
+      ansible.builtin.script:
+        cmd: >-
+          {{ (role_path ~ '/files/audit_archive_matches_checkout.py') | quote }}
+          {{ (cis_ubuntu24_audit_transport_scratch.path ~ '/transport.tar') | quote }}
+          {{ (audit_conf_dest ~ '/UBUNTU24-CIS-Audit') | quote }}
+          {{ cis_ubuntu24_audit_transport_sha256 | quote }}
+        executable: /usr/bin/python3
+      changed_when: false
+  always:
+    - name: Remove only owned transport verification scratch
+      ansible.builtin.file:
+        path: '{{ cis_ubuntu24_audit_transport_scratch.path }}'
+        state: absent
+      when: cis_ubuntu24_audit_transport_scratch.path is defined
+
+- name: Bind the verified existing checkout above upstream variable loading
+  ansible.builtin.set_fact:
+    # Private discovery only. Public host facts would outlive vendor end_host
+    # and override the caller's transport choices in subsequent plays.
+    cis_ubuntu24_audit_vendor_transport:
+      content: existing
+      source: '{{ audit_conf_source }}'
+      destination: '{{ audit_conf_dest }}'
+      directory: '{{ cis_ubuntu24_audit_archive_realpath.stdout }}'

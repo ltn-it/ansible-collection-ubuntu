@@ -9,12 +9,27 @@
       - host_firewall_negative_tests_passed is boolean
       - host_firewall_authorization_contract is mapping
       - host_firewall_egress_policy is mapping
+      - host_firewall_container_ssh_access is mapping
+      - host_firewall_container_ssh_guard_managed is boolean
       - host_firewall_cis_ipv6_required is boolean
       - host_firewall_provider_ipv6_filter_enabled is boolean
       - >-
         not host_firewall_provider_ipv6_filter_enabled
         or host_firewall_provider_ipv6_filter_evidence_reference | trim | length >= 8
     fail_msg: "Host firewall base variables are invalid."
+
+- name: Require explicit ownership for container SSH ingress protection
+  ansible.builtin.assert:
+    that:
+      - host_firewall_container_ssh_access | length == 0 or host_firewall_container_ssh_guard_managed
+      - >-
+        host_firewall_container_ssh_guard_table_name is string
+        and host_firewall_container_ssh_guard_table_name is match('^[a-z][a-z0-9_]{2,31}\Z')
+      - >-
+        host_firewall_container_ssh_access | dict2items
+        | map(attribute='value.interface') | difference(host_firewall_container_interfaces) | length == 0
+    fail_msg: "Container SSH requires an explicitly managed guard and selected managed bridges."
+  when: host_firewall_enabled | bool
 
 - name: Validate enabled host firewall identity and platform
   ansible.builtin.assert:

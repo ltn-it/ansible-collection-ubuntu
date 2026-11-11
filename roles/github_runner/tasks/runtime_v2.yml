@@ -1,0 +1,174 @@
+---
+- name: Validate runtime-v2 installation interface
+  ansible.builtin.import_tasks: runtime_v2_assert.yml
+
+- name: Prepare explicitly selected disabled runtime-v2 files
+  when: github_runner_runtime_v2_install
+  vars:
+    github_runner_runtime_v2_assets:
+      - template: runtime_v2/entry.py.j2
+        path: /usr/local/lib/lit-incus-runtime-v2/runtime_v2_entry.py
+        mode: "0600"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/entry.py.j2') | hash('sha256') }}"
+      - template: runtime_v2/anchor.json.j2
+        path: /etc/lit/incus-lease-issuer/runtime-v2-anchor.json
+        mode: "0600"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/anchor.json.j2') | hash('sha256') }}"
+      - template: runtime_v2/client.json.j2
+        path: /etc/lightning-it/incus-runtime-client.json
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/client.json.j2') | hash('sha256') }}"
+      - template: runtime_v2/socket.j2
+        path: /etc/systemd/system/lit-incus-runtime-v2.socket
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/socket.j2') | hash('sha256') }}"
+      - template: runtime_v2/service.j2
+        path: /etc/systemd/system/lit-incus-runtime-v2@.service
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/service.j2') | hash('sha256') }}"
+      - template: runtime_v2/tmpfiles.j2
+        path: /usr/lib/tmpfiles.d/lit-incus-runtime-v2.conf
+        mode: "0644"
+        sha256: "{{ lookup('ansible.builtin.template', 'runtime_v2/tmpfiles.j2') | hash('sha256') }}"
+  block:
+    - name: Require complete source-package module inventory
+      ansible.builtin.assert:
+        that:
+          - >-
+            github_runner_runtime_v2_module_sha256.keys() | list | sort
+            == lookup('ansible.builtin.fileglob', role_path ~ '/files/incus_lease_issuer/*.py', wantlist=true)
+            | map('basename') | list | sort
+        fail_msg: Runtime-v2 pins must cover exactly the as-built source package, including new modules.
+      changed_when: false
+
+    - name: Require exact as-built source module hashes
+      ansible.builtin.assert:
+        that:
+          - >-
+            item.value == lookup('ansible.builtin.file',
+            role_path ~ '/files/incus_lease_issuer/' ~ item.key, rstrip=false) | hash('sha256')
+        fail_msg: Runtime-v2 module pin differs from the selected collection package.
+      loop: "{{ github_runner_runtime_v2_module_sha256 | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    - name: Require exact as-built public client hashes
+      ansible.builtin.assert:
+        that:
+          - >-
+            github_runner_runtime_v2_client_sha256['incus-runtime-client']
+            == lookup('ansible.builtin.file',
+            role_path ~ '/files/incus_runtime_client.py', rstrip=false) | hash('sha256')
+          - >-
+            github_runner_runtime_v2_client_sha256['incus_job_client.py']
+            == lookup('ansible.builtin.file', role_path ~ '/files/incus_job_client.py', rstrip=false) | hash('sha256')
+      changed_when: false
+
+    - name: Refuse active unknown foreign or unsealed target state before copying
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.template', 'runtime_v2/install_probe.py.j2') }}"
+          - before
+          - "{{ github_runner_runtime_v2_configuration_path }}"
+          - "{{ github_runner_runtime_v2_configuration_sha256 }}"
+          - "{{ github_runner_runtime_v2_socket_group }}"
+          - "{{ github_runner_runtime_v2_module_sha256 | to_json }}"
+          - "{{ github_runner_runtime_v2_client_sha256 | to_json }}"
+          - "{{ github_runner_runtime_v2_assets | items2dict(key_name='path', value_name='sha256') | to_json }}"
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Create sealed runtime-v2 installation directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: /usr/local/lib/lit-incus-runtime-v2, mode: "0700"}
+        - {path: /usr/local/lib/lit-incus-runtime-v2/incus_lease_issuer, mode: "0700"}
+        - {path: /usr/libexec/lightning-it, mode: "0755"}
+        - {path: /etc/lit, mode: "0755"}
+        - {path: /etc/lit/incus-lease-issuer, mode: "0700"}
+        - {path: /etc/lightning-it, mode: "0755"}
+        - {path: /run/lightning-it, mode: "0755"}
+        - path: /run/lightning-it/incus-runtime-v2
+          group: "{{ github_runner_runtime_v2_socket_group }}"
+          mode: "0710"
+      loop_control:
+        label: "{{ item.path }}"
+      when: not ansible_check_mode
+
+    - name: Copy exactly pinned private runtime-v2 modules
+      ansible.builtin.copy:
+        src: "incus_lease_issuer/{{ item.key }}"
+        dest: "/usr/local/lib/lit-incus-runtime-v2/incus_lease_issuer/{{ item.key }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ github_runner_runtime_v2_module_sha256 | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: not ansible_check_mode
+
+    - name: Copy root-owned unprivileged host clients together
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        dest: "{{ item.destination }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - source: incus_runtime_client.py
+          destination: /usr/libexec/lightning-it/incus-runtime-client
+          mode: "0755"
+        - source: incus_job_client.py
+          destination: /usr/libexec/lightning-it/incus_job_client.py
+          mode: "0644"
+      when: not ansible_check_mode
+
+    - name: Install fixed launcher sealed anchor public client configuration and disabled units
+      ansible.builtin.template:
+        src: "{{ item.template }}"
+        dest: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop: "{{ github_runner_runtime_v2_assets }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: github_runner_runtime_v2_installed_assets
+      when: not ansible_check_mode
+
+    - name: Reload unit definitions without starting enabling or stopping a service
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when:
+        - not ansible_check_mode
+        - github_runner_runtime_v2_installed_assets is changed
+
+    - name: Verify exact installed hashes Root permissions configuration and inactive units
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.template', 'runtime_v2/install_probe.py.j2') }}"
+          - after
+          - "{{ github_runner_runtime_v2_configuration_path }}"
+          - "{{ github_runner_runtime_v2_configuration_sha256 }}"
+          - "{{ github_runner_runtime_v2_socket_group }}"
+          - "{{ github_runner_runtime_v2_module_sha256 | to_json }}"
+          - "{{ github_runner_runtime_v2_client_sha256 | to_json }}"
+          - "{{ github_runner_runtime_v2_assets | items2dict(key_name='path', value_name='sha256') | to_json }}"
+      changed_when: false
+      no_log: true
+      when: not ansible_check_mode

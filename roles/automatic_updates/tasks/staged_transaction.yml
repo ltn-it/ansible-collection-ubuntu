@@ -1,0 +1,47 @@
+---
+- name: Validate the explicit metadata-only transaction interface
+  ansible.builtin.assert:
+    that:
+      - automatic_updates_staged_action in ['import', 'rollback']
+      - automatic_updates_staged_bundle is string
+      - automatic_updates_staged_bundle is match('^/[^\n\r]+$')
+      - automatic_updates_staged_request is string
+      - automatic_updates_staged_request is match('^/[^\n\r]+$')
+      - automatic_updates_staged_tool_directory is match('^/usr/local/libexec/[a-zA-Z0-9_-]+$')
+      - not ansible_check_mode
+    fail_msg: >-
+      An explicit import or rollback, admitted absolute inputs and a real apply are required.
+      Metadata-only cache transactions do not perform or authorize package upgrades.
+
+- name: Prepare the protected metadata transaction helper directory
+  ansible.builtin.file:
+    path: '{{ automatic_updates_staged_tool_directory }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install the inseparable verification and transaction helper pair
+  ansible.builtin.copy:
+    src: '{{ item }}'
+    dest: '{{ automatic_updates_staged_tool_directory }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '0600'
+  loop:
+    - apt_staged_bundle.py
+    - apt_staged_transaction.py
+
+- name: Execute the explicitly selected metadata-only cache transaction
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - '{{ automatic_updates_staged_tool_directory }}/apt_staged_transaction.py'
+      - --action
+      - '{{ automatic_updates_staged_action }}'
+      - --bundle
+      - '{{ automatic_updates_staged_bundle }}'
+      - --request
+      - '{{ automatic_updates_staged_request }}'
+  register: automatic_updates_staged_transaction
+  changed_when: (automatic_updates_staged_transaction.stdout | from_json).changed | default(false) | bool

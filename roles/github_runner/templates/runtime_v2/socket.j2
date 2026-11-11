@@ -1,0 +1,14 @@
+[Unit]
+Description=Disabled opt-in Incus Runtimev2 admission socket
+
+[Socket]
+ListenStream=/run/lightning-it/incus-runtime-v2/socket
+Accept=yes
+SocketUser=root
+SocketGroup={{ github_runner_runtime_v2_socket_group }}
+SocketMode=0660
+DirectoryMode=0710
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

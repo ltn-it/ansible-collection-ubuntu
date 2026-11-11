@@ -1,0 +1,24 @@
+---
+- name: Invoke the real assertions with invalid execution or audit inputs
+  block:
+    - name: Check the selected invalid case
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: apparmor_assert.yml
+      vars:
+        cis_ubuntu24_profile_tag: "{{ guard_case.profile }}"
+        cis_ubuntu24_apparmor_preserved_profiles: "{{ fixture_policy }}"
+        cis_ubuntu24_exceptions: "{{ guard_case.registry }}"
+        ubtu24cis_rule_1_3_1_3: "{{ guard_case.enabled }}"  # noqa: var-naming[no-role-prefix] -- Upstream input.
+    - name: Fail on an unexpected acceptance
+      ansible.builtin.fail:
+        msg: Invalid AppArmor exception unexpectedly accepted.
+  rescue:
+    - name: Require the intended interface or audit-binding rejection
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_failed_task.name in [
+              'Reject duplicate or conflicting AppArmor preservation settings',
+              'Require a visible accepted AppArmor control exception'
+            ]

@@ -1,0 +1,22 @@
+---
+- name: Verify actual assertion failure before any mutation
+  block:
+    - name: Invoke the actual module-policy assertions
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: filesystem_modules_assert.yml
+      vars:
+        cis_ubuntu24_disabled_filesystem_modules: "{{ module_case.policy }}"
+    - name: Fail if the invalid input was accepted
+      ansible.builtin.fail:
+        msg: Invalid unused-module input unexpectedly accepted.
+  rescue:
+    - name: Require the intended policy assertion failure
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_failed_task.name in [
+              'Validate the unused filesystem module list type',
+              'Validate narrowly supported unused filesystem module declarations',
+              'Reject duplicate unused filesystem module declarations'
+            ]

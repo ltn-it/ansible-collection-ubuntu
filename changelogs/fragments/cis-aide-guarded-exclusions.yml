@@ -1,0 +1,7 @@
+---
+minor_changes:
+  - >-
+    cis_ubuntu24 can prepare inventory-scoped mutable-data AIDE exclusions
+    before initialization, suppress premature package jobs, validate and
+    restore its owned fragment, and require an exact reviewed binding before
+    the upstream role may recreate an existing database.

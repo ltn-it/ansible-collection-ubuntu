@@ -1,0 +1,20 @@
+---
+- name: Reject an unsupported managed AIDE initialization profile
+  block:
+    - name: Exercise the actual preparation entrypoint without target facts or packages
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: aide_prepare.yml
+      vars:
+        cis_ubuntu24_profile_tag: '{{ cis_ubuntu24_test_profile }}'
+        cis_ubuntu24_aide_exclusions:
+          - path: /var/lib/example/data
+            reason: Mutable test data.
+    - name: Stop if an unsupported managed policy profile was admitted
+      ansible.builtin.fail:
+        msg: Level 2-only preparation must fail before target or package activity.
+  rescue:
+    - name: Verify the native initialization prerequisite caused the rejection
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_task.name == 'Require the native Level 1 initialization path for managed AIDE policy'

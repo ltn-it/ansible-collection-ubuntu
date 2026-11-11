@@ -1,0 +1,11 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 - reject non-Boolean effective values for wrapper-consumed native switches before mutation,
+    and retain the native section 3 and 6 scope for corresponding wrapper helpers.
+  - >-
+    cis_ubuntu24 - retain admitted AIDE presence and age decisions across native register writes,
+    reject conflicting caller bindings and recheck baseline state before and after native remediation.
+  - >-
+    cis_ubuntu24 - quote both offline audit helper paths so collection installation paths containing
+    spaces cannot select another controller script.

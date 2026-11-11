@@ -1,0 +1,24 @@
+---
+- name: Invoke real restoration assertions with invalid inputs
+  block:
+    - name: Check the selected invalid restoration request
+      ansible.builtin.include_role:
+        name: lit.ubuntu.cis_ubuntu24
+        tasks_from: apparmor_restoration_assert.yml
+      vars:
+        cis_ubuntu24_apparmor_preserved_profiles: "{{ fixture_policy }}"
+        cis_ubuntu24_apparmor_restoration: "{{ guard_case.request }}"
+        cis_ubuntu24_execution_mode: "{{ guard_case.mode | default('remediate') }}"
+    - name: Fail on an unexpected restoration acceptance
+      ansible.builtin.fail:
+        msg: Invalid AppArmor restoration unexpectedly accepted.
+  rescue:
+    - name: Require rejection by the actual restoration input contract
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_failed_task.name in [
+              'Validate the explicit single-profile restoration contract',
+              'Validate restoration values and exact preservation approval',
+              'Validate restoration identity and source boundaries'
+            ]

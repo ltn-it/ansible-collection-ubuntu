@@ -1,0 +1,13 @@
+---
+# Additional service dependencies beyond active/declared mounts. Filesystem
+# aliases are derived from real module metadata rather than directory names.
+cis_ubuntu24_filesystem_module_services:
+  ceph: [ceph.target]
+  cifs: []
+  exfat: []
+  gfs2: [gfs2.service]
+  nfs: [nfs-client.target, rpcbind.service]
+  nfsd: [nfs-server.service, nfs-kernel-server.service, rpcbind.service]
+  kafs: [openafs-client.service]
+  ocfs2: [o2cb.service, ocfs2.service]
+  ocfs2_dlmfs: [o2cb.service, ocfs2.service]

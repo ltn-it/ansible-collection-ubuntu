@@ -1,0 +1,355 @@
+---
+- name: Inspect selected protected installation path
+  ansible.builtin.stat:
+    path: "{{ github_runner_instance.dir }}"
+    follow: false
+  register: github_runner_protected_root
+  changed_when: false
+
+- name: Inspect protected runner registration without changing the service
+  ansible.builtin.stat:
+    path: "{{ github_runner_instance.dir }}/.runner"
+    follow: false
+  register: github_runner_protected_registration
+  changed_when: false
+
+- name: Inspect protected runner manifest without adopting existing files
+  ansible.builtin.stat:
+    path: "{{ github_runner_instance.manifest_path }}"
+    follow: false
+  register: github_runner_protected_manifest
+  changed_when: false
+
+- name: Read existing protected registration settings
+  ansible.builtin.slurp:
+    src: "{{ github_runner_instance.dir }}/.runner"
+  register: github_runner_protected_settings
+  no_log: true
+  when: github_runner_protected_registration.stat.exists
+
+- name: Validate explicitly bound fresh worker VM before protected effects
+  ansible.builtin.assert:
+    that:
+      - github_runner_instance.expected_guest_uuid is string
+      - github_runner_instance.expected_guest_uuid is match('^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+      - github_runner_instance.ephemeral | default(false) is sameas true
+    fail_msg: VM bootstrap requires an explicit native guest UUID and ephemeral lifecycle.
+  when: github_runner_instance.expected_guest_uuid is defined
+
+- name: Reattest selected worker VM identity before protected effects
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/files/ephemeral_worker_bootstrap_readiness.py') }}"
+      - --identity-only
+      - "{{ github_runner_instance.expected_guest_uuid }}"
+  changed_when: false
+  check_mode: false
+  when: github_runner_instance.expected_guest_uuid is defined
+
+- name: Inspect fresh worker VM without registering or repairing it
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -B
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/files/ephemeral_worker_bootstrap_readiness.py') }}"
+      - "{{ github_runner_instance.expected_guest_uuid }}"
+      - "{{ github_runner_instance.dir }}"
+  changed_when: false
+  check_mode: false
+  when:
+    - github_runner_instance.expected_guest_uuid is defined
+    - not github_runner_protected_registration.stat.exists
+
+- name: Require fresh registration credential before any protected effects
+  ansible.builtin.assert:
+    that:
+      - not github_runner_protected_root.stat.exists
+      - github_runner_instance.registration_token | default('', true) | trim | length > 0
+    fail_msg: Fresh protected registration requires an explicit one-use registration token.
+  no_log: true
+  when: not github_runner_protected_registration.stat.exists
+
+- name: Check dedicated account without modifying existing users
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_instance.user }}"
+    fail_key: false
+
+- name: Refuse adoption of an existing unproven service account
+  ansible.builtin.assert:
+    that:
+      - >-
+        github_runner_protected_registration.stat.exists
+        or ansible_facts.getent_passwd[github_runner_instance.user] is none
+    fail_msg: Fresh protected installation requires a new dedicated account; existing accounts are not rewritten.
+
+- name: Check protected root ancestors before creating or sealing paths
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import os, pathlib, stat, sys
+        for raw in sys.argv[1:]:
+            path = pathlib.PurePosixPath(raw)
+            if not raw.startswith('/') or str(path) != raw or '..' in path.parts:
+                raise SystemExit('noncanonical protected path')
+            current = pathlib.Path('/')
+            for part in path.parts[1:]:
+                current /= part
+                try:
+                    info = current.lstat()
+                except FileNotFoundError:
+                    break
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise SystemExit('protected ancestor is not sealed root directory')
+      - "{{ github_runner_instance.dir | dirname }}"
+      - "{{ github_runner_instance.manifest_path | dirname }}"
+      - "{{ github_runner_instance.storage_dir }}"
+      - "{{ github_runner_protected_helper_dir }}"
+  changed_when: false
+
+- name: Refuse legacy registration before stopping or changing any service
+  ansible.builtin.assert:
+    that:
+      - not github_runner_protected_registration.stat.exists or github_runner_protected_registration.stat.isreg
+      - not github_runner_protected_registration.stat.exists or github_runner_protected_registration.stat.uid == 0
+      - not github_runner_protected_registration.stat.exists or github_runner_protected_manifest.stat.exists
+      - not github_runner_protected_registration.stat.exists or github_runner_protected_manifest.stat.isreg
+      - not github_runner_protected_registration.stat.exists or github_runner_protected_manifest.stat.uid == 0
+    fail_msg: >-
+      Existing registration is not a root-provisioned protected installation. No service was stopped,
+      no registration was replaced, and .runner was not rewritten. A preserving migration remains unqualified.
+
+- name: Require existing protected registration lifecycle to match the request
+  ansible.builtin.assert:
+    that:
+      - >-
+        ((github_runner_protected_settings.content | b64decode | regex_replace('^\ufeff', '') | from_json)
+        .disableUpdate | default(false)) is sameas true
+      - >-
+        ((github_runner_protected_settings.content | b64decode | regex_replace('^\ufeff', '') | from_json)
+        .ephemeral | default(false)) is boolean
+      - >-
+        ((github_runner_protected_settings.content | b64decode | regex_replace('^\ufeff', '') | from_json)
+        .ephemeral | default(false)) == (github_runner_instance.ephemeral | default(false))
+    fail_msg: Existing protected registration lacks the requested update/lifecycle flags; conversion is not supported.
+  no_log: true
+  when: github_runner_protected_registration.stat.exists
+
+- name: Provision opt-in protected runner after read-only preflight
+  when:
+    - github_runner_protected_phase | default('apply') == 'apply'
+    - not ansible_check_mode
+  block:
+    - name: Ensure protected provisioner packages are installed
+      ansible.builtin.apt:
+        name: [apparmor, apparmor-utils, python3-cryptography]
+        state: present
+        update_cache: "{{ github_runner_update_apt_cache | bool }}"
+
+    - name: Create root-private protected provisioner library
+      ansible.builtin.file:
+        path: "{{ github_runner_protected_helper_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install root-private verification library without activating an issuer
+      ansible.builtin.copy:
+        src: incus_lease_issuer
+        dest: "{{ github_runner_protected_helper_dir }}/"
+        owner: root
+        group: root
+        mode: preserve
+        directory_mode: "0700"
+
+    - name: Install root-private guest identity verifier
+      ansible.builtin.copy:
+        src: ephemeral_worker_bootstrap_readiness.py
+        dest: "{{ github_runner_protected_helper_dir }}/ephemeral_worker_bootstrap_readiness.py"
+        owner: root
+        group: root
+        mode: "0600"
+      when: github_runner_instance.expected_guest_uuid is defined
+
+    - name: Install opt-in root-private engine producer and client source
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ github_runner_protected_helper_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: [rootless_engine.py, rootless_podman_client.py]
+      when: github_runner_instance.rootless_engine is defined
+
+    - name: Install selected rootless runtime prerequisites
+      ansible.builtin.apt:
+        name: [podman, uidmap, slirp4netns, fuse-overlayfs]
+        state: present
+        update_cache: "{{ github_runner_update_apt_cache | bool }}"
+      when: github_runner_instance.rootless_engine is defined
+
+    - name: Install protected provisioning program
+      ansible.builtin.template:
+        src: protected_provision.py.j2
+        dest: "{{ github_runner_protected_helper_dir }}/protected_provision.py"
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Create protected manifest parent
+      ansible.builtin.file:
+        path: "{{ github_runner_instance.manifest_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Create dedicated protected runner group
+      ansible.builtin.group:
+        name: "{{ github_runner_instance.group }}"
+        system: true
+        state: present
+
+    - name: Create dedicated protected runner account without supplementary groups
+      ansible.builtin.user:
+        name: "{{ github_runner_instance.user }}"
+        group: "{{ github_runner_instance.group }}"
+        groups: []
+        append: false
+        home: "{{ github_runner_instance.home }}"
+        shell: /usr/sbin/nologin
+        create_home: false
+        system: true
+        password_lock: true
+        state: present
+
+    - name: Create private protected storage root
+      ansible.builtin.file:
+        path: "{{ github_runner_instance.storage_dir }}"
+        state: directory
+        owner: root
+        group: "{{ github_runner_instance.group }}"
+        mode: "0710"
+
+    - name: Create isolated protected home and work storage
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ github_runner_instance.user }}"
+        group: "{{ github_runner_instance.group }}"
+        mode: "0700"
+      loop:
+        - "{{ github_runner_instance.home }}"
+        - "{{ github_runner_instance.work_dir }}"
+
+    - name: Create sealed protected installation parent
+      ansible.builtin.file:
+        path: "{{ github_runner_instance.dir | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Define selected protected profile and archive
+      ansible.builtin.set_fact:
+        github_runner_protected_profile_name: >-
+          lit-gh-{{ github_runner_instance.name }}-{{ lookup('ansible.builtin.file',
+          role_path ~ '/templates/protected_runner.apparmor.j2') | hash('sha256') | truncate(16, true, '') }}
+        github_runner_protected_archive: >-
+          {{ github_runner_protected_helper_dir }}/actions-runner-linux-{{ github_runner_arch }}-2.338.2.tar.gz
+
+    - name: Install only the opt-in protected runner AppArmor policy
+      ansible.builtin.template:
+        src: protected_runner.apparmor.j2
+        dest: "/etc/apparmor.d/{{ github_runner_protected_profile_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+      register: github_runner_protected_apparmor_file
+
+    - name: Load selected protected profile in enforce mode
+      ansible.builtin.command:
+        argv: [/usr/sbin/apparmor_parser, --replace, "/etc/apparmor.d/{{ github_runner_protected_profile_name }}"]
+      changed_when: github_runner_protected_apparmor_file.changed
+
+    - name: Download exact protected runner archive with official digest
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-{{
+          github_runner_arch }}-2.338.2.tar.gz
+        dest: "{{ github_runner_protected_archive }}"
+        checksum: "sha256:{{ github_runner_protected_archive_sha256[github_runner_arch] }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Bind the selected protected provisioning configuration
+      ansible.builtin.set_fact:
+        github_runner_protected_configuration: >-
+          {{ github_runner_protected_base_configuration | combine(github_runner_protected_engine_selection)
+          | combine(github_runner_protected_guest_selection) }}
+      vars:
+        github_runner_protected_guest_selection: >-
+          {{ {'expected_guest_uuid': github_runner_instance.expected_guest_uuid}
+          if github_runner_instance.expected_guest_uuid is defined else {} }}
+        github_runner_protected_engine_selection: >-
+          {{ {'rootless_engine': github_runner_instance.rootless_engine}
+          if github_runner_instance.rootless_engine is defined else {} }}
+        github_runner_protected_base_configuration:
+          name: "{{ github_runner_instance.name }}"
+          root: "{{ github_runner_instance.dir }}"
+          manifest: "{{ github_runner_instance.manifest_path }}"
+          storage: "{{ github_runner_instance.storage_dir }}"
+          work: "{{ github_runner_instance.work_dir }}"
+          home: "{{ github_runner_instance.home }}"
+          user: "{{ github_runner_instance.user }}"
+          group: "{{ github_runner_instance.group }}"
+          url: "{{ github_runner_instance.url | default(github_runner_url) }}"
+          labels: "{{ github_runner_instance.labels }}"
+          runner_group: "{{ github_runner_instance.runner_group }}"
+          arch: "{{ github_runner_arch }}"
+          version: "{{ github_runner_protected_version }}"
+          archive: "{{ github_runner_protected_archive }}"
+          service_state: "{{ github_runner_instance.service_state | default('stopped') }}"
+          ephemeral: "{{ github_runner_instance.ephemeral | default(false) }}"
+          operation_reference: "{{ github_runner_instance.operation_reference }}"
+          storage_reference: "{{ github_runner_instance.storage_reference }}"
+          custodian_reference: "{{ github_runner_instance.custodian_reference }}"
+          profile: "{{ github_runner_protected_profile_name }}"
+          profile_path: "/etc/apparmor.d/{{ github_runner_protected_profile_name }}"
+          profile_sha256: "{{ lookup('ansible.builtin.template', 'protected_runner.apparmor.j2') | hash('sha256') }}"
+      no_log: true
+
+    - name: Provision and read back the protected installation without issuer activation
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, "{{ github_runner_protected_helper_dir }}/protected_provision.py", apply-input]
+        stdin: >-
+          {{ {'configuration': github_runner_protected_configuration,
+          'registration_token': github_runner_instance.registration_token | default('')} | to_json }}
+        stdin_add_newline: false
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+      register: github_runner_protected_result
+      changed_when: (github_runner_protected_result.stdout | from_json).changed | bool
+      no_log: true
+
+    - name: Prepare the private rootless engine while the registered worker remains stopped
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, "{{ github_runner_protected_helper_dir }}/protected_provision.py", engine]
+        stdin: "{{ github_runner_protected_configuration | to_json }}"
+        stdin_add_newline: false
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+      register: github_runner_engine_result
+      changed_when: (github_runner_engine_result.stdout | from_json).changed | bool
+      when: github_runner_instance.rootless_engine is defined
+      no_log: true

@@ -1,19 +1,29 @@
 ---
 - name: Verify incus
-  hosts: incus
+  hosts: localhost
+  connection: local
   become: false
   gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    incus_molecule_ephemeral: >-
+      {{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY')
+         | default(lookup('ansible.builtin.env', 'HOME') ~ '/molecule-ephemeral/incus-basic', true) }}
+    incus_molecule_root: "{{ incus_molecule_ephemeral }}/incus-fixture"
+    incus_molecule_bin: "{{ incus_molecule_root }}/bin"
+    incus_molecule_state: "{{ incus_molecule_root }}/state"
+  environment:
+    PATH: "{{ incus_molecule_bin }}:{{ lookup('ansible.builtin.env', 'PATH') }}"
+    LIT_INCUS_FAKE_STATE: "{{ incus_molecule_state }}"
 
   tasks:
-    - name: Read Incus root SubUID allocation
-      ansible.builtin.slurp:
-        src: /tmp/incus-molecule-subuid
-      register: incus_subuid_state
-
-    - name: Read Incus root SubGID allocation
-      ansible.builtin.slurp:
-        src: /tmp/incus-molecule-subgid
-      register: incus_subgid_state
+    - name: Inspect subordinate-ID fixture paths without reading system files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ incus_molecule_ephemeral }}/incus-molecule-subuid"
+        - "{{ incus_molecule_ephemeral }}/incus-molecule-subgid"
+      register: incus_idmap_fixtures
 
     - name: Read Incus storage state
       ansible.builtin.command:
@@ -58,7 +68,7 @@
 
     - name: Read fake Incus mutation log
       ansible.builtin.command:
-        cmd: grep -v '^$' /var/lib/incus-fake/mutations.log
+        argv: [grep, -v, '^$', "{{ incus_molecule_state }}/mutations.log"]
       register: incus_mutations
       changed_when: false
 
@@ -87,8 +97,7 @@
           - incus_network_state_decoded | length == 1
           - incus_network_state_decoded.0.name == 'incusbr0'
           - incus_network_state_decoded.0.config == expected_incus_network_config
-          - (incus_subuid_state.content | b64decode | trim) == 'root:1000000:10000000'
-          - (incus_subgid_state.content | b64decode | trim) == 'root:1000000:10000000'
+          - incus_idmap_fixtures.results | selectattr('stat.exists') | list | length == 0
           - incus_mutations.stdout_lines == expected_incus_mutations
         fail_msg: "Incus fake state did not match the declaration or the role mutated it more than once."
       vars:

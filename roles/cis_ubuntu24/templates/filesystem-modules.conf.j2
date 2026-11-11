@@ -1,0 +1,7 @@
+# Managed by lit.ubuntu.cis_ubuntu24; unused filesystem modules.
+{% for module in cis_ubuntu24_disabled_filesystem_modules | sort(attribute='name') %}
+# {{ module.reason }}
+install {{ module.name }} /bin/false
+blacklist {{ module.name }}
+softdep {{ module.name }} pre:
+{% endfor %}

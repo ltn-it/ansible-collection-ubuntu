@@ -1,0 +1,76 @@
+---
+- name: Validate explicit target capture identity and owned output paths
+  ansible.builtin.assert:
+    that:
+      - automatic_updates_staged_expected_machine_id is match('^[0-9a-f]{32}$')
+      - automatic_updates_staged_capture_directory is match('^/[^\n\r]+$')
+      - automatic_updates_staged_controller_directory is match('^/[^\n\r]+$')
+      - not ansible_check_mode
+    fail_msg: An independently admitted target identity and fresh private capture paths are required.
+
+- name: Inspect the controller capture destination before any target write
+  ansible.builtin.stat:
+    path: '{{ automatic_updates_staged_controller_directory }}'
+    follow: false
+  register: automatic_updates_staged_controller_previous
+  become: false
+  delegate_to: localhost
+
+- name: Refuse unknown or previously used controller capture state
+  ansible.builtin.assert:
+    that: [not automatic_updates_staged_controller_previous.stat.exists]
+
+- name: Capture only the independently admitted public target resolver inputs
+  ansible.builtin.script:
+    cmd: >-
+      {{ (role_path ~ '/files/apt_staged_bundle.py') | quote }}
+      --capture {{ automatic_updates_staged_capture_directory | quote }}
+      --expected-machine-id {{ automatic_updates_staged_expected_machine_id | quote }}
+    executable: /usr/bin/python3
+  register: automatic_updates_staged_capture
+  changed_when: true
+
+- name: Prepare the new private controller capture directory
+  ansible.builtin.file:
+    path: '{{ automatic_updates_staged_controller_directory }}'
+    state: directory
+    mode: '0700'
+  become: false
+  delegate_to: localhost
+
+- name: Transfer the public capture manifest through the authenticated Ansible channel
+  ansible.builtin.fetch:
+    src: '{{ automatic_updates_staged_capture_directory }}/capture.json'
+    dest: '{{ automatic_updates_staged_controller_directory }}/capture.json'
+    flat: true
+    validate_checksum: true
+
+- name: Independently check the received manifest digest
+  ansible.builtin.stat:
+    path: '{{ automatic_updates_staged_controller_directory }}/capture.json'
+    checksum_algorithm: sha256
+  register: automatic_updates_staged_received_capture
+  become: false
+  delegate_to: localhost
+
+- name: Bind the fetched capture to the observed target outcome
+  ansible.builtin.assert:
+    that:
+      - >-
+        automatic_updates_staged_received_capture.stat.checksum ==
+        (automatic_updates_staged_capture.stdout | from_json).capture_sha256
+
+- name: Record the authenticated controller capture metadata
+  ansible.builtin.set_fact:
+    automatic_updates_staged_capture_metadata: >-
+      {{ lookup('ansible.builtin.file', automatic_updates_staged_controller_directory ~ '/capture.json') | from_json }}
+
+- name: Transfer only the manifest-listed public resolver snapshots
+  ansible.builtin.fetch:
+    src: '{{ automatic_updates_staged_capture_directory }}/{{ item.value.file }}'
+    dest: '{{ automatic_updates_staged_controller_directory }}/{{ item.value.file }}'
+    flat: true
+    validate_checksum: true
+  loop: '{{ automatic_updates_staged_capture_metadata.payload_files | dict2items }}'
+  loop_control:
+    label: '{{ item.value.file }}'

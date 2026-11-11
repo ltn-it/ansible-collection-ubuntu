@@ -17,7 +17,10 @@
       - github_runner_user_groups_extra is not string
       - github_runner_labels is sequence
       - github_runner_labels is not string
-      - not github_runner_register | bool or github_runner_url | trim | length > 0
+      - >-
+        not github_runner_register | bool
+        or github_runner_legacy_instances | length == 0
+        or github_runner_url | trim | length > 0
       - github_runner_service_user | trim | length > 0
       - github_runner_service_state in ['started', 'stopped', 'restarted', 'reloaded']
       - github_runner_instances is sequence
@@ -31,6 +34,9 @@
   ansible.builtin.assert:
     that:
       - item is mapping
+      - item.protected | default(false) is boolean
+      - item.ephemeral | default(false) is boolean
+      - not (item.ephemeral | default(false)) or (item.protected | default(false))
       - item.name | default('') | trim | length > 0
       - item.dir | default('') | trim | length > 0
       - item.dir | default('', true) is match('^/')
@@ -69,8 +75,10 @@
         or not (item.external_service_unit_path | regex_search('(^|/)\.\.?(/|$)'))
       - item.state | default('present') in ['present', 'absent']
       - item.service_state | default(github_runner_service_state) in ['started', 'stopped', 'restarted', 'reloaded']
-      - not (item.work_dir | default('') | regex_search('^/'))
-      - item.work_dir | default('') | split('/') | reject('in', ['', '.', '..']) | list | length
+      - item.protected | default(false) or not (item.work_dir | default('') | regex_search('^/'))
+      - >-
+        item.protected | default(false) or
+        item.work_dir | default('') | split('/') | reject('in', ['', '.', '..']) | list | length
         == item.work_dir | default('') | split('/') | length
     fail_msg: "Each github_runner_instances entry must define a valid isolated runner."
   loop: "{{ github_runner_instances }}"
@@ -84,6 +92,57 @@
   changed_when: false
   when: github_runner_enabled | bool
 
+- name: Validate explicitly protected runner inputs
+  ansible.builtin.assert:
+    that:
+      - github_runner_protected_version == '2.338.2'
+      - item.ephemeral | default(false) is boolean
+      - item.name is match('^[A-Za-z0-9_-]{1,64}$')
+      - github_runner_arch in ['arm64', 'x64']
+      - item.state | default('present') == 'present'
+      - not (item.replace | default(false) | bool)
+      - github_runner_register | bool
+      - github_runner_manage_service | bool
+      - item.service_state | default('stopped') in ['started', 'stopped']
+      - item.user | default('') is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - item.group | default('') == item.user | default('')
+      - item.user | default('') not in ['root', github_runner_user]
+      - item.home | default('') is match('^/[A-Za-z0-9_/-]+$')
+      - item.work_dir | default('') is match('^/[A-Za-z0-9_/-]+$')
+      - item.storage_dir | default('') is match('^/[A-Za-z0-9_/-]+$')
+      - item.dir is match('^/[A-Za-z0-9_/-]+$')
+      - item.manifest_path | default('') is match('^/[A-Za-z0-9_./-]+$')
+      - item.operation_reference | default('') | trim | length > 0
+      - item.storage_reference | default('') | trim | length > 0
+      - item.custodian_reference | default('') | trim | length > 0
+      - item.runner_group | default('') | trim | length > 0
+      - item.labels | default([]) | length > 0
+      - item.home.startswith(item.storage_dir ~ '/')
+      - item.work_dir.startswith(item.storage_dir ~ '/')
+      - not item.home.startswith(item.work_dir ~ '/')
+      - not item.work_dir.startswith(item.home ~ '/')
+      - item.home != item.work_dir
+      - not item.manifest_path.startswith(item.dir ~ '/')
+      - not item.dir.startswith(item.storage_dir ~ '/')
+      - not item.storage_dir.startswith(item.dir ~ '/')
+      - item.dir != item.storage_dir
+      - not (item.home | regex_search('//|(^|/)\.\.?(/|$)'))
+      - not (item.work_dir | regex_search('//|(^|/)\.\.?(/|$)'))
+      - not (item.storage_dir | regex_search('//|(^|/)\.\.?(/|$)'))
+      - not (item.manifest_path | regex_search('//|(^|/)\.\.?(/|$)'))
+      - item.url | default(github_runner_url) is match('^https://github.com/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$')
+    fail_msg: >-
+      Protected runners require explicit dedicated account, absolute private storage/work/home,
+      external root manifest, bounded operation/storage/custodian references and pinned version.
+      Removal, replacement and legacy adoption are not supported by this path.
+  loop: "{{ github_runner_instances }}"
+  loop_control:
+    label: "{{ item.name | default('invalid') }}"
+  no_log: "{{ item.registration_token | default('', true) | length > 0 }}"
+  when:
+    - github_runner_enabled | bool
+    - item.protected | default(false) | bool
+
 - name: Validate GitHub runner instance isolation
   ansible.builtin.assert:
     that:
@@ -93,3 +152,31 @@
     fail_msg: "Runner names, installation directories, and work_dir values must be unique."
   changed_when: false
   when: github_runner_enabled | bool
+
+- name: Validate optional runtime-v2 installation interface
+  ansible.builtin.import_tasks: runtime_v2_assert.yml
+
+- name: Validate opt-in rootless engine preparation before registration effects
+  ansible.builtin.assert:
+    that:
+      - item.protected | default(false) | bool
+      - item.ephemeral | default(false) is sameas true
+      - item.service_state | default('stopped') == 'stopped'
+      - item.name is match('^[a-z0-9][a-z0-9-]{0,47}$')
+      - item.rootless_engine is mapping
+      - item.rootless_engine.keys() | list | sort == ['subgid_start', 'subuid_start']
+      - item.rootless_engine.subuid_start is integer
+      - item.rootless_engine.subgid_start is integer
+      - item.rootless_engine.subuid_start >= 100000
+      - item.rootless_engine.subgid_start >= 100000
+      - item.rootless_engine.subuid_start <= 4294901760
+      - item.rootless_engine.subgid_start <= 4294901760
+    fail_msg: >-
+      Rootless engine preparation requires a fresh stopped protected ephemeral worker and explicit sub-ID ranges.
+  loop: "{{ github_runner_instances }}"
+  loop_control:
+    label: "{{ item.name | default('invalid') }}"
+  when:
+    - github_runner_enabled | bool
+    - item.rootless_engine is defined
+  no_log: "{{ item.registration_token | default('', true) | length > 0 }}"

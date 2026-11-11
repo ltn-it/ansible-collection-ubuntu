@@ -128,6 +128,12 @@ table {{ host_firewall_table_family }} {{ host_firewall_table_name }} {
         iifname { {{ host_firewall_container_dns_access.interfaces | map('to_json') | join(', ') }} } ip saddr @container_dns_clients_v4 ip daddr {{ host_firewall_container_dns_access.destination_ipv4 }} udp dport 53 ct state new accept
         iifname { {{ host_firewall_container_dns_access.interfaces | map('to_json') | join(', ') }} } ip saddr @container_dns_clients_v4 ip daddr {{ host_firewall_container_dns_access.destination_ipv4 }} tcp dport 53 ct state new accept
 {% endif %}
+{% if host_firewall_container_ssh_guard_managed %}
+{% for client in host_firewall_container_ssh_bindings | dict2items %}
+
+        iifname {{ client.value.interface | to_json }} ip saddr {{ client.value.source_ipv4 }} ip daddr {{ client.value.destination_ipv4 }} tcp dport {{ client.value.port }} ct state new accept
+{% endfor %}
+{% endif %}
 {% for client in host_firewall_container_dns_clients | dict2items %}
 
         iifname {{ client.value.interface | to_json }} ip saddr {{ client.value.source_ipv4 }} ip daddr {{ client.value.destination_ipv4 }} udp dport 53 ct state new accept
@@ -199,3 +205,7 @@ table {{ host_firewall_table_family }} {{ host_firewall_table_name }} {
         counter drop
     }
 }
+{% if host_firewall_container_ssh_guard_managed %}
+
+{{ host_firewall_container_ssh_guard_content }}
+{% endif %}

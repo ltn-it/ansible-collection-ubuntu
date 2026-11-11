@@ -1,15 +1,24 @@
 ---
 - name: Converge incus
-  hosts: incus
+  hosts: localhost
+  connection: local
   become: false
   gather_facts: false
   vars:
-    ansible_user: root
-    ansible_python_interpreter: /usr/bin/python3
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    incus_molecule_ephemeral: >-
+      {{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY')
+         | default(lookup('ansible.builtin.env', 'HOME') ~ '/molecule-ephemeral/incus-basic', true) }}
+    incus_molecule_root: "{{ incus_molecule_ephemeral }}/incus-fixture"
+    incus_molecule_bin: "{{ incus_molecule_root }}/bin"
+    incus_molecule_state: "{{ incus_molecule_root }}/state"
     incus_packages: []
     incus_services: []
-    incus_root_subuid_path: /tmp/incus-molecule-subuid
-    incus_root_subgid_path: /tmp/incus-molecule-subgid
+    # This controller-only scenario is deliberately unprivileged. The real
+    # Root-owned subordinate-ID task is covered by test_incus_root_idmap_role.py.
+    incus_manage_root_idmap: false
+    incus_root_subuid_path: "{{ incus_molecule_ephemeral }}/incus-molecule-subuid"
+    incus_root_subgid_path: "{{ incus_molecule_ephemeral }}/incus-molecule-subgid"
     incus_preseed:
       storage_pools:
         - name: default
@@ -34,28 +43,46 @@
             type: disk
             path: /
             pool: default
+  environment:
+    PATH: >-
+      {{ (incus_molecule_root ~ '/absent-bin') if ansible_check_mode
+         else (incus_molecule_bin ~ ':' ~ lookup('ansible.builtin.env', 'PATH')) }}
+    LIT_INCUS_FAKE_STATE: "{{ incus_molecule_state }}"
   pre_tasks:
-    - name: Ensure python3 is present
-      ansible.builtin.raw: |
-        if ! command -v python3 >/dev/null 2>&1; then
-          apt-get update && apt-get -y install python3
-        fi
-      changed_when: false
-      check_mode: false
+    - name: Inspect the existing controller Python interpreter
+      ansible.builtin.stat:
+        path: "{{ ansible_playbook_python }}"
+      register: incus_controller_python
+
+    - name: Require the existing controller Python interpreter
+      ansible.builtin.assert:
+        that:
+          - incus_controller_python.stat.exists
+          - incus_controller_python.stat.executable
+        quiet: true
+
+    - name: Create isolated Incus fixture directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ incus_molecule_root }}"
+        - "{{ incus_molecule_bin }}"
+        - "{{ incus_molecule_state }}"
+      when: not ansible_check_mode
 
     - name: Install fake Incus CLI
       ansible.builtin.copy:
         src: incus-fake.py
-        dest: /usr/local/bin/incus
-        owner: root
-        group: root
+        dest: "{{ incus_molecule_bin }}/incus"
         mode: "0755"
       when: not ansible_check_mode
 
     - name: Seed an initialized Incus daemon with one storage pool
       ansible.builtin.command:
         argv: [incus, storage, create, default, dir]
-        creates: /var/lib/incus-fake/storage-seeded
+        creates: "{{ incus_molecule_state }}/storage-seeded"
       when: not ansible_check_mode
 
   roles:

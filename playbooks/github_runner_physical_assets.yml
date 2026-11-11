@@ -1,0 +1,208 @@
+---
+- name: Prepare isolated physical runner assets without registration
+  hosts: "{{ github_runner_physical_assets_target | default('localhost') }}"
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    github_runner_physical_assets_source: "{{ playbook_dir }}/../roles/github_runner"
+    github_runner_protected_profile_name: "{{ github_runner_physical_assets_configuration.profile }}"
+  tasks:
+    - name: Require one machine-bound physical preparation request
+      ansible.builtin.assert:
+        that:
+          - github_runner_physical_assets_target is defined
+          - github_runner_physical_assets_target is string
+          - github_runner_physical_assets_target is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
+          - github_runner_physical_assets_target not in ['all', 'ungrouped', 'localhost', '127.0.0.1']
+          - ansible_play_hosts_all == [github_runner_physical_assets_target]
+          - github_runner_physical_assets_machine_id | default('') is match('^[0-9a-f]{32}$')
+          - github_runner_physical_assets_configuration is mapping
+          - github_runner_physical_assets_configuration.arch == 'x64'
+          - github_runner_physical_assets_configuration.version == '2.338.2'
+          - github_runner_physical_assets_source == playbook_dir ~ '/../roles/github_runner'
+          - github_runner_physical_assets_payload | default('') is match('^/')
+        fail_msg: Physical asset preparation requires one explicit host, fixed x64 package and closed configuration.
+
+    - name: Require the exact versioned confinement template
+      ansible.builtin.assert:
+        that:
+          - >-
+            github_runner_physical_assets_configuration.profile_sha256
+            == (lookup('ansible.builtin.template',
+            github_runner_physical_assets_source ~ '/templates/protected_runner.apparmor.j2') | hash('sha256'))
+
+    - name: Initialize the installed helper inventory
+      ansible.builtin.set_fact:
+        github_runner_physical_assets_library_files:
+          protected_provision.py: >-
+            {{ lookup('ansible.builtin.file', github_runner_physical_assets_source
+            ~ '/templates/protected_provision.py.j2', rstrip=false) | hash('sha256') }}
+
+    - name: Bind all as-built private helper modules
+      ansible.builtin.set_fact:
+        github_runner_physical_assets_library_files: >-
+          {{ github_runner_physical_assets_library_files | combine({
+          'incus_lease_issuer/' ~ (item | basename):
+          lookup('ansible.builtin.file', item, rstrip=false) | hash('sha256')}) }}
+      loop: >-
+        {{ lookup('ansible.builtin.fileglob', github_runner_physical_assets_source
+        ~ '/files/incus_lease_issuer/*.py', wantlist=true) | sort }}
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Bind the credential-free asset request
+      ansible.builtin.set_fact:
+        github_runner_physical_assets_request:
+          machine_id: "{{ github_runner_physical_assets_machine_id }}"
+          library_files: "{{ github_runner_physical_assets_library_files }}"
+          configuration: "{{ github_runner_physical_assets_configuration }}"
+
+    - name: Inspect native library and fresh or completed asset boundaries
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -I
+          - -B
+          - -c
+          - "{{ lookup('ansible.builtin.file', github_runner_physical_assets_source ~ '/files/physical_assets.py') }}"
+          - before
+        stdin: "{{ github_runner_physical_assets_request | to_json }}"
+        stdin_add_newline: false
+      changed_when: false
+      check_mode: false
+      register: github_runner_physical_assets_before
+
+    - name: Inspect the exact local payload before host changes
+      ansible.builtin.stat:
+        path: "{{ github_runner_physical_assets_payload }}"
+        follow: false
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: github_runner_physical_assets_payload_stat
+
+    - name: Require the official x64 runner archive digest
+      ansible.builtin.assert:
+        that:
+          - github_runner_physical_assets_payload_stat.stat.isreg | default(false)
+          - >-
+            github_runner_physical_assets_payload_stat.stat.checksum
+            == 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
+
+    - name: Prepare only the independently verified fresh asset set
+      when:
+        - not ansible_check_mode
+        - (github_runner_physical_assets_before.stdout | from_json).state == 'fresh-assets-only'
+      block:
+        - name: Create the new dedicated primary group
+          ansible.builtin.group:
+            name: "{{ github_runner_physical_assets_configuration.group }}"
+            system: true
+            state: present
+
+        - name: Create the new locked account without supplementary groups
+          ansible.builtin.user:
+            name: "{{ github_runner_physical_assets_configuration.user }}"
+            group: "{{ github_runner_physical_assets_configuration.group }}"
+            groups: []
+            append: false
+            home: "{{ github_runner_physical_assets_configuration.home }}"
+            shell: /usr/sbin/nologin
+            create_home: false
+            system: true
+            password_lock: true
+            state: present
+
+        - name: Create the sealed readable program parent
+          ansible.builtin.file:
+            path: "{{ github_runner_physical_assets_configuration.root | dirname }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Create new private administrative parents
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+          loop:
+            - "{{ github_runner_physical_assets_configuration.manifest | dirname }}"
+            - "{{ github_runner_physical_assets_configuration.archive | dirname }}"
+
+        - name: Create the private protected storage boundary
+          ansible.builtin.file:
+            path: "{{ github_runner_physical_assets_configuration.storage }}"
+            state: directory
+            owner: root
+            group: "{{ github_runner_physical_assets_configuration.group }}"
+            mode: '0710'
+
+        - name: Create isolated account home and work directories
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: "{{ github_runner_physical_assets_configuration.user }}"
+            group: "{{ github_runner_physical_assets_configuration.group }}"
+            mode: '0700'
+          loop:
+            - "{{ github_runner_physical_assets_configuration.home }}"
+            - "{{ github_runner_physical_assets_configuration.work }}"
+
+        - name: Download the exact official payload directly on the target host
+          ansible.builtin.get_url:
+            url: >-
+              https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-x64-2.338.2.tar.gz
+            dest: "{{ github_runner_physical_assets_configuration.archive }}"
+            checksum: sha256:baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
+            timeout: 60
+            validate_certs: true
+            owner: root
+            group: root
+            mode: '0600'
+          no_log: true
+
+        - name: Install the exact standalone enforcing profile
+          ansible.builtin.template:
+            src: "{{ github_runner_physical_assets_source }}/templates/protected_runner.apparmor.j2"
+            dest: "{{ github_runner_physical_assets_configuration.profile_path }}"
+            owner: root
+            group: root
+            mode: '0644'
+            validate: /usr/sbin/apparmor_parser --skip-kernel-load --skip-cache %s
+
+        - name: Load only the new selected enforcing runner profile
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/apparmor_parser
+              - --replace
+              - "{{ github_runner_physical_assets_configuration.profile_path }}"
+          changed_when: true
+
+        - name: Verify prepared account, directories, payload and native confinement
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -I
+              - -B
+              - -c
+              - >-
+                {{ lookup('ansible.builtin.file',
+                github_runner_physical_assets_source ~ '/files/physical_assets.py') }}
+              - verify
+            stdin: "{{ github_runner_physical_assets_request | to_json }}"
+            stdin_add_newline: false
+          changed_when: false
+          register: github_runner_physical_assets_verified
+
+        - name: Record only the verified nonsecret asset preparation
+          ansible.builtin.copy:
+            content: "{{ (github_runner_physical_assets_verified.stdout | from_json).receipt | to_nice_json }}\n"
+            dest: "{{ github_runner_physical_assets_configuration.manifest }}.assets.json"
+            owner: root
+            group: root
+            mode: '0600'

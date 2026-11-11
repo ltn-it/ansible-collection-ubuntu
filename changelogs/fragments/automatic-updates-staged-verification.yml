@@ -1,0 +1,14 @@
+---
+minor_changes:
+  - automatic_updates - add a separate staged Ubuntu APT metadata verification entrypoint with independent target,
+    package-state, source, keyring, freshness and signed decompressed index checks; verification never imports a cache.
+  - automatic_updates - add explicit metadata-only import and rollback with package locks, atomic list exchange,
+    retained recovery journal and acquisition-derived freshness; package installation remains separate.
+  - automatic_updates - add target resolver capture and unprivileged signed APT acquisition using target status,
+    preferences, phased-update identity and APT policy, with authenticated bundle delivery.
+  - automatic_updates - add schema2 signed-index-bound deb verification without package installation;
+    metadata-only transactions reject payload-bearing bundles until archive-cache handling is qualified.
+  - automatic_updates - add authenticated archive reception with bounded regular-file staging and independent
+    live-target verification before any cache import or package installation.
+  - automatic_updates - add coupled list/archive cache import with generated-cache invalidation, origin-based
+    freshness, independent interruption recovery and explicit confirmed or rolled-back snapshot pruning.

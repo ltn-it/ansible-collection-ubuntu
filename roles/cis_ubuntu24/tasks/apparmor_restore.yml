@@ -1,0 +1,252 @@
+---
+- name: Validate the existing accepted preservation policy
+  ansible.builtin.import_tasks: apparmor_assert.yml
+
+- name: Validate the explicit restoration request before target inspection
+  ansible.builtin.import_tasks: apparmor_restoration_assert.yml
+
+- name: Bind the selected profile and deterministic rollback identity
+  ansible.builtin.set_fact:
+    cis_ubuntu24_apparmor_restore_profile: >-
+      {{ cis_ubuntu24_apparmor_preserved_profiles
+         | selectattr('name', 'equalto', cis_ubuntu24_apparmor_restoration.name) | first }}
+    cis_ubuntu24_apparmor_restore_directory: >-
+      {{ '/var/lib/lit-cis-apparmor/' ~ cis_ubuntu24_apparmor_restoration.machine_id
+         ~ '/' ~ cis_ubuntu24_apparmor_restoration.name ~ '-'
+         ~ cis_ubuntu24_apparmor_restoration.previous_sha256 }}
+
+- name: Require the native Ubuntu 24 restoration target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution | default('') == 'Ubuntu'
+      - ansible_facts.distribution_major_version | default('') == '24'
+      - ansible_facts.machine_id | default('') == cis_ubuntu24_apparmor_restoration.machine_id
+
+- name: Verify exact AppArmor package version
+  ansible.builtin.command:
+    argv: [dpkg-query, --show, '--showformat=${Version}', apparmor]
+  register: cis_ubuntu24_apparmor_restore_package
+  changed_when: false
+  failed_when: >-
+    cis_ubuntu24_apparmor_restore_package.rc != 0
+    or cis_ubuntu24_apparmor_restore_package.stdout != cis_ubuntu24_apparmor_restoration.package_version
+
+- name: Verify ownership of the selected package attachment
+  ansible.builtin.command:
+    argv: [dpkg-query, --search, "/etc/apparmor.d/{{ cis_ubuntu24_apparmor_restoration.name }}"]
+  register: cis_ubuntu24_apparmor_restore_package_owner
+  changed_when: false
+  failed_when: >-
+    cis_ubuntu24_apparmor_restore_package_owner.rc != 0
+    or cis_ubuntu24_apparmor_restore_package_owner.stdout
+       != 'apparmor: /etc/apparmor.d/' ~ cis_ubuntu24_apparmor_restoration.name
+
+- name: Verify the complete current profile boundary and rollback paths without changes
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - '-'
+      - "{{ cis_ubuntu24_apparmor_preserved_profiles | to_json }}"
+      - "{{ cis_ubuntu24_apparmor_restoration | to_json }}"
+    stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/apparmor_profile_guard.py') }}"
+  register: cis_ubuntu24_apparmor_restore_admission
+  changed_when: false
+
+- name: Inspect the independently supplied controller candidate
+  ansible.builtin.stat:
+    path: "{{ cis_ubuntu24_apparmor_restoration.source }}"
+    follow: false
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: cis_ubuntu24_apparmor_restore_candidate
+
+- name: Require the exact accepted candidate before any target mutation
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_apparmor_restore_candidate.stat.isreg | default(false)
+      - not (cis_ubuntu24_apparmor_restore_candidate.stat.islnk | default(true))
+      - cis_ubuntu24_apparmor_restore_candidate.stat.nlink | default(0) == 1
+      - >-
+        cis_ubuntu24_apparmor_restore_candidate.stat.checksum | default('')
+        == cis_ubuntu24_apparmor_restore_profile.sha256
+      - cis_ubuntu24_apparmor_restore_candidate.stat.size | default(0) > 0
+      - cis_ubuntu24_apparmor_restore_candidate.stat.size | default(65537) <= 65536
+
+- name: Read the exact loaded-profile map before the transaction
+  ansible.builtin.command:
+    argv: [aa-status, --json]
+  register: cis_ubuntu24_apparmor_restore_before_modes
+  changed_when: false
+
+- name: Inspect the private rollback directory
+  ansible.builtin.stat:
+    path: "{{ cis_ubuntu24_apparmor_restore_directory }}"
+    follow: false
+  register: cis_ubuntu24_apparmor_restore_stage
+
+- name: Require a retained rollback for an already restored profile
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cis_ubuntu24_apparmor_restore_admission.stdout | from_json).restoration_required
+        or cis_ubuntu24_apparmor_restore_stage.stat.exists
+
+- name: Create only the protected rollback directory
+  ansible.builtin.file:
+    path: "{{ cis_ubuntu24_apparmor_restore_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Retain the immutable restoration ownership binding
+  ansible.builtin.copy:
+    content: >-
+      {{ cis_ubuntu24_apparmor_restoration | dict2items | rejectattr('key', 'equalto', 'source')
+         | items2dict | combine({'accepted_sha256': cis_ubuntu24_apparmor_restore_profile.sha256}) | to_nice_json }}
+    dest: "{{ cis_ubuntu24_apparmor_restore_directory }}/owner.json"
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+
+- name: Verify the retained ownership binding
+  ansible.builtin.slurp:
+    src: "{{ cis_ubuntu24_apparmor_restore_directory }}/owner.json"
+  register: cis_ubuntu24_apparmor_restore_owner
+
+- name: Refuse unrelated rollback ownership
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cis_ubuntu24_apparmor_restore_owner.content | b64decode | from_json)
+        == (cis_ubuntu24_apparmor_restoration | dict2items | rejectattr('key', 'equalto', 'source')
+            | items2dict | combine({'accepted_sha256': cis_ubuntu24_apparmor_restore_profile.sha256}))
+
+- name: Retain the original attachment without overwriting an existing snapshot
+  ansible.builtin.copy:
+    src: "/etc/apparmor.d/{{ cis_ubuntu24_apparmor_restoration.name }}"
+    dest: "{{ cis_ubuntu24_apparmor_restore_directory }}/before.profile"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+  when: (cis_ubuntu24_apparmor_restore_admission.stdout | from_json).restoration_required
+
+- name: Verify the protected exact original snapshot
+  ansible.builtin.stat:
+    path: "{{ cis_ubuntu24_apparmor_restore_directory }}/before.profile"
+    follow: false
+    checksum_algorithm: sha256
+  register: cis_ubuntu24_apparmor_restore_snapshot
+
+- name: Require the exact single-link rollback copy
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_apparmor_restore_snapshot.stat.isreg | default(false)
+      - not (cis_ubuntu24_apparmor_restore_snapshot.stat.islnk | default(true))
+      - cis_ubuntu24_apparmor_restore_snapshot.stat.uid | default(-1) == 0
+      - cis_ubuntu24_apparmor_restore_snapshot.stat.gid | default(-1) == 0
+      - cis_ubuntu24_apparmor_restore_snapshot.stat.mode | default('') == '0600'
+      - cis_ubuntu24_apparmor_restore_snapshot.stat.nlink | default(0) == 1
+      - >-
+        cis_ubuntu24_apparmor_restore_snapshot.stat.checksum | default('')
+        == cis_ubuntu24_apparmor_restoration.previous_sha256
+
+- name: Apply the bounded profile restoration transaction
+  block:
+    - name: Install only the exact accepted package-compatible attachment
+      ansible.builtin.copy:
+        src: "{{ cis_ubuntu24_apparmor_restoration.source }}"
+        dest: "/etc/apparmor.d/{{ cis_ubuntu24_apparmor_restoration.name }}"
+        owner: root
+        group: root
+        mode: '0644'
+        validate: /usr/sbin/apparmor_parser --skip-kernel-load --skip-cache --base /etc/apparmor.d %s
+      register: cis_ubuntu24_apparmor_restore_copy
+
+    - name: Reload only the changed attachment
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/apparmor_parser
+          - --replace
+          - --skip-cache
+          - --base
+          - /etc/apparmor.d
+          - "/etc/apparmor.d/{{ cis_ubuntu24_apparmor_restoration.name }}"
+      changed_when: true
+      when: (cis_ubuntu24_apparmor_restore_admission.stdout | from_json).restoration_required
+
+    - name: Verify the full accepted file and loaded-profile boundary
+      ansible.builtin.import_tasks: apparmor_guard.yml
+
+    - name: Read the loaded map after the transaction
+      ansible.builtin.command:
+        argv: [aa-status, --json]
+      register: cis_ubuntu24_apparmor_restore_after_modes
+      changed_when: false
+
+    - name: Reject every unrelated loaded-profile change
+      ansible.builtin.assert:
+        that:
+          - >-
+            (cis_ubuntu24_apparmor_restore_after_modes.stdout | from_json).profiles
+            == ((cis_ubuntu24_apparmor_restore_before_modes.stdout | from_json).profiles
+                | combine({cis_ubuntu24_apparmor_restoration.name: 'unconfined'}))
+  rescue:
+    - name: Restore the exact original only when this invocation began with it
+      ansible.builtin.copy:
+        src: "{{ cis_ubuntu24_apparmor_restore_directory }}/before.profile"
+        dest: "/etc/apparmor.d/{{ cis_ubuntu24_apparmor_restoration.name }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      when: (cis_ubuntu24_apparmor_restore_admission.stdout | from_json).restoration_required
+
+    - name: Reload the restored original only for an initial restoration failure
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/apparmor_parser
+          - --replace
+          - --skip-cache
+          - --base
+          - /etc/apparmor.d
+          - "/etc/apparmor.d/{{ cis_ubuntu24_apparmor_restoration.name }}"
+      changed_when: true
+      when: (cis_ubuntu24_apparmor_restore_admission.stdout | from_json).restoration_required
+
+    - name: Verify rollback file and kernel policy admission
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - '-'
+          - "{{ cis_ubuntu24_apparmor_preserved_profiles | to_json }}"
+          - "{{ cis_ubuntu24_apparmor_restoration | to_json }}"
+        stdin: "{{ lookup('ansible.builtin.file', role_path ~ '/files/apparmor_profile_guard.py') }}"
+      register: cis_ubuntu24_apparmor_restore_rollback
+      changed_when: false
+
+    - name: Read the loaded map after rollback
+      ansible.builtin.command:
+        argv: [aa-status, --json]
+      register: cis_ubuntu24_apparmor_restore_rollback_modes
+      changed_when: false
+
+    - name: Verify rollback retained the exact pre-invocation profile map
+      ansible.builtin.assert:
+        that:
+          - >-
+            (cis_ubuntu24_apparmor_restore_rollback_modes.stdout | from_json).profiles
+            == (cis_ubuntu24_apparmor_restore_before_modes.stdout | from_json).profiles
+          - >-
+            (cis_ubuntu24_apparmor_restore_rollback.stdout | from_json).restoration_required
+            == (cis_ubuntu24_apparmor_restore_admission.stdout | from_json).restoration_required
+
+    - name: Preserve the transaction failure after verified rollback
+      ansible.builtin.fail:
+        msg: >-
+          The scoped AppArmor transaction failed. The exact pre-invocation file and loaded map were verified;
+          inspect the retained failure and snapshot before retrying. An unchanged repeat never restores an older policy.

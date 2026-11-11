@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 - require an actual Boolean false for the native AppArmor rewrite control when preserving
+    approved attachments, so truthy strings cannot change profiles before the postcheck.

@@ -1,0 +1,19 @@
+---
+- name: Verify staged metadata contracts and actual isolated filesystem recovery
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Run admission lock exchange failure repeat and rollback cases offline
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_playbook_python }}'
+          - -m
+          - unittest
+          - discover
+          - -s
+          - tests/unit
+          - -p
+          - test_apt_staged*.py
+          - -v
+        chdir: '{{ lookup("ansible.builtin.env", "MOLECULE_PROJECT_DIRECTORY") }}'
+      changed_when: false

@@ -1,0 +1,11 @@
+---
+- name: Require the exact shell-safe vendor audit execution path
+  ansible.builtin.assert:
+    that:
+      - (audit_conf_dest | default('/opt')) is string
+      - (audit_conf_dest | default('/opt')) is match('^(/[A-Za-z0-9_.-]+)+\Z')
+      - (audit_conf_dest | default('/opt')) is not search('(^|/)[.]{1,2}(/|$)')
+      - >-
+        audit_conf_dir is not defined
+        or audit_conf_dir == (audit_conf_dest | default('/opt')) ~ '/UBUNTU24-CIS-Audit'
+    fail_msg: Vendor audit checkout paths must be canonical absolute paths without shell metacharacters or whitespace.

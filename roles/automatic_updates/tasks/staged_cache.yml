@@ -1,0 +1,54 @@
+---
+- name: Validate explicit coupled cache lifecycle and independent target identity
+  ansible.builtin.assert:
+    that:
+      - automatic_updates_staged_action in ['import', 'rollback', 'confirm', 'prune']
+      - automatic_updates_staged_expected_machine_id is match('^[0-9a-f]{32}$')
+      - automatic_updates_staged_request is match('^/[^\n\r]+$')
+      - >-
+        automatic_updates_staged_action != 'import' or
+        automatic_updates_staged_bundle is match('^/[^\n\r]+$')
+      - automatic_updates_staged_tool_directory is match('^/usr/local/libexec/[a-zA-Z0-9_-]+$')
+      - not ansible_check_mode
+    fail_msg: A real explicit cache lifecycle action and independent target admission are required.
+
+- name: Read actual cache target before any helper installation
+  ansible.builtin.slurp:
+    src: /etc/machine-id
+  register: automatic_updates_staged_cache_identity
+
+- name: Require the independently admitted cache target
+  ansible.builtin.assert:
+    that:
+      - >-
+        automatic_updates_staged_cache_identity.content | b64decode | trim ==
+        automatic_updates_staged_expected_machine_id
+
+- name: Prepare the protected staged cache helper directory
+  ansible.builtin.file:
+    path: '{{ automatic_updates_staged_tool_directory }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install the inseparable verifier transaction and cache lifecycle helpers
+  ansible.builtin.copy:
+    src: '{{ item }}'
+    dest: '{{ automatic_updates_staged_tool_directory }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '0600'
+  loop:
+    - apt_staged_bundle.py
+    - apt_staged_transaction.py
+    - apt_staged_cache.py
+
+- name: Execute the explicitly admitted coupled cache lifecycle action
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/bin/python3', '-I', automatic_updates_staged_tool_directory ~ '/apt_staged_cache.py',
+           '--action', automatic_updates_staged_action, '--request', automatic_updates_staged_request]
+         + (['--bundle', automatic_updates_staged_bundle] if automatic_updates_staged_action == 'import' else []) }}
+  register: automatic_updates_staged_cache
+  changed_when: (automatic_updates_staged_cache.stdout | from_json).changed | default(false) | bool

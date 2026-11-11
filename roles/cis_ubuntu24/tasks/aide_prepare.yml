@@ -1,0 +1,228 @@
+---
+- name: Require the native Level 1 initialization path for managed AIDE policy
+  ansible.builtin.assert:
+    that: cis_ubuntu24_profile_tag in ['level1-server', 'level1-workstation']
+    fail_msg: >-
+      Managed AIDE policy installation or clearing requires a native Level 1 remediation profile.
+      Level 2-only execution skips the pinned upstream initializer and must not change this policy.
+
+- name: Verify the native AIDE target before inspecting or changing its state
+  ansible.builtin.import_tasks: aide_target_assert.yml
+
+- name: Require a real apply for every managed AIDE policy transition
+  ansible.builtin.assert:
+    that: not ansible_check_mode
+    fail_msg: Managed AIDE policy changes, including clearing exclusions, require a real guarded apply.
+
+- name: Inspect existing AIDE configuration directory boundaries
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+    get_checksum: false
+  loop:
+    - /etc/aide
+    - /etc/aide/aide.conf.d
+  register: cis_ubuntu24_aide_directories
+
+- name: Reject redirected or writable existing AIDE configuration directories
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists
+        or
+        (
+          item.stat.isdir | default(false)
+          and not (item.stat.islnk | default(false))
+          and item.stat.uid == 0
+          and item.stat.gid == 0
+          and item.stat.mode in ['0755', '0750', '0700']
+        )
+    fail_msg: Existing AIDE configuration directories must be root-owned and may not redirect or allow untrusted writes.
+  loop: "{{ cis_ubuntu24_aide_directories.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Inspect the owned AIDE policy fragment
+  ansible.builtin.stat:
+    path: /etc/aide/aide.conf.d/90_lit_mutable_data
+    follow: false
+    checksum_algorithm: sha256
+  register: cis_ubuntu24_aide_previous
+
+- name: Read a prior regular AIDE fragment for ownership verification and rollback
+  when: cis_ubuntu24_aide_previous.stat.isreg | default(false)
+  ansible.builtin.slurp:
+    src: /etc/aide/aide.conf.d/90_lit_mutable_data
+  register: cis_ubuntu24_aide_previous_content
+
+- name: Inspect the upstream AIDE baseline without changing it
+  ansible.builtin.stat:
+    path: "{{ ubtu24cis_aide_db_file | default('/var/lib/aide/aide.db') }}"
+    follow: false
+    checksum_algorithm: sha256
+  register: cis_ubuntu24_aide_database
+
+- name: Detect the same database age that would trigger upstream recreation
+  when: cis_ubuntu24_aide_database.stat.isreg | default(false)
+  ansible.builtin.find:
+    paths: "{{ ubtu24cis_aide_db_file | default('/var/lib/aide/aide.db') | dirname }}"
+    patterns: "{{ ubtu24cis_aide_db_file | default('/var/lib/aide/aide.db') | basename }}"
+    age: "{{ ubtu24cis_aide_db_file_age | default('1w') }}"
+    file_type: file
+    follow: false
+  register: cis_ubuntu24_aide_aged
+
+- name: Verify AIDE policy and database admission before package changes
+  ansible.builtin.import_tasks: aide_admission.yml
+
+- name: Inspect existing mutable directory exclusions without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ cis_ubuntu24_aide_exclusions }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: cis_ubuntu24_aide_exclusion_metadata
+
+- name: Reject existing exclusion objects that are not directories
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists
+        or
+        (
+          item.stat.isdir | default(false)
+          and not (item.stat.islnk | default(false))
+        )
+    fail_msg: Existing AIDE exclusion paths must be directories; regular files and special objects are not accepted.
+  loop: "{{ cis_ubuntu24_aide_exclusion_metadata.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+- name: Resolve declared mutable directories including existing parent aliases
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/readlink
+      - --canonicalize-missing
+      - --
+      - "{{ item.path }}"
+  loop: "{{ cis_ubuntu24_aide_exclusions }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: cis_ubuntu24_aide_canonical_paths
+  changed_when: false
+  check_mode: false
+
+- name: Reject AIDE paths whose existing parents redirect the exclusion
+  ansible.builtin.assert:
+    that:
+      - item.stdout == item.item.path
+    fail_msg: AIDE exclusions must resolve to their exact inventory-declared path.
+  loop: "{{ cis_ubuntu24_aide_canonical_paths.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+- name: Prevent package-triggered background AIDE initialization
+  ansible.builtin.debconf:
+    name: aide
+    question: aide/aideinit
+    value: 'false'
+    vtype: boolean
+
+- name: Install AIDE without starting package-provided services or timers
+  ansible.builtin.apt:
+    name:
+      - aide
+      - aide-common
+    state: present
+    policy_rc_d: 101
+
+- name: Read the package-owned root AIDE configuration
+  ansible.builtin.stat:
+    path: /etc/aide/aide.conf
+    follow: false
+    get_checksum: false
+  register: cis_ubuntu24_aide_root_metadata
+
+- name: Reject a redirected or writable root AIDE configuration
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_aide_root_metadata.stat.isreg | default(false)
+      - not (cis_ubuntu24_aide_root_metadata.stat.islnk | default(false))
+      - cis_ubuntu24_aide_root_metadata.stat.nlink == 1
+      - cis_ubuntu24_aide_root_metadata.stat.uid == 0
+      - cis_ubuntu24_aide_root_metadata.stat.gid == 0
+      - cis_ubuntu24_aide_root_metadata.stat.mode in ['0644', '0640', '0600']
+    fail_msg: The root AIDE configuration must be a safe root-owned regular file.
+
+- name: Read the exact package-owned root AIDE configuration
+  ansible.builtin.slurp:
+    src: /etc/aide/aide.conf
+  register: cis_ubuntu24_aide_root_config
+
+- name: Require the supported package fragment include contract
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cis_ubuntu24_aide_root_config.content | b64decode).splitlines()
+        | map('trim')
+        | select('equalto', '@@x_include /etc/aide/aide.conf.d ^[a-zA-Z0-9_-]+$')
+        | list | length == 1
+      - >-
+        (cis_ubuntu24_aide_root_config.content | b64decode).splitlines()
+        | map('trim')
+        | select('equalto', 'database_in=file:' ~ (ubtu24cis_aide_db_file | default('/var/lib/aide/aide.db')))
+        | list | length == 1
+      - >-
+        (cis_ubuntu24_aide_root_config.content | b64decode).splitlines()
+        | map('trim') | select('match', '^database_in=') | list | length == 1
+    fail_msg: The installed AIDE configuration must retain the supported include and exact guarded database path.
+
+- name: Validate the current complete AIDE configuration before editing
+  ansible.builtin.command:
+    argv: [/usr/bin/aide, --config, /etc/aide/aide.conf, --config-check]
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Commit and validate only the owned AIDE exclusion fragment
+  block:
+    - name: Render the root-owned non-executable AIDE exclusion policy
+      ansible.builtin.template:
+        src: aide-exclusions.conf.j2
+        dest: /etc/aide/aide.conf.d/90_lit_mutable_data
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Validate the complete configuration before upstream initialization
+      ansible.builtin.command:
+        argv: [/usr/bin/aide, --config, /etc/aide/aide.conf, --config-check]
+      changed_when: false
+      when: not ansible_check_mode
+  rescue:
+    - name: Restore the exact previous owned fragment after failed validation
+      when: cis_ubuntu24_aide_previous.stat.exists
+      ansible.builtin.copy:
+        content: "{{ cis_ubuntu24_aide_previous_content.content | b64decode }}"
+        dest: /etc/aide/aide.conf.d/90_lit_mutable_data
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Remove only the newly created fragment after failed validation
+      when: not cis_ubuntu24_aide_previous.stat.exists
+      ansible.builtin.file:
+        path: /etc/aide/aide.conf.d/90_lit_mutable_data
+        state: absent
+
+    - name: Stop before any upstream AIDE database initialization
+      ansible.builtin.fail:
+        msg: AIDE configuration validation failed; the owned fragment was restored and no database was reaccepted.
+
+- name: Disable the package timer when the upstream cron scheduler is selected
+  when: ubtu24cis_aide_scan | default('cron') == 'cron'
+  ansible.builtin.systemd_service:
+    name: dailyaidecheck.timer
+    state: stopped
+    enabled: false

@@ -1,0 +1,15 @@
+---
+minor_changes:
+  - >-
+    host_firewall - add read-only rootful container namespace and bidirectional veth discovery
+    for bridge ingress guard planning, with identity-race rejection and no raw application environment inspection.
+  - >-
+    host_firewall - couple an explicitly managed bridge guard with the inet candidate, canonical readback,
+    metadata and rollback while preserving the default single-table representation.
+bugfixes:
+  - >-
+    host_firewall - hash coupled preview command bytes directly before Ansible's native JSON conversion,
+    keeping the approval digest identical to the transaction's canonical policy digest.
+  - >-
+    host_firewall - preserve actual numeric bridge interface-index operands across device deletion,
+    rejecting symbolic snapshot drift and unsupported forms before mutation even when nft --numeric prints names.

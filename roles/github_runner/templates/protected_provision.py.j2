@@ -1,0 +1,965 @@
+#!/usr/bin/python3
+"""Root-only opt-in provisioner. No issuer, lease endpoint or worker authority.
+
+An interrupted native operation is not replayed. Keep its private journal and
+staging tree for explicit operator reconciliation; never unregister on failure.
+"""
+import argparse
+from contextlib import contextmanager
+from dataclasses import asdict
+import fcntl
+import grp
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+from incus_lease_issuer.identity import Denied, decode_json, require
+from incus_lease_issuer.installation import InstallationPolicy, trusted_file, verify_installation
+
+VERSION = "2.338.2"
+ARCHIVES = {
+    "arm64": "670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945",
+    "x64": "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40",
+}
+LINKS = {"externals/" + node + "/bin/" + name: "../lib/node_modules/" + target
+         for node in ("node20", "node24") for name, target in (
+             ("corepack", "corepack/dist/corepack.js"), ("npx", "npm/bin/npx-cli.js"),
+             ("npm", "npm/bin/npm-cli.js"))}
+BASE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+SYSTEMD_DIRECTORY = Path("/etc/systemd/system")
+PROVISION_LOCK = Path("/run/lit-github-runner-provision.lock")
+
+
+@contextmanager
+def provision_lock():
+    """Serialize cooperating Root provisioners; never unlink a lock inode.
+
+    This is not a GitHub assignment fence or a lock against external systemctl
+    callers. Those remain separate native maintenance prerequisites.
+    """
+    require(os.geteuid() == 0, "protected-root-required")
+    root_directory(PROVISION_LOCK.parent)
+    fd = os.open(PROVISION_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_gid == 0
+                and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600,
+                "protected-provision-lock-integrity")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Denied("protected-provision-busy") from None
+        current = PROVISION_LOCK.lstat()
+        require((current.st_dev, current.st_ino) == (info.st_dev, info.st_ino),
+                "protected-provision-lock-replaced")
+        yield
+    finally:
+        os.close(fd)
+
+
+def canonical(path):
+    require(type(path) is str and re.fullmatch(r"/[A-Za-z0-9_./-]+", path)
+            and str(PurePosixPath(path)) == path and ".." not in PurePosixPath(path).parts
+            and path != "/", "protected-path")
+    return Path(path)
+
+
+def root_directory(path):
+    """Check every existing ancestor; no writable/symlink traversal is accepted."""
+    path = canonical(str(path))
+    current = Path("/")
+    for part in path.parts[1:]:
+        current /= part
+        info = current.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0
+                and not info.st_mode & 0o022, "protected-root-ancestor")
+    return path
+
+
+def atomic_json(path, value):
+    parent = root_directory(path.parent)
+    descriptor, name = tempfile.mkstemp(prefix=".protected-", dir=parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def configuration(raw):
+    require(os.geteuid() == 0, "protected-root-required")
+    config = decode_json(raw)
+    expected = {"name", "root", "manifest", "storage", "work", "home", "user", "group", "url",
+                "labels", "runner_group", "arch", "version", "archive", "service_state",
+                "operation_reference", "storage_reference", "custodian_reference"}
+    expected |= {"profile", "profile_path", "profile_sha256"}
+    require(type(config) is dict and expected <= set(config) <= expected | {"ephemeral", "rootless_engine", "expected_guest_uuid"}, "protected-config-schema")
+    config.setdefault("ephemeral", False)
+    if "expected_guest_uuid" in config:
+        require(config["ephemeral"] is True, "protected-guest-ephemeral-required")
+        guest_identity(config)
+    if "rootless_engine" in config:
+        engine = config["rootless_engine"]
+        require(type(engine) is dict and set(engine) == {"subuid_start", "subgid_start"}
+                and all(type(v) is int and 100000 <= v <= 2**32 - 65536 for v in engine.values()),
+                "protected-engine-ranges")
+        require(config["ephemeral"] is True and config["service_state"] == "stopped"
+                and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", config["name"]), "protected-engine-lifecycle")
+    require(type(config["ephemeral"]) is bool, "protected-ephemeral-type")
+    require(config["version"] == VERSION and config["arch"] in ARCHIVES, "protected-version")
+    for key in ("root", "manifest", "storage", "work", "home", "archive"):
+        canonical(config[key])
+    require(re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", config["user"])
+            and config["user"] == config["group"] and config["user"] != "root", "protected-account")
+    require(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", config["name"]), "protected-name")
+    require(re.fullmatch(r"https://github.com/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?", config["url"]),
+            "protected-url")
+    require(type(config["labels"]) is list and 0 < len(config["labels"]) <= 32
+            and all(type(x) is str and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", x)
+                    for x in config["labels"]), "protected-labels")
+    require(type(config["runner_group"]) is str and 0 < len(config["runner_group"]) <= 128
+            and not any(ord(x) < 32 for x in config["runner_group"]), "protected-group")
+    require(config["service_state"] in ("started", "stopped"), "protected-service-state")
+    require(type(config["profile"]) is str and re.fullmatch(r"lit-gh-[A-Za-z0-9_.-]{1,96}", config["profile"])
+            and config["profile_path"] == "/etc/apparmor.d/" + config["profile"]
+            and type(config["profile_sha256"]) is str
+            and re.fullmatch(r"[0-9a-f]{64}", config["profile_sha256"]), "protected-profile-policy")
+    for key in ("operation_reference", "storage_reference", "custodian_reference"):
+        require(type(config[key]) is str and 0 < len(config[key]) <= 1024
+                and not any(ord(x) < 32 for x in config[key]), "protected-operating-reference")
+    paths = [canonical(config[x]) for x in ("root", "storage", "work", "home", "manifest")]
+    require(len(set(paths)) == len(paths), "protected-path-overlap")
+    root, storage, work, home, manifest = paths
+    require(not manifest.is_relative_to(root) and not storage.is_relative_to(root)
+            and work.is_relative_to(storage) and home.is_relative_to(storage)
+            and not work.is_relative_to(home) and not home.is_relative_to(work)
+            and not root.is_relative_to(storage), "protected-path-overlap")
+    return config
+
+
+def guest_identity(config):
+    if "expected_guest_uuid" not in config:
+        return
+    from ephemeral_worker_bootstrap_readiness import identity, NotReady
+    try:
+        identity(config["expected_guest_uuid"])
+    except (NotReady, OSError, ValueError):
+        raise Denied("protected-guest-identity") from None
+
+
+def guest_binding(config):
+    if "expected_guest_uuid" not in config:
+        return {}
+    return {"expected_guest_uuid": config["expected_guest_uuid"],
+            "operation_reference": config["operation_reference"]}
+
+
+def settings(root):
+    # Stock .NET settings may contain an UTF-8 BOM; decode_json consumes bytes.
+    path = root / ".runner"
+    trusted_file(str(path), max_bytes=65536)
+    result = decode_json(path.read_bytes())
+    require(type(result) is dict and type(result.get("agentId")) is int and result["agentId"] > 0
+            and result.get("disableUpdate") is True, "protected-existing-registration-not-disabled")
+    require(type(result.get("ephemeral", False)) is bool, "protected-ephemeral-type")
+    return result
+
+
+def account(config):
+    user = pwd.getpwnam(config["user"])
+    group = grp.getgrnam(config["group"])
+    require(user.pw_uid > 0 and user.pw_gid == group.gr_gid and user.pw_dir == config["home"]
+            and user.pw_shell == "/usr/sbin/nologin", "protected-account-state")
+    require(os.getgrouplist(config["user"], user.pw_gid) == [user.pw_gid], "protected-extra-groups")
+    members = [p.pw_name for p in pwd.getpwall() if p.pw_gid == group.gr_gid]
+    require(members == [config["user"]] and not group.gr_mem, "protected-shared-group")
+    return user
+
+
+def inspect(config, require_account=True):
+    guest_identity(config)
+    root = canonical(config["root"])
+    manifest = canonical(config["manifest"])
+    root_directory(root.parent)
+    root_directory(manifest.parent)
+    journal = manifest.with_suffix(manifest.suffix + ".transaction")
+    if journal.exists() or journal.is_symlink():
+        trusted_file(str(journal), max_bytes=65536)
+        saved = decode_json(journal.read_bytes())
+        require(type(saved) is dict and saved.get("phase") == "complete"
+                and saved.get("root") == str(root), "protected-uncertain-transaction")
+        # A bound registration cannot lose or change its original VM/operation.
+        require(saved.get("expected_guest_uuid") == config.get("expected_guest_uuid")
+                and ("expected_guest_uuid" not in config or
+                     saved.get("operation_reference") == config["operation_reference"]),
+                "protected-guest-journal-binding")
+    user = account(config) if require_account else None
+    if not root.exists() and not root.is_symlink():
+        require(not manifest.exists() and not journal.exists(), "protected-state-loss")
+        return {"existing": False}
+    # No writes, service commands, registration or adoption before this proof.
+    require(root.is_dir() and not root.is_symlink(), "protected-existing-root")
+    require(journal.exists(), "protected-state-loss")
+    existing = settings(root)
+    require(existing.get("ephemeral", False) is config.get("ephemeral", False)
+            and saved.get("ephemeral", False) is config.get("ephemeral", False), "protected-lifecycle-drift")
+    require(type(saved.get("service_start_issued", False)) is bool, "protected-start-journal")
+    require(user is not None, "protected-account-required")
+    proof = verify_installation(InstallationPolicy(str(root), str(manifest), existing["agentId"], user.pw_uid))
+    require(existing.get("agentName") == config["name"] and existing.get("workFolder") == config["work"],
+            "protected-existing-registration-binding")
+    require(proof.package_sha256 == ARCHIVES[config["arch"]], "protected-package-pin")
+    require(saved.get("runner_id") == existing["agentId"] and saved.get("profile_sha256") == config["profile_sha256"],
+            "protected-journal-binding")
+    return {"existing": True, "runner_id": existing["agentId"], "proof": proof}
+
+
+def extract(archive, root, architecture):
+    trusted_file(str(archive), max_bytes=512 * 1024 * 1024)
+    require(hashlib.sha256(archive.read_bytes()).hexdigest() == ARCHIVES[architecture], "protected-archive-sha256")
+    files, dirs, links, total = {}, set(), {}, 0
+    with tarfile.open(archive, "r:gz") as package:
+        members = package.getmembers()
+        require(len(members) <= 20000, "protected-archive-count")
+        for item in members:
+            name = item.name.removeprefix("./").rstrip("/")
+            if name in ("", "."):
+                require(item.isdir(), "protected-archive-entry")
+                continue
+            path = PurePosixPath(name)
+            require(not path.is_absolute() and str(path) == name and ".." not in path.parts
+                    and len(name.encode()) <= 1024 and not any(ord(c) < 32 for c in name)
+                    and len(path.parts) <= 32 and name not in files and name not in dirs and name not in links
+                    and not name.startswith("_diag/") and name != "_diag", "protected-archive-path")
+            if item.isdir():
+                dirs.add(name)
+            elif item.isfile():
+                require(0 <= item.size <= 512 * 1024 * 1024, "protected-archive-file-size")
+                files[name] = item
+                total += item.size
+            else:
+                require(item.issym() and LINKS.get(name) == item.linkname, "protected-archive-link")
+                links[name] = item.linkname
+        require(total <= 2 * 1024 * 1024 * 1024 and links == LINKS, "protected-archive-inventory")
+        for name in list(files) + list(links) + list(dirs):
+            for parent in PurePosixPath(name).parents:
+                if str(parent) != ".":
+                    require(str(parent) not in files and str(parent) not in links, "protected-archive-ancestor")
+                    dirs.add(str(parent))
+        for name in sorted(dirs, key=lambda x: (x.count("/"), x)):
+            (root / name).mkdir(mode=0o755)
+        for name, item in files.items():
+            target = root / name
+            with package.extractfile(item) as source, target.open("xb") as output:
+                shutil.copyfileobj(source, output, 1024 * 1024)
+            target.chmod(0o755 if item.mode & 0o111 else 0o644)
+        for name, literal in links.items():
+            target = root / name
+            resolved = os.path.normpath(str(PurePosixPath(name).parent / literal))
+            require(resolved in files, "protected-archive-link-target")
+            target.symlink_to(literal)
+    require((root / "bin/runsvc.sh").is_file(), "protected-archive-layout")
+    shutil.copyfile(root / "bin/runsvc.sh", root / "runsvc.sh")
+    (root / "runsvc.sh").chmod(0o755)
+
+
+def manifest_for(root, config, user, runner_id):
+    files, directories, symlinks = {}, [], {}
+    for directory, children, leaves in os.walk(root, followlinks=False):
+        if Path(directory) == root and "_diag" in children:
+            children.remove("_diag")
+        for name in sorted(children + leaves):
+            path = Path(directory) / name
+            relative = str(path.relative_to(root))
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                require(LINKS.get(relative) == os.readlink(path), "protected-unexpected-link")
+                symlinks[relative] = os.readlink(path)
+            elif stat.S_ISDIR(info.st_mode):
+                directories.append(relative)
+            else:
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "protected-inventory-type")
+                files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {"schema": 1, "runner_id": runner_id, "service_uid": user.pw_uid,
+            "runner_version": VERSION, "package_sha256": ARCHIVES[config["arch"]],
+            "files": files, "directories": sorted(directories), "symlinks": symlinks,
+            "runtime_directories": {"_diag": {"uid": user.pw_uid, "mode": 0o700}}}
+
+
+def seal(root, user):
+    for directory, children, leaves in os.walk(root, followlinks=False):
+        if Path(directory) == root and "_diag" in children:
+            children.remove("_diag")
+        os.chown(directory, 0, 0)
+        os.chmod(directory, 0o755)
+        for name in children + leaves:
+            path = Path(directory) / name
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                os.chown(path, 0, 0, follow_symlinks=False)
+            elif stat.S_ISREG(info.st_mode):
+                os.chown(path, 0, user.pw_gid if name.startswith(".") else 0)
+                os.chmod(path, 0o640 if name.startswith(".") else (0o755 if info.st_mode & 0o111 else 0o644))
+    diag = root / "_diag"
+    if not diag.exists():
+        diag.mkdir(mode=0o700)
+    require(not diag.is_symlink() and diag.is_dir(), "protected-diag")
+    os.chown(diag, user.pw_uid, user.pw_gid)
+    diag.chmod(0o700)
+
+
+def execute(argv, *, cwd, environment=None):
+    # Never include token values in argv, output, error strings or journal.
+    try:
+        result = subprocess.run(argv, cwd=cwd, env=environment or BASE_ENV,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=180, check=False, close_fds=True)
+    except (OSError, subprocess.SubprocessError):
+        raise Denied("protected-native-operation-unknown") from None
+    require(result.returncode == 0, "protected-native-operation-failed-unknown")
+
+
+def service_name(root):
+    path = root / ".service"
+    trusted_file(str(path), max_bytes=4096)
+    name = path.read_text().strip()
+    require(re.fullmatch(r"actions\.runner\.[A-Za-z0-9_.-]+\.service", name), "protected-service-name")
+    return name
+
+
+def confinement(config, unit=None):
+    proof = trusted_file(config["profile_path"], max_bytes=65536)
+    require(proof.sha256 == config["profile_sha256"], "protected-profile-source-drift")
+    # Kernel state is acquired locally, never accepted from caller inventory.
+    with open("/sys/kernel/security/apparmor/profiles", "rb") as stream:
+        loaded = stream.read(1024 * 1024 + 1)
+    require(len(loaded) <= 1024 * 1024
+            and (config["profile"] + " (enforce)").encode() in loaded.splitlines(), "protected-profile-not-enforcing")
+    if unit is not None:
+        path = Path("/etc/systemd/system") / (unit + ".d") / "10-protected.conf"
+        trusted_file(str(path), max_bytes=65536)
+        require(path.read_bytes() == dropin(config), "protected-unit-confinement-drift")
+
+
+def dropin(config):
+    engine = ("Environment=PATH=/usr/local/libexec/lit-runner-engine:/usr/sbin:/usr/bin:/sbin:/bin\n"
+              "Environment=WUNDER_CONTAINER_ENGINE=podman\n") if "rootless_engine" in config else ""
+    return ("[Service]\nNoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n"
+            "Environment=DOTNET_EnableDiagnostics=0\nAppArmorProfile=" + config["profile"] + "\n" + engine).encode()
+
+
+def seal_generated_unit(unit):
+    """Seal only the fresh unit after successful pinned stock installation.
+
+    The stock installer creates root:root0664. This function is never called
+    on the existing/legacy adoption branch and does not accept arbitrary paths.
+    """
+    require(re.fullmatch(r"actions\.runner\.[A-Za-z0-9_.-]+\.service", unit), "protected-service-name")
+    parent = root_directory(SYSTEMD_DIRECTORY)
+    fd = os.open(parent / unit, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == before.st_gid == 0
+                and before.st_nlink == 1 and not before.st_mode & (stat.S_ISUID | stat.S_ISGID),
+                "protected-generated-unit")
+        os.fchmod(fd, 0o644)
+        os.fsync(fd)
+        after = os.fstat(fd)
+        require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                and stat.S_IMODE(after.st_mode) == 0o644, "protected-generated-unit-changed")
+    finally:
+        os.close(fd)
+    return trusted_file(str(parent / unit), max_bytes=65536)
+
+
+def install_dropin(config, unit):
+    parent = root_directory("/etc/systemd/system") / (unit + ".d")
+    if not parent.exists():
+        parent.mkdir(mode=0o755)
+    root_directory(parent)
+    path = parent / "10-protected.conf"
+    require(not path.exists() and not path.is_symlink(), "protected-existing-dropin")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(dropin(config))
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def read_service_state(unit):
+    try:
+        result = subprocess.run(["/usr/bin/systemctl", "show", "--property=ActiveState", "--value", "--", unit],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                cwd="/", env=BASE_ENV, close_fds=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise Denied("protected-service-readback-unavailable") from None
+    require(result.returncode == 0 and result.stdout in (b"active\n", b"inactive\n"),
+            "protected-service-state-unknown")
+    return "started" if result.stdout == b"active\n" else "stopped"
+
+
+def collector_descriptor(config, user, runner_id, unit):
+    fragment = "/etc/systemd/system/" + unit
+    override = fragment + ".d/10-protected.conf"
+    # Root-generated policy data, not a handoff/acceptance or issuer activation.
+    return {"schema": 1,
+            "service": {"unit": unit, "service_user": config["user"],
+                        "installation": {"root": config["root"], "manifest_path": config["manifest"],
+                                         "runner_id": runner_id, "service_uid": user.pw_uid,
+                                         "runner_version": VERSION},
+                        "fragment_path": fragment, "fragment_sha256": trusted_file(fragment).sha256,
+                        "dropins": [[override, trusted_file(override).sha256]]},
+            "profile_name": config["profile"], "profile_path": config["profile_path"],
+            "profile_sha256": config["profile_sha256"],
+            "operation_reference": config["operation_reference"], "storage_reference": config["storage_reference"],
+            "custodian_reference": config["custodian_reference"]}
+
+
+def write_descriptor(config, user, runner_id, unit):
+    path = Path(config["manifest"] + ".collector.json")
+    atomic_json(path, collector_descriptor(config, user, runner_id, unit))
+    return {"config_path": str(path), "config_sha256": trusted_file(str(path)).sha256}
+
+
+def apply(config, token, command=execute, state=read_service_state, *, _register=None, _handoff=None):
+    with provision_lock():
+        return _apply(config, token, command=command, state=state, _register=_register, _handoff=_handoff)
+
+
+def _apply(config, token, command=execute, state=read_service_state, *, _register=None, _handoff=None):
+    # Internal Root migration hooks are not configuration/input-envelope fields
+    # and are never accepted by the CLI. The normal registration path is intact.
+    require((_register is None and _handoff is None)
+            or (callable(_register) and type(_handoff) is dict
+                and set(_handoff) == {"runner_id", "old_unit", "new_unit", "registration_stage", "request_sha256"}
+                and type(_handoff["runner_id"]) is int and _handoff["runner_id"] > 0
+                and not config.get("ephemeral", False)), "protected-internal-handoff")
+    user = account(config)
+    prior = inspect(config)
+    require(_register is None or not prior["existing"], "protected-handoff-target-exists")
+    root, manifest = Path(config["root"]), Path(config["manifest"])
+    journal = manifest.with_suffix(manifest.suffix + ".transaction")
+    confinement(config)
+    if prior["existing"]:
+        # This initial candidate admits only its exact current-version package.
+        # A future-version migration needs a separately qualified old verifier.
+        unit = service_name(root)
+        confinement(config, unit)
+        before = state(unit)
+        saved = decode_json(journal.read_bytes())
+        start_issued = saved.get("service_start_issued", False)
+        require(not (config.get("ephemeral", False) and before == "stopped"
+                     and config["service_state"] == "started" and start_issued),
+                "protected-ephemeral-start-already-issued")
+        if before == config["service_state"]:
+            descriptor_path = Path(config["manifest"] + ".collector.json")
+            trusted_file(str(descriptor_path))
+            require(decode_json(descriptor_path.read_bytes()) == collector_descriptor(config, user, prior["runner_id"], unit),
+                    "protected-collector-config-drift")
+            return {"changed": False, "runner_id": prior["runner_id"], "version": VERSION,
+                    "config_path": str(descriptor_path), "config_sha256": trusted_file(str(descriptor_path)).sha256}
+        # A state command may reach systemd even if its reply is lost. Journal
+        # that uncertainty rather than automatically replaying on the next run.
+        atomic_json(journal, {"schema": 1, "root": str(root), "phase": "service-state-intent", "unit": unit,
+                              "runner_id": prior["runner_id"], "before": before,
+                              "desired": config["service_state"], "operation_reference": config["operation_reference"],
+                              "ephemeral": config.get("ephemeral", False),
+                              "service_start_issued": start_issued or config["service_state"] == "started",
+                              **guest_binding(config)})
+        command(["/usr/bin/systemctl", "start" if config["service_state"] == "started" else "stop", "--", unit], cwd="/")
+        require(state(unit) == config["service_state"], "protected-service-state-readback")
+        verify_installation(InstallationPolicy(str(root), str(manifest), prior["runner_id"], user.pw_uid))
+        atomic_json(journal, {"schema": 1, "root": str(root), "phase": "complete", "unit": unit,
+                              "runner_id": prior["runner_id"], "profile_sha256": config["profile_sha256"],
+                              "ephemeral": config.get("ephemeral", False),
+                              "service_start_issued": start_issued or config["service_state"] == "started",
+                              **guest_binding(config)})
+        return {"changed": True, "runner_id": prior["runner_id"], "version": VERSION,
+                **write_descriptor(config, user, prior["runner_id"], unit)}
+    require(type(token) is str and token.strip() and len(token) <= 8192, "protected-registration-token-required")
+    archive = Path(config["archive"])
+    stage = Path(tempfile.mkdtemp(prefix=".protected-stage-", dir=root.parent))
+    # Staging remains root-private, so job UID cannot mutate configuration/code.
+    phase = "staged"
+    start_issued = False
+    def record(next_phase, **fields):
+        nonlocal phase
+        atomic_json(journal, {"schema": 1, "root": str(root), "stage": str(stage),
+                              "phase": next_phase, "operation_reference": config["operation_reference"],
+                              "ephemeral": config.get("ephemeral", False),
+                              "service_start_issued": start_issued,
+                              **({"handoff": _handoff} if _handoff is not None else {}),
+                              **guest_binding(config), **fields})
+        phase = next_phase
+    try:
+        extract(archive, stage, config["arch"])
+        environment = {**BASE_ENV, "HOME": config["home"], "USER": config["user"],
+                       "RUNNER_ALLOW_RUNASROOT": "1", "ACTIONS_RUNNER_INPUT_TOKEN": token}
+        argv = ["/usr/bin/bash", str(stage / "config.sh"), "--unattended", "--disableupdate", "--url", config["url"],
+                "--name", config["name"], "--labels", ",".join(config["labels"]), "--work", config["work"],
+                "--runnergroup", config["runner_group"]]
+        if config.get("ephemeral", False):
+            argv.append("--ephemeral")
+        record("registration-intent")
+        if _register is None:
+            command(argv, cwd=str(stage), environment=environment)
+        else:
+            _register(stage)
+        return _publish_registered(config, stage, user, _handoff, record, command, state)
+    finally:
+        # Before registration intent, there cannot be a native effect. Later
+        # failures retain evidence/state and deliberately do not auto retry.
+        if phase == "staged":
+            shutil.rmtree(stage)
+
+
+def _publish_registered(config, stage, user, _handoff, record, command, state):
+    """Shared final publication; registration has already completed privately."""
+    root, manifest = Path(config["root"]), Path(config["manifest"])
+    registered = settings(stage)
+    require(registered.get("agentName") == config["name"] and registered.get("workFolder") == config["work"],
+            "protected-registration-readback")
+    require(registered.get("ephemeral", False) is config.get("ephemeral", False), "protected-lifecycle-drift")
+    require(_handoff is None or registered["agentId"] == _handoff["runner_id"],
+            "protected-handoff-runner-id")
+    record("registered", runner_id=registered["agentId"])
+    # Never replace an unexpected path after a remote registration.
+    require(not root.exists() and not root.is_symlink(), "protected-install-target-raced")
+    record("publish-intent", runner_id=registered["agentId"])
+    os.rename(stage, root)
+    record("service-install-intent", runner_id=registered["agentId"])
+    command(["/usr/bin/bash", str(root / "svc.sh"), "install", config["user"]], cwd=str(root))
+    # Stock svc.sh chowns BOTH .service and runsvc.sh to the service UID.
+    # Restore fresh verified-package ownership before trusting the marker.
+    seal(root, user)
+    unit = service_name(root)
+    require(_handoff is None or (unit == _handoff["new_unit"] and unit != _handoff["old_unit"]),
+            "protected-handoff-installed-unit")
+    seal_generated_unit(unit)
+    install_dropin(config, unit)
+    command(["/usr/bin/systemctl", "daemon-reload"], cwd="/")
+    if _handoff is not None:
+        # Stock svc.sh install enables the unit. A migration must remain
+        # disabled as well as stopped until its separate native acceptance.
+        record("service-disable-intent", runner_id=registered["agentId"], unit=unit)
+        command(["/usr/bin/systemctl", "disable", "--", unit], cwd="/")
+        disabled_unit(unit)
+    confinement(config, unit)
+    atomic_json(manifest, manifest_for(root, config, user, registered["agentId"]))
+    verify_installation(InstallationPolicy(str(root), str(manifest), registered["agentId"], user.pw_uid))
+    start_issued = config["service_state"] == "started"
+    record("service-state-intent", runner_id=registered["agentId"], unit=unit, service_start_issued=start_issued)
+    command(["/usr/bin/systemctl", "start" if config["service_state"] == "started" else "stop", "--", unit], cwd="/")
+    require(state(unit) == config["service_state"], "protected-service-state-readback")
+    if _handoff is not None:
+        disabled_unit(unit)
+    # Re-read sealed inventory after service command, not a cached receipt.
+    verify_installation(InstallationPolicy(str(root), str(manifest), registered["agentId"], user.pw_uid))
+    descriptor = write_descriptor(config, user, registered["agentId"], unit)
+    record("complete", runner_id=registered["agentId"], unit=unit, profile_sha256=config["profile_sha256"],
+           service_start_issued=start_issued)
+    return {"changed": True, "runner_id": registered["agentId"], "version": VERSION, **descriptor}
+
+
+def absent_unit(unit):
+    """Read-only collision check; never overwrite a loaded or on-disk unit."""
+    from incus_lease_issuer import service
+    require(re.fullmatch(r"actions\.runner\.[A-Za-z0-9_.-]+\.service", unit), "protected-service-name")
+    for directory in (SYSTEMD_DIRECTORY, Path("/run/systemd/system"),
+                      Path("/usr/local/lib/systemd/system"), Path("/usr/lib/systemd/system")):
+        require(not os.path.lexists(directory/unit) and not os.path.lexists(directory/(unit+".d")),
+                "protected-handoff-unit-collision")
+    raw = service._command(["/usr/bin/systemctl", "--system", "--no-pager", "--full",
+                            "list-units", "--all", "--output=json", "--", unit])
+    require(type(raw) is bytes and len(raw) <= 65536 and json.loads(raw) == [],
+            "protected-handoff-unit-loaded")
+
+
+def disabled_unit(unit):
+    from incus_lease_issuer import service
+    require(re.fullmatch(r"actions\.runner\.[A-Za-z0-9_.-]+\.service", unit), "protected-service-name")
+    raw = service._command(["/usr/bin/systemctl", "--system", "--no-pager", "show",
+                            "--property=UnitFileState", "--value", "--", unit])
+    require(raw == b"disabled\n", "protected-handoff-new-unit-autostart")
+
+
+def migrate_stopped(config, fence_policy, registration_stage, token, *, command=execute, state=read_service_state):
+    with provision_lock():
+        return _migrate_stopped(config, fence_policy, registration_stage, token, command=command, state=state)
+
+
+def handoff_plan(config, fence_policy, registration_stage):
+    """Validate the same closed request for read-only inspection and apply."""
+    from incus_lease_issuer import native_fence
+    config = configuration(json.dumps(config).encode())
+    native_fence._validate(fence_policy)
+    require(config.get("ephemeral", False) is False and config["service_state"] == "stopped"
+            and "expected_guest_uuid" not in config and "rootless_engine" not in config,
+            "protected-handoff-physical-stopped")
+    require(config["name"] == fence_policy.runner_name
+            and config["url"] == "https://github.com/"+fence_policy.owner_login
+            and config["runner_group"] == fence_policy.group_name
+            and config["work"] == fence_policy.target_work_folder
+            and config["arch"] == fence_policy.target_architecture
+            and sorted(config["labels"]) == sorted(name for name, _ in fence_policy.labels)
+            and config["user"] != fence_policy.old_user, "protected-handoff-policy-binding")
+    old, store = canonical(fence_policy.old_root), canonical(registration_stage)
+    for name in ("root", "manifest", "storage", "work", "home"):
+        path = canonical(config[name])
+        require(path != old and old not in path.parents and path not in old.parents,
+                "protected-handoff-old-tree-overlap")
+        require(store != path and store not in path.parents and path not in store.parents,
+                "protected-handoff-store-overlap")
+    require(store != old and old not in store.parents and store not in old.parents,
+            "protected-handoff-old-tree-overlap")
+    root_directory(store.parent)
+    unit = "actions.runner."+fence_policy.owner_login+"."+fence_policy.runner_name+".service"
+    require(unit != fence_policy.old_unit and len(unit) <= 150, "protected-handoff-old-unit-collision")
+    # Bind nonsecret configuration and fence policy, never the token or key.
+    request_digest = hashlib.sha256(json.dumps({"configuration": config, "fence": asdict(fence_policy)},
+                                               sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    handoff = {"runner_id": fence_policy.runner_id, "old_unit": fence_policy.old_unit,
+               "new_unit": unit, "registration_stage": str(store), "request_sha256": request_digest}
+    return config, store, handoff
+
+
+def inspect_handoff(config, fence_policy, registration_stage, *, state=read_service_state):
+    """Read-only bounded snapshot, never an effect capability or reservation.
+
+    No lock/store/staging creation, registration request or service command.
+    Concurrent state may change; apply independently reacquires its own fence.
+    """
+    from incus_lease_issuer import native_fence
+    config, store, handoff = handoff_plan(config, fence_policy, registration_stage)
+    if os.path.lexists(store):
+        return completed_handoff(config, fence_policy, store, handoff, state=state)
+    require(not inspect(config)["existing"], "protected-handoff-target-exists")
+    confinement(config)
+    archive = trusted_file(config["archive"], max_bytes=512*1024*1024)
+    require(archive.sha256 == ARCHIVES[config["arch"]], "protected-archive-sha256")
+    absent_unit(handoff["new_unit"])
+    target = native_fence.issue_after_stop(fence_policy)
+    return {"changed": False, "runner_id": target.runner_id, "version": VERSION,
+            "state": "stopped-handoff-prerequisites-observed", "native_mutation": False}
+
+
+def _migrate_stopped(config, fence_policy, registration_stage, token, *, command=execute, state=read_service_state):
+    """Root-only stopped handoff; never stop/disable the old unit or start one.
+
+    The external maintenance caller owns its actual approved operating window
+    and reservation. This function independently reacquires the native fence.
+    """
+    from incus_lease_issuer import native_fence, registration, registration_service
+    config, store, handoff = handoff_plan(config, fence_policy, registration_stage)
+    unit = handoff["new_unit"]
+    if os.path.lexists(store):
+        return completed_handoff(config, fence_policy, store, handoff, state=state)
+    require(not inspect(config)["existing"], "protected-handoff-target-exists")
+    absent_unit(unit)
+    initial = native_fence.issue_after_stop(fence_policy)
+
+    def register(stage):
+        # Extraction/pin verification happened first. Reacquire current native
+        # facts immediately before the one expected-ID credential transition.
+        absent_unit(unit)
+        target = native_fence.issue_after_stop(fence_policy)
+        require(registration._identity(target) == registration._identity(initial),
+                "protected-handoff-target-drift")
+        template = stage/"bin/systemd.svc.sh.template"
+        trusted_file(str(template), max_bytes=65536)
+        raw_template = template.read_bytes()
+        require(hashlib.sha256(raw_template).hexdigest() == registration_service.TEMPLATE_SHA256,
+                "protected-handoff-service-template")
+        store.mkdir(mode=0o700)
+        registration.initialize(str(store), target)
+        registration.replace_registration(str(store), target, token)
+        material = registration.read_completed(str(store), target)
+        for name, raw in ((".runner", material.settings), (".credentials", material.credentials),
+                          (registration.KEY_FILE, material.private_key)):
+            fd = os.open(stage/name, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        script = registration_service.generate(raw_template, target, settings(stage))
+        # Only the freshly verified private archive tree is updated. No legacy
+        # code, credentials or work directory is adopted or read.
+        (stage/"svc.sh").write_bytes(script.content)
+        (stage/"svc.sh").chmod(0o755)
+        absent_unit(unit)
+
+    return _apply(config, token, command=command, state=state, _register=register, _handoff=handoff)
+
+
+def completed_handoff(config, fence_policy, store, handoff, *, state=read_service_state):
+    """Read-only successful reentry; uncertain or changed state never repairs.
+
+    Apply calls hold the host provisioner lock; inspect calls provide only a
+    bounded read-only snapshot. Both paths reacquire the native fence.
+    """
+    from incus_lease_issuer import native_fence, registration
+    root = Path(config["root"])
+    require(os.path.lexists(root), "protected-handoff-store-exists")
+    proof = inspect(config)
+    journal = Path(config["manifest"]+".transaction")
+    saved = decode_json(journal.read_bytes())
+    require(proof["existing"] and saved.get("handoff") == handoff
+            and saved.get("operation_reference") == config["operation_reference"]
+            and saved.get("service_start_issued") is False
+            and saved.get("unit") == handoff["new_unit"]
+            and proof["runner_id"] == handoff["runner_id"], "protected-handoff-completed-binding")
+    unit = service_name(root)
+    require(unit == handoff["new_unit"] and state(unit) == "stopped", "protected-handoff-completed-service")
+    disabled_unit(unit)
+    confinement(config, unit)
+    target = native_fence.issue_after_stop(fence_policy)
+    material = registration.read_completed(str(store), target)
+    for name, expected in ((".runner", material.settings), (".credentials", material.credentials),
+                           (registration.KEY_FILE, material.private_key)):
+        trusted_file(str(root/name), max_bytes=registration.MAX_BYTES)
+        require((root/name).read_bytes() == expected, "protected-handoff-completed-material")
+    user = account(config)
+    descriptor = Path(config["manifest"]+".collector.json")
+    descriptor_proof = trusted_file(str(descriptor))
+    require(decode_json(descriptor.read_bytes()) == collector_descriptor(config, user, proof["runner_id"], unit),
+            "protected-collector-config-drift")
+    # Do not return success if the final bounded native observations drifted.
+    require(registration._identity(native_fence.issue_after_stop(fence_policy)) == registration._identity(target),
+            "protected-handoff-target-drift")
+    require(state(unit) == "stopped", "protected-handoff-completed-service")
+    disabled_unit(unit)
+    return {"changed": False, "runner_id": proof["runner_id"], "version": VERSION,
+            "config_path": str(descriptor), "config_sha256": descriptor_proof.sha256}
+
+
+def registration_proof(config):
+    """Nonsecret Root readback for the controller's stopped registration gate."""
+    require("expected_guest_uuid" in config and config.get("ephemeral") is True,
+            "protected-bound-registration-required")
+    proof = inspect(config)
+    require(proof["existing"], "protected-existing-registration-required")
+    unit = service_name(Path(config["root"]))
+    confinement(config, unit)
+    saved = decode_json(Path(config["manifest"] + ".transaction").read_bytes())
+    require(read_service_state(unit) == "stopped" and saved.get("service_start_issued") is False,
+            "protected-stopped-registration-required")
+    return {"vm_uuid": config["expected_guest_uuid"], "operation_reference": config["operation_reference"],
+            "runner_id": proof["runner_id"], "runner_name": config["name"], "ephemeral": True,
+            "service_state": "stopped", "service_start_issued": False,
+            "manifest_sha256": trusted_file(config["manifest"]).sha256}
+
+
+def engine_command(argv):
+    try:
+        result = subprocess.run(argv, cwd='/', env=BASE_ENV, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                timeout=45, check=False, close_fds=True)
+    except (OSError, subprocess.SubprocessError):
+        raise Denied('protected-engine-native-outcome-unknown') from None
+    require(result.returncode == 0 and len(result.stdout) <= 65536, 'protected-engine-native-outcome-unknown')
+    return result.stdout.decode('utf-8')
+
+
+def prepare_engine(config, command=engine_command):
+    require('rootless_engine' in config and config.get('ephemeral') is True
+            and config['service_state'] == 'stopped', 'protected-engine-lifecycle')
+    def reattest():
+        proof = inspect(config)
+        require(proof['existing'], 'protected-engine-registration-required')
+        journal = decode_json(Path(config['manifest'] + '.transaction').read_bytes())
+        require(journal.get('service_start_issued') is False, 'protected-engine-runner-already-used')
+        confinement(config, service_name(Path(config['root'])))
+        return proof
+    proof = reattest()
+    user = account(config)
+    import rootless_engine
+    source = Path(__file__).with_name('rootless_podman_client.py')
+    trusted_file(str(source), max_bytes=65536)
+    binding = {'name': config['name'], 'user': config['user'], 'group': config['group'],
+               'uid': user.pw_uid, 'gid': user.pw_gid, 'runner_id': proof['runner_id'],
+               'runner_unit': service_name(Path(config['root'])),
+               'manifest_sha256': trusted_file(config['manifest']).sha256}
+    return rootless_engine.prepare(binding, config['rootless_engine'], source.read_bytes(),
+                                   command, reattest)
+
+
+def input_configuration(raw, action):
+    """Token-bearing Ansible module input stays on stdin, never shell argv."""
+    if action != "apply-input":
+        return configuration(raw), None
+    envelope = decode_json(raw)
+    require(type(envelope) is dict and set(envelope) == {"configuration", "registration_token"}
+            and type(envelope["registration_token"]) is str and len(envelope["registration_token"]) <= 8192,
+            "protected-input-envelope")
+    token = envelope.pop("registration_token")
+    config = configuration(json.dumps(envelope["configuration"]).encode())
+    return config, token
+
+
+def handoff_input(raw, action):
+    """Root maintenance stdin only; no job hook or token-bearing argv."""
+    from incus_lease_issuer import native_fence
+    require(os.geteuid() == 0, "protected-root-required")
+    envelope = decode_json(raw)
+    expected = {"configuration", "native_fence", "registration_stage"}
+    applying = action == "handoff-apply-input"
+    require(action in ("handoff-inspect-input", "handoff-apply-input") and type(envelope) is dict
+            and set(envelope) == expected | ({"registration_token"} if applying else set()),
+            "protected-handoff-input-envelope")
+    token = envelope.get("registration_token", "")
+    require(type(token) is str and len(token) <= 8192, "protected-input-envelope")
+    value = envelope["native_fence"]
+    require(type(value) is dict and set(value) == set(native_fence.NativeFencePolicy.__dataclass_fields__),
+            "protected-handoff-fence-schema")
+    value = dict(value)
+    for name in ("labels", "old_dropins"):
+        require(type(value[name]) is list and all(type(row) is list and len(row) == 2 for row in value[name]),
+                "protected-handoff-fence-schema")
+        value[name] = tuple(tuple(row) for row in value[name])
+    policy = native_fence.NativeFencePolicy(**value)
+    native_fence._validate(policy)
+    canonical(envelope["registration_stage"])
+    config = configuration(json.dumps(envelope["configuration"]).encode())
+    return config, policy, envelope["registration_stage"], token
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("inspect", "apply", "engine", "registration-proof", "apply-input",
+                                         "handoff-inspect-input", "handoff-apply-input"))
+    options = parser.parse_args()
+    try:
+        raw = sys.stdin.buffer.read(81921)
+        require(len(raw) <= (81920 if options.action.endswith("-input") else 65536), "protected-config-size")
+        if options.action.startswith("handoff-"):
+            config, policy, stage, token = handoff_input(raw, options.action)
+            result = (inspect_handoff(config, policy, stage) if options.action == "handoff-inspect-input"
+                      else migrate_stopped(config, policy, stage, token))
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        config, input_token = input_configuration(raw, options.action)
+        if options.action == "inspect":
+            result = inspect(config, require_account=Path(config["root"]).exists())
+            result.pop("proof", None)
+        elif options.action == "registration-proof":
+            result = registration_proof(config)
+        elif options.action == "engine":
+            result = prepare_engine(config)
+        else:
+            result = apply(config, input_token if options.action == "apply-input"
+                           else os.environ.pop("ACTIONS_RUNNER_INPUT_TOKEN", ""))
+        print(json.dumps(result, sort_keys=True))
+    except (Denied, OSError, KeyError, ValueError, tarfile.TarError):
+        # No input/token/child output is interpolated into public failures.
+        print("protected provisioner denied; reconcile retained journal before retry", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+def _staged_inventory(root):
+    require(stat.S_IMODE(root_directory(root).stat().st_mode) == 0o700, "protected-stage-private")
+    result = {}
+    for directory, children, leaves in os.walk(root, followlinks=False):
+        for name in children + leaves:
+            path = Path(directory)/name
+            info = path.lstat()
+            relative = path.relative_to(root).as_posix()
+            require(info.st_uid == 0 and info.st_gid == 0, "protected-stage-owner")
+            if stat.S_ISLNK(info.st_mode):
+                require(LINKS.get(relative) == os.readlink(path), "protected-stage-link")
+                result[relative] = ("link", os.readlink(path))
+            elif stat.S_ISDIR(info.st_mode):
+                mode = stat.S_IMODE(info.st_mode)
+                # extract() uses mkdir0755, which honors the Root process umask.
+                # Keep actual modes in the exact fresh-reference comparison.
+                require(mode & 0o700 == 0o700 and not mode & ~0o755, "protected-stage-directory")
+                result[relative] = ("directory", mode)
+            else:
+                proof = trusted_file(str(path), max_bytes=512*1024*1024)
+                require(info.st_nlink == 1 and stat.S_IMODE(info.st_mode) in (0o644, 0o755),
+                        "protected-stage-file")
+                result[relative] = ("file", stat.S_IMODE(info.st_mode), proof.sha256)
+    return result
+
+
+def complete_registered_handoff(config, fence_policy, registration_stage,
+                                 *, command=execute, state=read_service_state):
+    """Explicit Root completion of an unchanged fresh stage after registration.
+
+    No authentication, replacement, key generation, old-tree adoption or old
+    service mutation occurs. The ordinary migration still holds partial state.
+    Only a registration-intent journal plus complete private registration can
+    enter this bounded materialization/publication. Later uncertain phases hold.
+    """
+    from incus_lease_issuer import native_fence, registration, registration_service
+    with provision_lock():
+        config, store, handoff = handoff_plan(config, fence_policy, registration_stage)
+        root, manifest = Path(config["root"]), Path(config["manifest"])
+        journal = Path(str(manifest)+".transaction")
+        trusted_file(str(journal), max_bytes=65536)
+        saved = decode_json(journal.read_bytes())
+        require(type(saved) is dict and saved.get("phase") == "registration-intent"
+                and saved.get("handoff") == handoff and saved.get("root") == str(root)
+                and saved.get("operation_reference") == config["operation_reference"]
+                and saved.get("ephemeral") is False and saved.get("service_start_issued") is False,
+                "protected-completion-journal")
+        require(not os.path.lexists(root) and not os.path.lexists(manifest), "protected-completion-root-present")
+        stage = canonical(saved.get("stage"))
+        require(stage.parent == root.parent and re.fullmatch(r"[.]protected-stage-[a-z0-9_]{8}", stage.name),
+                "protected-completion-stage")
+        user = account(config)
+        confinement(config)
+        absent_unit(handoff["new_unit"])
+        # Reuse the pinned extractor to compare the entire retained public tree,
+        # including links, modes and generated runsvc.sh; never repair it.
+        reference = Path(tempfile.mkdtemp(prefix=".protected-verify-", dir=root.parent))
+        try:
+            extract(Path(config["archive"]), reference, config["arch"])
+            require(_staged_inventory(stage) == _staged_inventory(reference), "protected-completion-stage-drift")
+        finally:
+            shutil.rmtree(reference)
+        target = native_fence.issue_after_stop(fence_policy)
+        material = registration.read_completed(str(store), target)
+
+        def record(next_phase, **fields):
+            atomic_json(journal, {"schema": 1, "root": str(root), "stage": str(stage),
+                "phase": next_phase, "operation_reference": config["operation_reference"],
+                "ephemeral": False, "service_start_issued": False, "handoff": handoff, **fields})
+
+        record("registration-materialize-intent", runner_id=target.runner_id)
+        for name, raw in ((".runner", material.settings), (".credentials", material.credentials),
+                          (registration.KEY_FILE, material.private_key)):
+            fd = os.open(stage/name, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(raw);stream.flush();os.fsync(stream.fileno())
+        template = stage/"bin/systemd.svc.sh.template"
+        trusted_file(str(template), max_bytes=65536)
+        # Renew native observations after comparison and materialization; no
+        # cached effect capability can authorize service publication.
+        target = native_fence.issue_after_stop(fence_policy)
+        script = registration_service.generate(template.read_bytes(), target, settings(stage))
+        (stage/"svc.sh").write_bytes(script.content)
+        (stage/"svc.sh").chmod(0o755)
+        absent_unit(handoff["new_unit"])
+        return _publish_registered(config, stage, user, handoff, record, command, state)

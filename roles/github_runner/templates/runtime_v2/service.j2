@@ -1,0 +1,14 @@
+[Unit]
+Description=Incus Runtimev2 accepted connection
+ConditionPathExists=/etc/lit/incus-lease-issuer/runtime-v2-anchor.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+StandardInput=socket
+StandardOutput=null
+StandardError=null
+NoNewPrivileges=yes
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/lit-incus-runtime-v2/runtime_v2_entry.py

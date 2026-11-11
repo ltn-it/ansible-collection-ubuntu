@@ -4,6 +4,56 @@
   become: false
   gather_facts: false
   tasks:
+    - name: Produce genuine registered JSON stdout for the coupled preview transport regression
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_playbook_python }}'
+          - -c
+          - 'import sys; sys.stdout.write("{\"nftables\":[]}")'
+      register: host_firewall_coupled_preview_raw
+      changed_when: false
+
+    - name: Derive coupled approval with the actual preview digest task
+      ansible.builtin.include_role:
+        name: lit.ubuntu.host_firewall
+        tasks_from: preview_digest
+      vars:
+        host_firewall_container_ssh_guard_managed: true
+
+    - name: Check coupled digest against independently hashed exact stdout bytes
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_playbook_python }}'
+          - -c
+          - 'import hashlib,sys; assert sys.argv[1] == hashlib.sha256(b"{\"nftables\":[]}").hexdigest()'
+          - '{{ host_firewall_preview_readback_sha256 }}'
+      changed_when: false
+
+    - name: Produce genuine registered JSON stdout for the single-table preview transport regression
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_playbook_python }}'
+          - -c
+          - 'import sys; sys.stdout.write("{\"nftables\":[]}")'
+      register: host_firewall_preview_canonical
+      changed_when: false
+
+    - name: Derive single-table approval with the actual preview digest task
+      ansible.builtin.include_role:
+        name: lit.ubuntu.host_firewall
+        tasks_from: preview_digest
+      vars:
+        host_firewall_container_ssh_guard_managed: false
+
+    - name: Check single-table digest against independently hashed exact stdout bytes
+      ansible.builtin.command:
+        argv:
+          - '{{ ansible_playbook_python }}'
+          - -c
+          - 'import hashlib,sys; assert sys.argv[1] == hashlib.sha256(b"{\"nftables\":[]}").hexdigest()'
+          - '{{ host_firewall_preview_readback_sha256 }}'
+      changed_when: false
+
     - name: Execute the dedicated firewall playbook under real global check mode
       ansible.builtin.command:
         argv:
@@ -124,6 +174,51 @@
         PYTHONDONTWRITEBYTECODE: "1"
       changed_when: false
   tasks:
+    - name: Plan an explicitly managed empty SSH guard without container queries
+      ansible.builtin.include_role:
+        name: lit.ubuntu.host_firewall
+      vars:
+        host_firewall_action: plan
+        host_firewall_container_ssh_guard_managed: true
+        host_firewall_container_ssh_access: {}
+
+    - name: Require both owned tables and no implicit SSH capability
+      ansible.builtin.assert:
+        that:
+          - host_firewall_plan.schema == 'lit.host_firewall.plan/v4'
+          - host_firewall_plan.owned_tables | length == 2
+          - host_firewall_plan.container_ssh_bindings | length == 0
+          - "'destroy table bridge lit_container_ssh_guard' in host_firewall_candidate_content"
+          - "'destroy table inet lit_host_firewall' in host_firewall_candidate_content"
+
+    - name: Reject an incomplete legacy container SSH declaration before changes
+      block:
+        - name: Attempt a managed capability with no selected container identity
+          ansible.builtin.include_role:
+            name: lit.ubuntu.host_firewall
+          vars:
+            host_firewall_action: plan
+            host_firewall_container_ssh_guard_managed: true
+            host_firewall_container_ssh_access:
+              console:
+                interface: podman1
+                source_ipv4: 10.89.0.20/32
+                destination_ipv4: 10.89.0.1
+                port: 1905
+                modes: [bootstrap, hardened]
+
+        - name: Fail when the missing namespace identity was accepted
+          ansible.builtin.fail:
+            msg: Missing container identity must stop discovery before changes.
+      rescue:
+        - name: Require the specific read-only discovery rejection
+          ansible.builtin.assert:
+            that:
+              - "'Discover actual active container namespace' in ansible_failed_task.name"
+              - not ansible_failed_result.changed
+              - (ansible_failed_result.stdout | from_json).discovery_stopped is sameas true
+              - (ansible_failed_result.stdout | from_json).mutations is sameas false
+
     - name: Check complete candidate with the nft command double
       ansible.builtin.include_role:
         name: lit.ubuntu.host_firewall

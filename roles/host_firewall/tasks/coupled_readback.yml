@@ -1,0 +1,26 @@
+---
+- name: Require the independently approved complete policy digest
+  ansible.builtin.assert:
+    that:
+      - host_firewall_approved_readback_sha256 is match('^[a-f0-9]{64}\Z')
+
+- name: Read and canonicalize only both configured owned tables
+  ansible.builtin.command:
+    argv: >-
+      {{ [host_firewall_python_binary, '-c',
+          lookup('ansible.builtin.file', role_path + '/files/firewall_transaction.py')]
+         + host_firewall_transaction_program_argv[1:] + ['readback'] }}
+  register: host_firewall_coupled_readback
+  changed_when: false
+  check_mode: false
+
+- name: Require complete owned-table readback acceptance
+  ansible.builtin.assert:
+    that:
+      - host_firewall_coupled_readback.rc == 0
+      - host_firewall_coupled_readback.stdout | hash('sha256') == host_firewall_approved_readback_sha256
+
+- name: Publish the complete coupled policy readback
+  ansible.builtin.set_fact:
+    host_firewall_readback_canonical_json: '{{ host_firewall_coupled_readback.stdout }}'
+    host_firewall_readback_sha256: "{{ host_firewall_coupled_readback.stdout | hash('sha256') }}"

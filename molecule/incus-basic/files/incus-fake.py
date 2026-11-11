@@ -1,12 +1,15 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Small stateful Incus CLI double for the light Molecule scenario."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
 
-STATE_DIR = Path("/var/lib/incus-fake")
+STATE_DIR = Path(os.environ["LIT_INCUS_FAKE_STATE"])
+if not STATE_DIR.is_absolute():
+    raise ValueError("The Incus fixture state path must be absolute")
 STORAGE_FILE = STATE_DIR / "storage.json"
 PROJECT_FILE = STATE_DIR / "projects.json"
 PROFILE_FILE = STATE_DIR / "profiles.json"

@@ -1,0 +1,6 @@
+---
+bugfixes:
+  - >-
+    cis_ubuntu24 - align the immutable remediation dependency with the standard
+    EE's Ubuntu24-CIS 1.8.0 while retaining the independent CIS v1.0.0 audit and
+    explicit exception guards.

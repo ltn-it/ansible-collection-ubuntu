@@ -1,0 +1,44 @@
+---
+- name: Validate the unused filesystem module list type
+  ansible.builtin.assert:
+    that:
+      - cis_ubuntu24_disabled_filesystem_modules is sequence
+      - cis_ubuntu24_disabled_filesystem_modules is not string
+      - cis_ubuntu24_disabled_filesystem_modules is not mapping
+
+- name: Validate narrowly supported unused filesystem module declarations
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.keys() | sort == ['name', 'reason']
+      - item.name is string
+      - item.name is match('^[a-z0-9][a-z0-9_]*$')
+      - item.name not in ['ext2', 'ext3', 'ext4', 'overlay', 'fuse', 'autofs4', 'binfmt_misc', 'fat', 'vfat']
+      - item.reason is string
+      - item.reason | trim | length > 0
+      - item.reason | regex_search('[\x00-\x1f\x7f]') is none
+    fail_msg: >-
+      Declare normalized module names with a single-line reason. Native
+      preflight must prove the filesystem aliases; boot/container modules
+      are forbidden.
+  loop: "{{ cis_ubuntu24_disabled_filesystem_modules }}"
+  loop_control:
+    label: "{{ item.name | default('<invalid module>') }}"
+
+- name: Reject duplicate unused filesystem module declarations
+  ansible.builtin.assert:
+    that:
+      - >-
+        cis_ubuntu24_disabled_filesystem_modules | map(attribute='name') | unique | length
+        == cis_ubuntu24_disabled_filesystem_modules | length
+
+- name: Require a real isolated apply for unused filesystem module changes
+  when:
+    - cis_ubuntu24_execution_mode == 'remediate'
+    - cis_ubuntu24_disabled_filesystem_modules | length > 0
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+    fail_msg: >-
+      Check mode cannot prove the effective installed module policy;
+      qualify a real isolated apply before delivery.

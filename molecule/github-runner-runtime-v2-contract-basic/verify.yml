@@ -1,0 +1,18 @@
+---
+- name: Verify runtime-v2 source contract remains non-activating
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read installed task entry from this collection
+      ansible.builtin.set_fact:
+        github_runner_runtime_v2_contract_tasks: >-
+          {{ lookup('ansible.builtin.file', lookup('env', 'MOLECULE_PROJECT_DIRECTORY')
+          ~ '/roles/github_runner/tasks/runtime_v2.yml') }}
+    - name: Require no enable or service-state mutation in installation
+      ansible.builtin.assert:
+        that:
+          - "'daemon_reload: true' in github_runner_runtime_v2_contract_tasks"
+          - "'enabled: true' not in github_runner_runtime_v2_contract_tasks"
+          - "'state: started' not in github_runner_runtime_v2_contract_tasks"
+          - "'state: stopped' not in github_runner_runtime_v2_contract_tasks"

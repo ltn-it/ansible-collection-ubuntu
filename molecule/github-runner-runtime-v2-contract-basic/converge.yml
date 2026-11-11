@@ -1,0 +1,36 @@
+---
+- name: Validate default-off runtime-v2 interface without host effects
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Validate disabled interface without runtime inputs
+      ansible.builtin.include_role:
+        name: lit.ubuntu.github_runner
+        tasks_from: runtime_v2_assert.yml
+        public: true
+
+    - name: Require default-off and unchanged legacy defaults
+      ansible.builtin.assert:
+        that:
+          - github_runner_runtime_v2_install is sameas false
+          - github_runner_version == '2.335.1'
+          - github_runner_protected_version == '2.338.2'
+
+    - name: Prove missing explicit pins deny before installation
+      block:
+        - name: Validate intentionally incomplete opt-in interface
+          ansible.builtin.include_role:
+            name: lit.ubuntu.github_runner
+            tasks_from: runtime_v2_assert.yml
+          vars:
+            github_runner_runtime_v2_install: true
+      rescue:
+        - name: Record expected missing-input rejection
+          ansible.builtin.set_fact:
+            github_runner_runtime_v2_contract_denied: true
+
+    - name: Require actual missing-input denial
+      ansible.builtin.assert:
+        that:
+          - github_runner_runtime_v2_contract_denied | default(false) | bool

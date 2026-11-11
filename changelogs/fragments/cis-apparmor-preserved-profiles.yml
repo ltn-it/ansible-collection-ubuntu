@@ -1,0 +1,6 @@
+---
+minor_changes:
+  - >-
+    cis_ubuntu24 - verify exact accepted package-compatible AppArmor attachments
+    before and after upstream execution without changing kernel policy or
+    reporting exceptions as benchmark passes.

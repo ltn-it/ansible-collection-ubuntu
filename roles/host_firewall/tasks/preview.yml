@@ -33,6 +33,21 @@
           - "{{ host_firewall_preview_file.path }}"
       register: host_firewall_preview_raw
       changed_when: false
+      when: not host_firewall_container_ssh_guard_managed
+
+    - name: Load and read the complete coupled policy in the isolated namespace
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/bin/unshare', '--net', '/bin/sh', '-c',
+              '"$1" add table "$2" "$3" && "$1" --file "$4" && shift 4 && exec "$@"',
+              'lit-coupled-firewall-preview', host_firewall_nft_binary,
+              host_firewall_table_family, host_firewall_table_name,
+              host_firewall_preview_file.path, host_firewall_python_binary, '-c',
+              lookup('ansible.builtin.file', role_path + '/files/firewall_transaction.py')]
+             + host_firewall_transaction_program_argv[1:] + ['readback'] }}
+      register: host_firewall_coupled_preview_raw
+      changed_when: false
+      when: host_firewall_container_ssh_guard_managed
 
     - name: Canonicalize isolated structured readback
       ansible.builtin.command:
@@ -50,11 +65,10 @@
         stdin_add_newline: false
       register: host_firewall_preview_canonical
       changed_when: false
+      when: not host_firewall_container_ssh_guard_managed
 
     - name: Publish independently derived candidate readback digest
-      ansible.builtin.set_fact:
-        host_firewall_preview_readback_sha256: >-
-          {{ host_firewall_preview_canonical.stdout | hash('sha256') }}
+      ansible.builtin.import_tasks: preview_digest.yml
 
     - name: Report candidate and approved readback bindings
       ansible.builtin.debug:
