@@ -113,11 +113,12 @@ class RootMemoryTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "^intake-acquisition-held$"):
             self.acquire(request)
         self.assertGreater(os.fstat(self.fx.fds[0]).st_size, 0)
-        downloads = [p for h, _, p, _ in self.fx.calls if h.endswith("blob.core.windows.net")]
+        downloads = [p for h, _, p, _ in self.fx.calls if h == "productionresultssa1.blob.core.windows.net"]
         self.assertEqual(len(downloads), 1)
         with self.assertRaises(Denied):
             self.acquire(request)
-        self.assertEqual(len([p for h, _, p, _ in self.fx.calls if h.endswith("blob.core.windows.net")]), 1)
+        self.assertEqual(len([p for h, _, p, _ in self.fx.calls
+                              if h == "productionresultssa1.blob.core.windows.net"]), 1)
 
     def test_native_drift_after_download_denies_and_redacts_transport_error(self):
         count = 0
@@ -317,7 +318,8 @@ class RootStageTests(unittest.TestCase):
             return intake.stage_run_snapshot(object(), object(), self.selected, "fake-oidc", self.helper.token)
 
     def downloads(self):
-        return len([path for host, _, path, _ in self.fx.calls if host.endswith("blob.core.windows.net")])
+        return len([path for host, _, path, _ in self.fx.calls
+                    if host == "productionresultssa1.blob.core.windows.net"])
 
     def stamps(self, directory):
         return {path.name: intake.installation._stamp(path.stat()) for path in Path(directory).iterdir()}
