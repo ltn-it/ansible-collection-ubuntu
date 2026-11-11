@@ -149,15 +149,27 @@ def _remove_tree(root, inventory, end):
             # Links/sockets/devices are unlinked as entries, never opened or
             # followed. A nested directory is removed only when already empty.
             if directory:
+                # All children precede this node. Persist their removals once
+                # on the independently reopened, identity/mount-checked child
+                # before removing its name. The caller already has a durable
+                # intent: interrupted batches remain unknown, never verified.
+                child = _directory_at(root, path, identities, mount_id)
+                try:
+                    _deadline(end)
+                    os.fsync(child)
+                    _deadline(end)
+                finally:
+                    os.close(child)
                 os.rmdir(path[-1], dir_fd=fd)
             else:
                 os.unlink(path[-1], dir_fd=fd)
-            os.fsync(fd)
         finally:
             os.close(fd)
     with _fresh_entries(root) as entries:
         require(next(entries, None) is None, "cleanup-storage-new-entry")
+    _deadline(end)
     os.fsync(root)
+    _deadline(end)
 
 
 def _absent(paths):

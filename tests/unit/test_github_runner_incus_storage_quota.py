@@ -12,7 +12,8 @@ from pathlib import Path
 import stat
 import struct
 import sys
-from types import SimpleNamespace
+import tempfile
+from types import SimpleNamespace, ModuleType
 import unittest
 from unittest import mock
 
@@ -43,6 +44,57 @@ class QuotaBoundaryTests(unittest.TestCase):
                     b"99 2 7:8 / /slot rw ext4 /dev/loop8 rw\n"):
             with self.assertRaises(Denied):
                 quota._mounts(raw)
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux proper EE only")
+class RootFilesystemStatTests(unittest.TestCase):
+    def test_one_symbol_resolution_preserves_every_actual_syscall_proc_check_and_failure(self):
+        """Real proc/tmpfs descriptors and EBADF; no cached observations."""
+        base = Path("/run/proof")
+        if not base.is_dir() or base.stat().st_uid != 0 or stat.S_IMODE(base.stat().st_mode) != 0o700:
+            self.skipTest("private Root0700 /run/proof required")
+        temporary = tempfile.TemporaryDirectory(dir=base, prefix="fstatfs-cache-")
+        self.addCleanup(temporary.cleanup)
+        ordinary = Path(temporary.name) / "ordinary"
+        ordinary.write_bytes(b"not procfs")
+        proc = os.open("/proc/self/mountinfo", quota.installation.FILE_FLAGS)
+        regular = os.open(ordinary, quota.installation.FILE_FLAGS)
+        self.addCleanup(os.close, proc); self.addCleanup(os.close, regular)
+        expected_regular = quota._fs_type(regular)
+        self.assertNotEqual(expected_regular, quota.PROCFS)
+        actual = quota.ctypes.CDLL(None, use_errno=True).fstatfs
+        counts = {"library": 0, "symbol": 0, "calls": 0}
+        def invoke(fd, buffer):
+            counts["calls"] += 1
+            return actual(fd, buffer)
+        class Library:
+            @property
+            def fstatfs(self):
+                counts["symbol"] += 1
+                return invoke
+        def library(*args, **kwargs):
+            self.assertEqual((args, kwargs), ((None,), {"use_errno": True}))
+            counts["library"] += 1
+            return Library()
+        name = "incus_lease_issuer._actual_fstatfs_cache_fixture"
+        module = ModuleType(name)
+        module.__package__ = "incus_lease_issuer"
+        module.__file__ = quota.__file__
+        with mock.patch.dict(sys.modules, {name: module}), \
+             mock.patch.object(quota.ctypes, "CDLL", new=library):
+            exec(compile(Path(quota.__file__).read_bytes(), quota.__file__, "exec"), module.__dict__)
+            for _ in range(16):
+                self.assertEqual(module._fs_type(proc), quota.PROCFS)
+                self.assertEqual(module._fs_type(regular), expected_regular)
+            self.assertIn(b"mnt_id:", module._read_proc("/proc/self/fdinfo/" + str(regular), 8192))
+            with self.assertRaisesRegex(Denied, "storage-quota-procfs"):
+                module._read_proc(str(ordinary), 8192)
+            closed = os.dup(proc); os.close(closed)
+            with self.assertRaisesRegex(Denied, "storage-quota-filesystem-stat"):
+                module._fs_type(closed)
+        self.assertEqual(counts["calls"], 35)
+        self.assertEqual(counts["library"], 1)
+        self.assertEqual(counts["symbol"], 1)
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux proper EE only")

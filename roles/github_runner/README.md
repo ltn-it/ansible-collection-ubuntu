@@ -589,6 +589,13 @@ streams, evidence spools, VM disks, project and copied image remain. This is not
 `engine-release`, full cleanup, a reduced reservation, or a retry of an unknown
 operation.
 
+Owned tree deletion retains every entry's original path, inode, mount and
+deadline checks. It persists each emptied child directory before removing its
+name, then persists the root before reporting completion; interrupted or failed
+batches remain unknown under the original durable intent. Filesystem checks
+cache only the process-local native function symbol, never descriptor results
+or observations. The existing cleanup deadline is unchanged.
+
 Root-only capacity policy binds separate owned ext4 project-quota proofs for the
 32-GiB dir pool and 17-GiB engine filesystem. Admission keeps a one-GiB pool
 reserve and checks eight GiB of cold-engine headroom plus a 512-MiB **preadmission**

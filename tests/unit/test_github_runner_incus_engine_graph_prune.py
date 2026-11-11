@@ -155,6 +155,41 @@ class RootGraphPruneTests(unittest.TestCase):
         self.assertFalse(any(row["operation"] == "engine-graph-prune" for row in self.store.read(self.lease)["effects"].values()))
         self.assertEqual(capture.read_bytes(), b"drift")
 
+    def barrier_failure(self, *, expired):
+        before = self.preserved()
+        graph_id = self.graph.stat().st_dev, self.graph.stat().st_ino
+        actual_fsync, actual_deadline = os.fsync, cleanup_storage._deadline
+        crossed = [False]
+        def barrier(fd):
+            if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == graph_id:
+                if not expired:
+                    raise OSError("injected final directory barrier failure")
+                actual_fsync(fd)
+                crossed[0] = True
+                return
+            actual_fsync(fd)
+        def deadline(end):
+            if crossed[0]:
+                raise Denied("cleanup-storage-budget")
+            actual_deadline(end)
+        with mock.patch.object(cleanup_storage.os, "fsync", new=barrier), \
+             mock.patch.object(cleanup_storage, "_deadline", new=deadline):
+            with self.assertRaises(prune.GraphPruneUnknown): self.run_prune()
+        record = self.store.read(self.lease)
+        effects = [row for row in record["effects"].values() if row["operation"] == "engine-graph-prune"]
+        self.assertEqual(len(effects), 1)
+        self.assertEqual(effects[0]["state"], "unknown")
+        self.assertEqual((self.graph.stat().st_dev, self.graph.stat().st_ino), graph_id)
+        self.assertEqual(self.preserved(), before)
+        with self.assertRaises(Denied): self.run_prune()
+        self.assertEqual(self.store.read(self.lease), record)
+
+    def test_final_directory_fsync_failure_is_durably_unknown_never_verified_or_retried(self):
+        self.barrier_failure(expired=False)
+
+    def test_deadline_after_final_directory_fsync_is_unknown_never_verified_or_retried(self):
+        self.barrier_failure(expired=True)
+
     def test_original_graph_inode_and_foreign_mount_denials_preserve_owned_data(self):
         moved = self.graph.with_name(self.graph.name + "-original")
         self.graph.rename(moved); self.graph.mkdir(mode=0o700)

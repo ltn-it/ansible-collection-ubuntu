@@ -10,3 +10,6 @@ bugfixes:
   - >-
     github_runner - Bind deny-first host-fence maintenance to the sealed dynamic bootstrap before the
     first native job, without creating a static registry or weakening runtime grant ownership.
+  - >-
+    github_runner - Persist owned cleanup once per emptied directory and reuse the native filesystem-stat
+    symbol while preserving every actual descriptor, mount, identity and deadline check.
