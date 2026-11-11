@@ -4,6 +4,7 @@ The rules/readback model is explicit: passing this suite does not qualify the
 new iface_index concatenation ABI, real endpoint isolation or installation.
 """
 from copy import deepcopy
+from contextlib import ExitStack
 import datetime as dt
 import hashlib
 import os
@@ -49,6 +50,7 @@ class HostRulesTests(unittest.TestCase):
     def test_nonroot_closed_entries_before_policy_or_kernel_access(self):
         with mock.patch.object(host.os, "geteuid", return_value=2101):
             for entry, args in ((host.install_baseline, (None,) * 3), (host.bind_creator, (None,) * 7),
+                                (host.install_bootstrap_baseline, (None,) * 2),
                                 (host.grant, (None,) * 7), (host.withdraw, (None,) * 7),
                                 (host.verify_withdrawn, (None,) * 4)):
                 with self.assertRaisesRegex(Denied, "host-api-root-required"):
@@ -56,6 +58,8 @@ class HostRulesTests(unittest.TestCase):
         for overrides in ({"qualified": True}, {"reader": lambda: None}, {"command": "nft flush ruleset"}):
             with self.assertRaises(TypeError):
                 host.install_baseline(None, None, None, **overrides)
+            with self.assertRaises(TypeError):
+                host.install_bootstrap_baseline(None, None, **overrides)
 
     def read(self, value, *, kernel_name="g06h0", kernel_index=41, **kwargs):
         # Root-kernel name/index mapping is explicitly modeled here. A string
@@ -178,6 +182,11 @@ class HostPolicyTests(unittest.TestCase):
         self.path.chmod(0o600)
         self.sha = hashlib.sha256(self.path.read_bytes()).hexdigest()
 
+    def configuration(self):
+        return host.preparation.RootConfiguration("/root/config", "a" * 64, "/root/registry", "b" * 64,
+            "/run/incus.sock", "/root/key", b"c" * 32, "/root/stage", "/root/lock", 1,
+            "/root/network-policy", "d" * 64, "/root/quota-policy", "e" * 64, str(self.path), self.sha)
+
     def test_actual_root_sealed_policy_and_config_binding(self):
         selected = host._policy(str(self.path), self.sha)
         self.assertEqual(selected.backend, "10.10.20.30")
@@ -229,12 +238,12 @@ class HostPolicyTests(unittest.TestCase):
              mock.patch.object(host, "_host", return_value=mock.MagicMock()), \
              mock.patch.object(host, "_local"), mock.patch.object(host, "_nft", side_effect=nft), \
              mock.patch.object(host, "_readback", return_value=(17, 20, 0, 0)):
-            receipt = host.install_baseline(str(self.path), self.sha, object())
+            receipt = host.install_baseline(str(self.path), self.sha, self.configuration())
             self.assertEqual(receipt["nft_table_handle"], 17)
             self.assertEqual(host.identity.decode_json(journal.read_bytes())["state"], "verified")
             self.assertEqual(receipt["baseline_sha256"], hashlib.sha256(journal.read_bytes()).hexdigest())
             with self.assertRaises(Denied):
-                host.install_baseline(str(self.path), self.sha, object())
+                host.install_baseline(str(self.path), self.sha, self.configuration())
         self.assertEqual(sum(argv[:3] == ("-j", "-f", "-") for argv in calls), 1)
 
     def test_baseline_possible_send_failure_retains_unknown_never_retries_or_deletes(self):
@@ -248,10 +257,10 @@ class HostPolicyTests(unittest.TestCase):
              mock.patch.object(host, "_host", return_value=mock.MagicMock()), \
              mock.patch.object(host, "_local"), mock.patch.object(host, "_nft", side_effect=nft):
             with self.assertRaisesRegex(host.HostFenceUnknown, "^host-api-baseline-unknown$"):
-                host.install_baseline(str(self.path), self.sha, object())
+                host.install_baseline(str(self.path), self.sha, self.configuration())
             self.assertEqual(host.identity.decode_json(journal.read_bytes())["state"], "unknown")
             with self.assertRaises(Denied):
-                host.install_baseline(str(self.path), self.sha, object())
+                host.install_baseline(str(self.path), self.sha, self.configuration())
         self.assertTrue(journal.exists())
 
     def test_preexisting_table_is_never_adopted_and_private_parent_is_mandatory(self):
@@ -261,7 +270,7 @@ class HostPolicyTests(unittest.TestCase):
              mock.patch.object(host, "_host", return_value=mock.MagicMock()), \
              mock.patch.object(host, "_local"), mock.patch.object(host, "_nft", return_value=ledger.canonical(existing)) as nft:
             with self.assertRaises(Denied):
-                host.install_baseline(str(self.path), self.sha, object())
+                host.install_baseline(str(self.path), self.sha, self.configuration())
             self.assertEqual(nft.call_count, 1)
         self.assertFalse(Path(str(self.path) + ".baseline.json").exists())
         self.path.parent.chmod(0o750)
@@ -462,6 +471,104 @@ class HostPolicyTests(unittest.TestCase):
             nft.assert_not_called()
             store.begin.assert_not_called()
             store.record.assert_not_called()
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root Linux EE only")
+class BootstrapBaselineTests(unittest.TestCase):
+    """Real sealed bootstrap/ledger/journal; host kernel alone is modeled."""
+    @classmethod
+    def setUpClass(cls):
+        import test_github_runner_incus_run_factory as fixtures
+        fixtures.RootBootstrapTests.setUpClass()
+
+    def setUp(self):
+        import test_github_runner_incus_run_factory as fixtures
+        self.host = HostPolicyTests()
+        self.host.setUp(); self.addCleanup(self.host.doCleanups)
+        self.bootstrap = fixtures.RootBootstrapTests()
+        self.bootstrap.setUp(); self.addCleanup(self.bootstrap.doCleanups)
+        self.bootstrap.value["preparation"].update(
+            host_api_fence_policy_path=str(self.host.path), host_api_fence_policy_sha256=self.host.sha)
+        self.bootstrap.seal()
+        self.journal = Path(str(self.host.path) + ".baseline.json")
+        self.selected = host._policy(str(self.host.path), self.host.sha)
+        self.calls = []
+
+    def install(self):
+        return host.install_bootstrap_baseline(str(self.bootstrap.path), self.bootstrap.sha)
+
+    def model(self, hook=None):
+        def nft(selected, *argv, payload=None):
+            self.calls.append(argv)
+            if argv[-2:] == ("list", "tables"):
+                if hook: hook("inventory")
+                return ledger.canonical({"nftables": []})
+            self.assertEqual(argv, ("-j", "-f", "-"))
+            self.assertEqual(payload, ledger.canonical(host._rules(self.selected)))
+            self.assertEqual(host.identity.decode_json(self.journal.read_bytes())["state"], "intent")
+            self.assertEqual(stat.S_IMODE(self.journal.stat().st_mode), 0o600)
+            if hook: hook("create")
+            return b""
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(host, "_host", return_value=mock.MagicMock()))
+        stack.enter_context(mock.patch.object(host, "_local"))
+        stack.enter_context(mock.patch.object(host, "_nft", side_effect=nft))
+        stack.enter_context(mock.patch.object(host, "_readback", return_value=(17, 20, 0, 0)))
+        return stack
+
+    def test_real_bootstrap_without_registry_or_key_creates_deny_only_baseline(self):
+        from incus_lease_issuer import policy_registry, signed_context
+        self.assertNotIn("registry_path", self.bootstrap.value["preparation"])
+        self.assertFalse(Path(self.bootstrap.value["preparation"]["signing_key_path"]).exists())
+        with self.model(), \
+             mock.patch.object(host.preparation, "_config", side_effect=AssertionError("no static preparation")), \
+             mock.patch.object(policy_registry, "load_registry", side_effect=AssertionError("no registry")), \
+             mock.patch.object(signed_context.RootSigner, "__init__", side_effect=AssertionError("no signer")), \
+             mock.patch.object(ledger.Ledger, "prepare", side_effect=AssertionError("no lease")):
+            receipt = self.install()
+        self.assertEqual(receipt["nft_table_handle"], 17)
+        self.assertEqual(receipt["policy_sha256"], self.host.sha)
+        self.assertEqual(receipt["baseline_sha256"], hashlib.sha256(self.journal.read_bytes()).hexdigest())
+        self.assertEqual(self.calls, [("-n", "-j", "list", "tables"), ("-j", "-f", "-")])
+        self.assertEqual(host.identity.decode_json(self.journal.read_bytes())["state"], "verified")
+        with ledger.Ledger(self.bootstrap.store_path, clock=host.time.time) as store:
+            with store._transaction() as state:
+                self.assertEqual(state["leases"], {})
+
+    def test_wrong_bootstrap_or_host_policy_seal_denies_before_kernel(self):
+        with mock.patch.object(host, "_host", side_effect=AssertionError("no kernel")):
+            with self.assertRaises(Denied):
+                host.install_bootstrap_baseline(str(self.bootstrap.path), "f" * 64)
+            self.host.path.write_bytes(self.host.path.read_bytes() + b" ")
+            with self.assertRaises(Denied): self.install()
+        self.assertFalse(self.journal.exists())
+
+    def test_unknown_journal_never_adopted_or_replayed(self):
+        self.journal.write_bytes(ledger.canonical(host._journal_value(self.selected, "unknown")))
+        self.journal.chmod(0o600)
+        before = self.journal.read_bytes()
+        with self.model(), self.assertRaises(Denied): self.install()
+        self.assertEqual(self.journal.read_bytes(), before)
+        self.assertEqual(self.calls, [("-n", "-j", "list", "tables")])
+
+    def test_bootstrap_drift_during_inventory_denies_before_intent_or_create(self):
+        def drift(phase):
+            if phase == "inventory":
+                self.bootstrap.path.write_bytes(self.bootstrap.path.read_bytes() + b" ")
+        with self.model(drift), self.assertRaises(Denied): self.install()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.calls, [("-n", "-j", "list", "tables")])
+
+    def test_bootstrap_drift_after_possible_create_retains_unknown_no_retry(self):
+        def drift(phase):
+            if phase == "create":
+                self.bootstrap.path.write_bytes(self.bootstrap.path.read_bytes() + b" ")
+        with self.model(drift), self.assertRaises(host.HostFenceUnknown): self.install()
+        self.assertEqual(host.identity.decode_json(self.journal.read_bytes())["state"], "unknown")
+        # Restoring original configuration never adopts the unknown effect.
+        self.bootstrap.path.write_bytes(ledger.canonical(self.bootstrap.value))
+        with self.model(), self.assertRaises(Denied): self.install()
+        self.assertEqual(sum(argv == ("-j", "-f", "-") for argv in self.calls), 1)
 
 
 if __name__ == "__main__":

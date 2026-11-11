@@ -488,6 +488,15 @@ SHA256. This does not create a job, lease, credential or VM. Runtime intake stil
 requires actual job authentication and a second fresh native authorization before
 lease creation; installation cannot manufacture those proofs.
 
+Before the private endpoint listens, the separate Root maintenance producer may
+call `host_api_fence.install_bootstrap_baseline(bootstrap_path, expected_sha256)`.
+It derives the host policy from that same sealed bootstrap without constructing
+a static registry, lease or signer. Bootstrap and host-policy bindings are
+rechecked before the deny-only table effect and after native readback. Existing
+tables or intent, unknown and verified journals are never adopted or replayed.
+This API neither activates a listener nor admits a job; the existing per-job
+grant and withdrawal bindings remain mandatory.
+
 `github_runner_runtime_v2_operating_install: true` additionally requires bootstrap
 mode and these explicit inputs, all defaulting to empty values:
 

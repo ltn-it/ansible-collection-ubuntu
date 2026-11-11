@@ -7,3 +7,6 @@ bugfixes:
   - >-
     github_runner - Prepare repeatable authenticated Main-job intake, closed operating drills, independent
     custody watchdog and verified local-root mail through the disabled runtime-v2 installation path.
+  - >-
+    github_runner - Bind deny-first host-fence maintenance to the sealed dynamic bootstrap before the
+    first native job, without creating a static registry or weakening runtime grant ownership.
