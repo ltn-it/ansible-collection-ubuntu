@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - Check inactive systemd service templates through a concrete read-only instance,
+    retaining exact template-fragment, inactive-state, and no-drop-in requirements for every instance.
