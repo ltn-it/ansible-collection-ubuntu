@@ -131,10 +131,14 @@ def load_bootstrap(path, expected_sha256):
         if key.endswith("sha256") or key == "signing_public_key_hex": engine._hash(prep[key])
         elif key == "operation_wait_seconds": engine._integer(prep[key], 1, 60)
         else: engine._path(prep[key])
-    runtime = engine._keys(value["runtime"], RUNTIME_KEYS)
+    runtime = engine._keys(value["runtime"], RUNTIME_KEYS | (
+        {"initial_transition_minimum_seconds"} if "initial_transition_minimum_seconds" in value["runtime"] else set()))
     for key, maximum in (("authentication_timeout_seconds", 60), ("initial_transition_timeout_seconds", 300),
                          ("heartbeat_lead_seconds", 120), ("cleanup_timeout_seconds", 1800)):
         engine._integer(runtime[key], 1, maximum)
+    if "initial_transition_minimum_seconds" in runtime:
+        engine._integer(runtime["initial_transition_minimum_seconds"], 1,
+                        runtime["initial_transition_timeout_seconds"])
     require(type(runtime["capture"]) is dict, "bootstrap-runtime-capture")
     runtime_rpc._capacity_policy(value["capacity"])
     cells = value["cells"]
@@ -245,8 +249,9 @@ def _continuation_receipt(value):
     return descriptor, receipt, counts, stamp
 
 
-def _continuation_original_native(get):
-    prefix = "/actions/runs/" + str(operating_cells.ORIGIN_RUN)
+def _continuation_original_native(get, *, prior=False):
+    origin = operating_cells.continuation_prior_origin() if prior else operating_cells.continuation_origin()
+    prefix = "/actions/runs/" + str(origin["run_id"])
     run = get(prefix)
     rows, total = [], None
     for page in range(1, 5):
@@ -259,9 +264,10 @@ def _continuation_original_native(get):
             break
     require(len(rows) == total, "continuation-original-pagination")
     checks = [get("/check-runs/" + str(row["check_run_id"]))
-              for row in operating_cells.continuation_origin()["jobs"]]
-    commit = get("/git/commits/" + operating_cells.ORIGIN_MAIN)
-    return operating_cells.origin_native_projection(run, {"total_count": total, "jobs": rows}, checks, commit)
+              for row in origin["jobs"]]
+    commit = get("/git/commits/" + origin["source_sha"])
+    project = operating_cells.prior_native_projection if prior else operating_cells.origin_native_projection
+    return project(run, {"total_count": total, "jobs": rows}, checks, commit)
 
 
 def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, templates, *, intake):
@@ -377,7 +383,11 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
         # opaque native proof. Current authorization and original absence are
         # still freshly checked on every revalidation; no shared cache exists.
         if check_origin:
-            require(_continuation_original_native(get) == receipt["native_origin"], "continuation-original-native-drift")
+            legacy = receipt["legacy_qualification"] if descriptor["schema"] == 2 else receipt
+            require(_continuation_original_native(get) == legacy["native_origin"], "continuation-original-native-drift")
+            if descriptor["schema"] == 2:
+                require(_continuation_original_native(get, prior=True) == receipt["native_prior"],
+                        "continuation-prior-native-drift")
         _continuation_origin_absent(selected.bootstrap, qualified)
         if identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,

@@ -101,7 +101,8 @@ class SearchOnlyParentTests(unittest.TestCase):
     def test_real_runtime_check_reaches_root_peer_without_admission(self):
         runtime = self.clients[1]
         runtime.CONFIG = str(self.root / "config2.json")
-        self.assertEqual(runtime.check(), {"schema": 2, "operation": "check", "state": "local-prerequisites-only"})
+        self.assertEqual(runtime.check(), {"schema": 2, "operation": "check", "state": "local-prerequisites-only",
+            "capabilities": ["initial-auth-idle-v1"], "authentication_idle_seconds": 60, "frame_seconds": 5})
         self.assertEqual(stat.S_IMODE((self.root / "search").stat().st_mode), 0o710)
 
 
