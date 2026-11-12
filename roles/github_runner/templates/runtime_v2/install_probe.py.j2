@@ -107,7 +107,10 @@ def private_metadata(path):
 
 
 def state(unit):
-    result = subprocess.run(["/usr/bin/systemctl", "show", "--no-pager", unit,
+    template = "lit-incus-runtime-v2@.service"
+    query = "lit-incus-runtime-v2@installation-probe.service" if unit == template else unit
+    fragment = template if query.startswith("lit-incus-runtime-v2@") and query.endswith(".service") else unit
+    result = subprocess.run(["/usr/bin/systemctl", "show", "--no-pager", query,
         "--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,DropInPaths"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env={"PATH":"/usr/bin:/bin","LANG":"C"}, timeout=5, check=False)
@@ -119,7 +122,7 @@ def state(unit):
         require(values["UnitFileState"] == values["FragmentPath"] == "")
     else:
         require(values["LoadState"] == "loaded" and values["UnitFileState"] in {"disabled","static"}
-                and values["FragmentPath"] == "/etc/systemd/system/"+unit)
+                and values["FragmentPath"] == "/etc/systemd/system/"+fragment)
 
 
 def inactive():

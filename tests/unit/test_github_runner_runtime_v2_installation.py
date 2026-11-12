@@ -78,6 +78,61 @@ class InstallationContractTests(unittest.TestCase):
             with self.subTest(change=change), mock.patch.object(probe.subprocess,"run",return_value=observed({**base,**change})):
                 with self.assertRaises(ValueError):probe.state("lit-incus-runtime-v2.socket")
 
+    def test_template_uses_concrete_readonly_instance_and_template_fragment(self):
+        template = "lit-incus-runtime-v2@.service"
+        instance = "lit-incus-runtime-v2@installation-probe.service"
+        values = {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+                  "UnitFileState": "disabled", "FragmentPath": "/etc/systemd/system/"+template, "DropInPaths": ""}
+        def systemctl(argv, **_kwargs):
+            # Native systemd refuses a template lacking an instance, even with --all.
+            if template in argv:
+                return SimpleNamespace(returncode=1, stdout=b"")
+            self.assertIn(instance, argv)
+            return SimpleNamespace(returncode=0, stdout="".join(
+                key+"="+value+"\n" for key, value in values.items()).encode())
+        with mock.patch.object(probe.subprocess, "run", side_effect=systemctl) as call:
+            probe.state(template)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.args[0][1], "show")
+
+    def test_inactive_checks_template_and_each_real_instance_without_mutation(self):
+        template = "lit-incus-runtime-v2@.service"
+        concrete = "lit-incus-runtime-v2@existing.service"
+        calls = []
+        def systemctl(argv, **_kwargs):
+            calls.append(argv)
+            if argv[1] == "list-units":
+                return SimpleNamespace(returncode=0, stdout=(concrete+" loaded inactive dead\n").encode())
+            unit = argv[argv.index("--no-pager") + 1]
+            if unit == template:
+                return SimpleNamespace(returncode=1, stdout=b"")
+            fragment = template if unit.startswith("lit-incus-runtime-v2@") else unit
+            values = {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+                      "UnitFileState": "static", "FragmentPath": "/etc/systemd/system/"+fragment, "DropInPaths": ""}
+            return SimpleNamespace(returncode=0, stdout="".join(
+                key+"="+value+"\n" for key, value in values.items()).encode())
+        with mock.patch.object(probe.subprocess, "run", side_effect=systemctl):
+            probe.inactive()
+        self.assertEqual(len(calls), 8)  # Six fixed checks, enumeration, one actual instance.
+        self.assertTrue(all(argv[1] in {"show", "list-units"} for argv in calls))
+        self.assertIn(concrete, calls[-1])
+
+    def test_template_instances_reject_active_dropin_override_or_incomplete_properties(self):
+        template = "lit-incus-runtime-v2@.service"
+        base = {"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+                "UnitFileState": "disabled", "FragmentPath": "/etc/systemd/system/"+template, "DropInPaths": ""}
+        variants = [{**base, "ActiveState": "active"}, {**base, "DropInPaths": "/etc/systemd/system/foreign.conf"},
+                    {**base, "FragmentPath": "/etc/systemd/system/lit-incus-runtime-v2@existing.service"},
+                    {key: value for key, value in base.items() if key != "DropInPaths"}]
+        for unit in (template, "lit-incus-runtime-v2@existing.service"):
+            for values in variants:
+                with self.subTest(unit=unit, values=values):
+                    observed = SimpleNamespace(returncode=0, stdout="".join(
+                        key+"="+value+"\n" for key, value in values.items()).encode())
+                    with mock.patch.object(probe.subprocess, "run", return_value=observed):
+                        with self.assertRaises(ValueError):
+                            probe.state(unit)
+
     def test_strict_json_duplicates_nonfinite_and_nonroot_entry_deny(self):
         for raw in (b'{"x":1,"x":2}',b'{"x":NaN}',b'{"x":1e999}'):
             with self.assertRaises(ValueError):probe.decode(raw)
