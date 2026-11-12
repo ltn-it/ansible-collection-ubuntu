@@ -67,10 +67,12 @@ def _stamp(info):
 def _parent(path):
     require(type(path) is str and path.startswith("/") and str(PurePosixPath(path)) == path
             and ".." not in PurePosixPath(path).parts)
-    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    # Root seals socket parents as search-only (0710); traversing them must
+    # not require directory-listing permission. The same inode guards apply.
+    fd = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for part in PurePosixPath(path).parts[1:-1]:
-            following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            following = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
             os.close(fd)
             fd = following
             info = os.fstat(fd)

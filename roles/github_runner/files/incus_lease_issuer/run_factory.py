@@ -102,7 +102,8 @@ def load_bootstrap(path, expected_sha256):
     require(proof.sha256 == engine._hash(expected_sha256), "bootstrap-policy-drift")
     value = identity.decode_json(raw)
     engine._keys(value, {"schema", "source_identity", "source_workflow_sha256", "collector", "ledger_path",
-                        "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"})
+                        "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"}
+                        | ({"operating_continuation"} if "operating_continuation" in value else set()))
     require(type(value["schema"]) is int and value["schema"] == 1 and ledger.canonical(value) == raw,
             "bootstrap-policy-schema")
     base = engine._keys(value["source_identity"], policy_registry.IDENTITY_KEYS - {"caller_sha"})
@@ -168,6 +169,7 @@ def load_bootstrap(path, expected_sha256):
             suffix = "Final quality / " + matrix["profile"] + " / " + matrix["scenario"] + " / " + matrix["target"]
         observer = template["native_observer_job_name"]
         require(observer == suffix or observer.endswith(" / " + suffix), "bootstrap-observer-name")
+    _continuation_receipt(value)
     return RootBootstrapPolicy(path, expected_sha256, raw, collected, stamp)
 
 
@@ -199,8 +201,13 @@ def _worker(connected, bootstrap):
 
 def _controls(bootstrap):
     require(load_bootstrap(bootstrap.path, bootstrap.sha256) == bootstrap, "bootstrap-policy-changed")
-    return ledger.digest({"bootstrap_sha256": bootstrap.sha256, "stamp": list(bootstrap.file_stamp),
-        "collector": {key: asdict(value) for key, value in collector._controls(bootstrap.collector).items()}})
+    controls = {"bootstrap_sha256": bootstrap.sha256, "stamp": list(bootstrap.file_stamp),
+        "collector": {key: asdict(value) for key, value in collector._controls(bootstrap.collector).items()}}
+    qualified = _continuation_receipt(bootstrap.value)
+    if qualified is not None:
+        controls["operating_continuation"] = {"qualification_sha256": qualified[0]["qualification"]["sha256"],
+                                             "file_stamp": list(qualified[3])}
+    return ledger.digest(controls)
 
 
 def challenge_bootstrap(connected, bootstrap, selector):
@@ -222,7 +229,118 @@ def _challenge(selection, nonce, worker):
             return dict(value)
 
 
-def _native(connected, selected, nonce, token, api_token):
+def _continuation_receipt(value):
+    descriptor = value.get("operating_continuation")
+    if descriptor is None:
+        require("operating_continuation" not in value, "continuation-null-descriptor")
+        return None
+    operating_cells.validate_continuation_descriptor(descriptor, value["source_workflow_sha256"],
+                                                     value["source_identity"]["reusable_sha"])
+    ref = descriptor["qualification"]
+    proof, raw, stamp = installation._file(ref["path"], MAX_POLICY, private=True, keep=True)
+    require(proof.sha256 == ref["sha256"], "continuation-qualification-drift")
+    receipt = identity.decode_json(raw)
+    require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
+    counts = operating_cells.validate_continuation_qualification(receipt)
+    return descriptor, receipt, counts, stamp
+
+
+def _continuation_original_native(get):
+    prefix = "/actions/runs/" + str(operating_cells.ORIGIN_RUN)
+    run = get(prefix)
+    rows, total = [], None
+    for page in range(1, 5):
+        data = get(prefix + "/attempts/1/jobs?per_page=100&page=" + str(page))
+        count, batch = data.get("total_count"), data.get("jobs")
+        require(type(count) is int and count == 24 and type(batch) is list and len(batch) <= 100
+                and (total is None or count == total), "continuation-original-pagination")
+        total = count; rows.extend(batch)
+        if len(rows) >= count:
+            break
+    require(len(rows) == total, "continuation-original-pagination")
+    checks = [get("/check-runs/" + str(row["check_run_id"]))
+              for row in operating_cells.continuation_origin()["jobs"]]
+    commit = get("/git/commits/" + operating_cells.ORIGIN_MAIN)
+    return operating_cells.origin_native_projection(run, {"total_count": total, "jobs": rows}, checks, commit)
+
+
+def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, templates, *, intake):
+    """Only exact successor metadata can follow the original empty catalogue."""
+    root = installation._open_directory(directory)
+    try:
+        device, inode, *_ = run_intake._directory_identity(root)
+        require((device, inode) == (expected["directory_device"], expected["directory_inode"]),
+                "continuation-original-catalogue-identity")
+        names = run_intake._entries(root)
+        require(len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names),
+                "continuation-catalogue-unknown")
+        successor = descriptor["successor"]
+        for name in names:
+            child = os.open(name, installation.DIR_FLAGS, dir_fd=root)
+            try:
+                run_intake._directory_identity(child)
+                intent = run_intake._read_at(child, "intent.json")[0]
+                if intake:
+                    engine._keys(intent, {"schema", "binding", "original_job"})
+                    binding = engine._keys(intent["binding"], {"schema", "identity_domain", "custody_policy_sha256",
+                                                               "source", "controller", "artifact"})
+                    who = engine._keys(intent["original_job"], {"worker_sha256", "run_id", "job_id", "check_run_id",
+                                                               "native_job_name", "identity_policy_sha256"})
+                    require(name == ledger.digest(binding), "continuation-intake-directory-binding")
+                    source, controller, artifact = binding["source"], binding["controller"], binding["artifact"]
+                    require(type(binding["schema"]) is int and binding["schema"] == 1
+                        and source == {"repository": SOURCE, "repository_id": 1103407173,
+                                       "commit_sha": successor["source_sha"]}
+                        and controller == {"repository": VALIDATION, "repository_id": 1269461997,
+                                           "commit_sha": successor["reusable_sha"]}
+                        and type(binding["identity_domain"]) is dict
+                        and binding["identity_domain"].get("repository") == SOURCE
+                        and binding["identity_domain"].get("caller_sha") == successor["source_sha"]
+                        and binding["identity_domain"].get("reusable_sha") == successor["reusable_sha"]
+                        and type(artifact) is dict and artifact.get("head_sha") == successor["source_sha"]
+                        and type(artifact.get("run_attempt")) is int and artifact["run_attempt"] == 1
+                        and type(artifact.get("run_id")) is int and artifact["run_id"] == successor["run_id"]
+                        and who["native_job_name"] in {row["native_job_name"] for row in templates.values()},
+                        "continuation-intake-original-or-unknown")
+                else:
+                    engine._keys(intent, {"schema", "invocation", "snapshot_receipt_sha256", "created_at", "deadline",
+                                          "worker", "job_started_at", "template_sha256"})
+                    who = engine._keys(intent["invocation"], {"repository", "run_id", "run_attempt", "check_run_id",
+                        "job_id", "source_sha", "reusable_sha", "selector", "bootstrap_sha256"})
+                    require(name == ledger.digest({key: who[key] for key in ("repository", "run_id", "check_run_id", "selector")}),
+                            "continuation-configuration-directory-binding")
+                    require(who["repository"] == SOURCE and who["source_sha"] == successor["source_sha"]
+                        and who["reusable_sha"] == successor["reusable_sha"]
+                        and type(who["run_attempt"]) is int and who["run_attempt"] == 1
+                        and who["selector"] in templates and who["bootstrap_sha256"] == bootstrap_sha,
+                        "continuation-configuration-original-or-unknown")
+                require(type(intent["schema"]) is int and intent["schema"] == 1
+                        and type(who["run_id"]) is int and who["run_id"] == successor["run_id"]
+                        and all(type(who[k]) is int and who[k] > 0 for k in ("job_id", "check_run_id")),
+                        "continuation-catalogue-native-tuple")
+            finally:
+                os.close(child)
+        require(run_intake._entries(root) == names, "continuation-catalogue-drift")
+    finally:
+        os.close(root)
+
+
+def _continuation_origin_absent(bootstrap, qualified):
+    """Product API reads only; call outside any nested Ledger transaction."""
+    descriptor, _, counts, _ = qualified
+    _continuation_catalogue(run_intake.ROOT, counts["native_intake_catalogue"], descriptor, bootstrap.sha256,
+                            bootstrap.value["cells"], intake=True)
+    _continuation_catalogue(ROOT, counts["native_run_configuration_catalogue"], descriptor, bootstrap.sha256,
+                            bootstrap.value["cells"], intake=False)
+    successor = descriptor["successor"]
+    with ledger.Ledger(bootstrap.value["ledger_path"], clock=time.time) as store:
+        for identifier in store.lease_ids():
+            who = store.read(identifier)["identity"]
+            require(who["run_id"] == successor["run_id"] and who["caller_sha"] == successor["source_sha"]
+                    and who["reusable_sha"] == successor["reusable_sha"], "continuation-original-or-unknown-lease")
+
+
+def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
     admission._secret(token); admission._secret(api_token)
     controls = _controls(selected.bootstrap)
     worker = _worker(connected, selected.bootstrap)
@@ -248,7 +366,23 @@ def _native(connected, selected, nonce, token, api_token):
             "bootstrap-job-started")
     stamp = int(dt.datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).timestamp())
     require(0 < stamp <= int(time.time()), "bootstrap-job-started")
-    if identity.decode_json(selected.template_bytes)["kind"] == "operating":
+    qualified = _continuation_receipt(selected.bootstrap.value)
+    if qualified is not None:
+        descriptor, receipt, _, _ = qualified
+        successor = descriptor["successor"]
+        require((who.caller_sha, who.run_id, who.reusable_sha) ==
+                (successor["source_sha"], successor["run_id"], successor["reusable_sha"]),
+                "continuation-exact-current-native-tuple")
+        # Historical terminal qualification is minted once into this existing
+        # opaque native proof. Current authorization and original absence are
+        # still freshly checked on every revalidation; no shared cache exists.
+        if check_origin:
+            require(_continuation_original_native(get) == receipt["native_origin"], "continuation-original-native-drift")
+        _continuation_origin_absent(selected.bootstrap, qualified)
+        if identity.decode_json(selected.template_bytes)["kind"] == "operating":
+            operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
+                                                         who.caller_sha, who.run_id, who.reusable_sha)
+    elif identity.decode_json(selected.template_bytes)["kind"] == "operating":
         operating_cells.validate_initial_main(get("/git/commits/" + who.caller_sha), who.caller_sha)
     require(_worker(connected, selected.bootstrap) == worker and _controls(selected.bootstrap) == controls,
             "bootstrap-native-drift")
@@ -291,7 +425,7 @@ def require_bootstrap_native(proof, connected, selected, token, api_token):
                 "bootstrap-native-proof")
         require(ledger.digest(_challenge(selected, proof.nonce, proof.worker)) == proof.challenge_sha256,
                 "bootstrap-challenge-drift")
-        worker, who, controls, started = _native(connected, selected, proof.nonce, token, api_token)
+        worker, who, controls, started = _native(connected, selected, proof.nonce, token, api_token, check_origin=False)
         require((worker, who, controls, started) == (proof.worker, proof.identity, proof.controls_sha256, proof.job_started_at),
                 "bootstrap-native-drift")
         remaining = min(600, int(proof.expires_monotonic - time.monotonic()), who.valid_until - int(time.time()) - 31)
