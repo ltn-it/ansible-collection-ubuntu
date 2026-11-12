@@ -147,7 +147,8 @@ def configurations(path, digest, group, public_pin=None):
     bootstrap = runtime["schema"] == 1
     if bootstrap:
         require(set(runtime) == {"schema", "source_identity", "source_workflow_sha256", "collector", "ledger_path",
-                "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"})
+                "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"}
+                | ({"operating_continuation"} if "operating_continuation" in runtime else set()))
         prep, collector, store = runtime["preparation"], runtime["collector"], runtime["ledger_path"]
         require(type(public_pin) is str and SHA.fullmatch(public_pin)
                 and public_pin == prep["signing_public_key_hex"])
