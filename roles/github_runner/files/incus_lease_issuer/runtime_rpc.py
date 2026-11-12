@@ -24,7 +24,7 @@ from . import (admission, cell_contract, engine_executor, engine_policy, identit
                ledger, network_fence, policy_registry, preparation, refresh, signed_context)
 from .identity import Denied, require
 
-OPERATIONS = frozenset({"run", "heartbeat", "status", "cancel", "recover"})
+OPERATIONS = frozenset({"run", "heartbeat", "status", "cancel", "recover", "record-upload"})
 SELECTOR = re.compile(r"[a-z][a-z0-9_.-]{0,127}\Z")
 MAX_AUTH = 40960
 MAX_REPLY = 8192
@@ -44,10 +44,24 @@ class _Configuration:
     heartbeat_lead_seconds: int
     cleanup_timeout_seconds: int
     capture: MappingProxyType
+    capacity: MappingProxyType | None = None
 
 
 def _root():
     require(os.geteuid() == 0, "runtime-root-required")
+
+
+def _capacity_policy(value):
+    expected = {"schema": 1, "pool_total_bytes": 32 * 1024 ** 3, "pool_reserve_bytes": 1024 ** 3,
+        "engine_total_bytes": 17 * 1024 ** 3, "engine_reserve_bytes": 512 * 1024 ** 2,
+        "cold_engine_bytes": 8 * 1024 ** 3, "pool_accounting": "owned-dir-retained-v1"}
+    refs = {"pool_quota_policy_path", "pool_quota_policy_sha256"}
+    require(type(value) is dict and set(value) == set(expected) | refs
+            and all(value[key] == actual and type(value[key]) is type(actual) for key, actual in expected.items()),
+            "runtime-capacity-policy")
+    engine_policy._path(value["pool_quota_policy_path"])
+    engine_policy._hash(value["pool_quota_policy_sha256"])
+    return MappingProxyType(dict(value))
 
 
 def _configuration(path, sha):
@@ -57,9 +71,11 @@ def _configuration(path, sha):
     proof, raw, _ = installation._file(path, 16384, private=True, keep=True)
     require(proof.sha256 == sha, "runtime-config-drift")
     data = identity.decode_json(raw)
-    engine_policy._keys(data, {"schema", "registry_path", "registry_sha256", "preparation_config_path",
+    required = {"schema", "registry_path", "registry_sha256", "preparation_config_path",
         "preparation_config_sha256", "authentication_timeout_seconds", "initial_transition_timeout_seconds",
-        "heartbeat_lead_seconds", "cleanup_timeout_seconds", "capture"})
+        "heartbeat_lead_seconds", "cleanup_timeout_seconds", "capture"}
+    engine_policy._keys(data, required | ({"capacity"} if "capacity" in data else set()))
+    capacity = _capacity_policy(data["capacity"]) if "capacity" in data else None
     require(type(data["schema"]) is int and data["schema"] == 2, "runtime-config-schema")
     for key in ("registry_path", "preparation_config_path"):
         engine_policy._path(data[key])
@@ -76,8 +92,8 @@ def _configuration(path, sha):
     engine_policy._integer(capture["max_total_evidence_bytes"], 1, 2 ** 31)
     engine_policy._integer(capture["max_members"], 1, 20000)
     engine_policy._integer(capture["max_member_bytes"], 1, capture["max_total_evidence_bytes"])
-    return _Configuration(path, sha, **{key: value for key, value in data.items() if key not in {"schema", "capture"}},
-                          capture=MappingProxyType(dict(capture)))
+    return _Configuration(path, sha, **{key: value for key, value in data.items() if key not in {"schema", "capture", "capacity"}},
+                          capture=MappingProxyType(dict(capture)), capacity=capacity)
 
 
 def _read(connected, maximum, seconds):
@@ -104,6 +120,10 @@ def _authentication(connected, operation, nonce, seconds):
     if operation in {"heartbeat", "status", "cancel"}:
         fields.add("lease_id")
         require(type(value.get("lease_id")) is str and ledger.ID.fullmatch(value["lease_id"]), "runtime-lease")
+    if operation == "record-upload":
+        fields.add("artifact")
+        require(type(value.get("artifact")) is dict and set(value["artifact"]) == {"id", "digest_sha256", "size_in_bytes"},
+                "runtime-upload-fields")
     require(set(value) == fields and type(value["schema"]) is int and value["schema"] == 2
             and value["operation"] == operation and value["nonce"] == nonce, "runtime-authentication")
     admission._secret(value["token"])
@@ -141,7 +161,6 @@ def _result(operation, lease_id, record, state):
 def _terminal(operation, lease_id, record, exported=None):
     starts = [effect for effect in record["effects"].values() if effect["operation"] == "engine-start"]
     actual = starts[0].get("engine_exit") if len(starts) == 1 else None
-    complete = actual is not None and all(actual[key + "_state"] == "complete" for key in ("stdout", "stderr"))
     exit_value = ({"kind": "exited" if actual["exit_code"] is not None else "signalled",
                    "code": actual["exit_code"], "signal": actual["signal"]} if actual is not None
                   else {"kind": "unknown", "code": None, "signal": None})
@@ -201,8 +220,15 @@ def _stream(connected, lease_id, exported):
 
 class RuntimeRPC:
     """Root-fixed factory; no transport/command/Worker/policy request hooks."""
-    def __init__(self, root_config_path, expected_config_sha256):
+    def __init__(self, root_config_path, expected_config_sha256, *, derived_configuration=None):
         _root()
+        self._derived_configuration = derived_configuration
+        self._origin = None
+        if derived_configuration is not None:
+            from . import run_factory
+            self._origin = run_factory.read_configuration_origin(derived_configuration)
+            require(derived_configuration.runtime_config_path == root_config_path
+                    and derived_configuration.runtime_config_sha256 == expected_config_sha256, "runtime-derived-config")
         self._config = _configuration(root_config_path, expected_config_sha256)
         self._registry = policy_registry.load_registry(self._config.registry_path, self._config.registry_sha256)
         self._check()
@@ -216,6 +242,15 @@ class RuntimeRPC:
         require(selected.registry_path == config.registry_path and selected.registry_sha256 == config.registry_sha256,
                 "runtime-preparation-registry")
         return selected
+
+    def _require_origin(self, who, selector):
+        if self._derived_configuration is not None:
+            from . import run_factory
+            origin = run_factory.read_configuration_origin(self._derived_configuration)
+            require(origin == self._origin and origin["selector"] == selector
+                    and (who.run_id, who.job_id, who.check_run_id, who.caller_sha, who.reusable_sha)
+                    == (origin["run_id"], origin["job_id"], origin["check_run_id"], origin["source_sha"], origin["reusable_sha"]),
+                    "runtime-derived-invocation")
 
     @staticmethod
     def _abort_observed(record):
@@ -258,12 +293,19 @@ class RuntimeRPC:
             self._stop_remote_after_abort(store, lease_id, selector)
 
     def handle(self, connected):
+        return self._handle_selected(connected, None)
+
+    def _handle_selected(self, connected, selection):
+        # Selection is only a locator parsed by the fixed bootstrap entry.
+        # Fresh normal native authentication below grants all actual authority.
         _root()
         operation, lease_id, accepted, writing = None, None, False, False
+        retention_attempted = False  # Request-local control flow, never authority or a retry permission.
         store, exported, receipt = None, None, None
         try:
             admission._socket(connected)
-            selector, operation = _selector(connected)
+            selector, operation = _selector(connected) if selection is None else selection
+            require(type(selector) is str and SELECTOR.fullmatch(selector) and operation in OPERATIONS, "runtime-selector")
             self._check()
             selected = self._registry.select(selector)
             admission._validate_policy(selected)
@@ -281,15 +323,50 @@ class RuntimeRPC:
             _write(connected, {"schema": 2, "type": "challenge", "operation": operation, **challenge})
             writing = False
             request = _authentication(connected, operation, challenge["nonce"], self._config.authentication_timeout_seconds)
-            native = admission.verify_runtime_native(connected, selected, request["nonce"], request["token"], request["api_token"])
-            del request["token"], request["api_token"]
+            if operation == "record-upload":
+                from . import operating_upload
+                ticket = admission.verify_intake_native(connected, selected, request["nonce"], request["token"], request["api_token"])
+                current_worker, who, _ = admission.require_intake_native(ticket, connected, selected,
+                                                                         request["token"], request["api_token"])
+                self._require_origin(who, selector)
+                joined = store.consume_runtime_proof(request["nonce"], current_worker, who, operation,
+                    cell_sha256=selected.cell_sha256, identity_policy_sha256=identity.policy_digest(selected.identity),
+                    policy_sha256=selected.custody_policy_sha256, deadline=selected.deadline, lease_id=None)
+                lease_id = joined.lease_id
+                upload = operating_upload.verify_uploaded_artifact(self._config.path, self._config.sha256,
+                    self._registry, selector, store, lease_id, ticket, connected,
+                    request["token"], request["api_token"], request["artifact"])
+                del request["token"], request["api_token"]
+                store.bind_uploaded_evidence(lease_id, upload)
+                operating_upload.finish_transport(store, lease_id, upload)
+                writing = True
+                outcome = _result(operation, lease_id, store.read(lease_id), "awaiting-native-end")
+                _write(connected, outcome)
+                return outcome
+            deferred_native = operation == "run" and self._derived_configuration is not None
+            native = None if deferred_native else admission.verify_runtime_native(
+                connected, selected, request["nonce"], request["token"], request["api_token"])
+            if not deferred_native:
+                del request["token"], request["api_token"]
             from . import root_session
             with root_session._session(self._config.preparation_config_path,
                                        self._config.preparation_config_sha256) as session:
                 config = root_session._require_session(session)
                 self._check()
+                if deferred_native:
+                    require(ledger.asdict(worker) == self._origin["worker"] and selector == self._origin["selector"],
+                            "runtime-derived-original-worker")
+                    from . import capacity
+                    capacity.require_capacity(self._config.path, self._config.sha256,
+                        self._registry, selector, store, session=session)
+                    native = admission.verify_runtime_native(connected, selected, request["nonce"], request["token"], request["api_token"])
+                    del request["token"], request["api_token"]
+                # The original five-second native capability must STILL be
+                # live after pre-admission reads. No timing allowance, token
+                # expiry or running lease is silently stretched by preflight.
                 current_worker, who = admission._require_native(native, connected, selected)
                 require(current_worker == worker and admission._controls(selected)[0] == controls, "runtime-peer-drift")
+                self._require_origin(who, selector)
                 if operation in {"run", "heartbeat"}:
                     require(self._config.heartbeat_lead_seconds < who.valid_until - int(time.time()),
                             "runtime-renewal-budget")
@@ -360,11 +437,18 @@ class RuntimeRPC:
             if operation == "run":
                 try:
                     engine_executor.wait_for_exit(self._config.preparation_config_path,
-                        self._config.preparation_config_sha256, self._registry, selector, store, lease_id, receipt)
+                        self._config.preparation_config_sha256, self._registry, selector, store, lease_id, receipt, notification_socket=connected)
                 except engine_executor.EngineUnknown:
                     pass  # Retained actual exit may coexist with a cleanup hold.
-                if self._abort_observed(store.read(lease_id)):
-                    self._stop_remote_after_abort(store, lease_id, selector)
+                self._stop_remote_after_abort(store, lease_id, selector)
+                _, cell_raw, _ = installation._file(selected.cell_config_path, cell_contract.MAX_CELL, private=True, keep=True)
+                if identity.decode_json(cell_raw).get("kind") == "operating":
+                    from . import operating_custody
+                    result = operating_custody.operating_outcome(self._config.path, self._config.sha256,
+                        self._registry, selector, store, lease_id)
+                    outcome = {"schema": 2, "type": "operating-terminal", "operation": "run", "lease_id": lease_id, "receipt": result}
+                    _write(connected, outcome)
+                    return outcome
                 try:
                     from . import evidence_export
                     exported = evidence_export.export_existing(self._config.path, self._config.sha256,
@@ -378,8 +462,14 @@ class RuntimeRPC:
                             self._registry, selector, store, lease_id)
                     except (finalization.FinalizationDenied, finalization.FinalizationUnknown):
                         # Preserve the observed exit/evidence, but ONLY actual
-                        # Ledger.close can make terminal cleanup verified.
-                        pass
+                        # Ledger.close can make terminal cleanup verified. Keep
+                        # the exact original owner safeguarded as the generic
+                        # failure path did, even if its earlier drain held.
+                        retention_attempted = True
+                        try:
+                            self._retain_after_failure(store, lease_id, selector, receipt)
+                        except Exception:
+                            pass  # Hold stays; no replacement waiter or UNKNOWN-effect retry.
                 outcome = _terminal(operation, lease_id, store.read(lease_id), exported)
             elif operation == "cancel":
                 receipt = _receipt(self._registry, selector, store, lease_id)
@@ -428,9 +518,10 @@ class RuntimeRPC:
                 _stream(connected, lease_id, exported)
             return outcome
         except Exception:
-            if accepted and store is not None:
+            if accepted and store is not None and not retention_attempted:
                 # An error/failed terminal send NEVER abandons an original
                 # child. No replay, replacement Popen or guessed wait status.
+                retention_attempted = True
                 try:
                     self._retain_after_failure(store, lease_id, selector, receipt)
                 except Exception:
@@ -445,3 +536,149 @@ class RuntimeRPC:
         finally:
             if store is not None:
                 store.shutdown()
+
+
+OBSERVER_OPERATIONS = frozenset({"observe-profile", "observe-operating"})
+
+
+BOOTSTRAP_BINDINGS = "/var/lib/lightning-it/incus-operating-bindings"
+
+
+class BootstrapRuntimeRPC:
+    """Repeatable native Main intake, then separately fresh actual admission.
+
+    No private per-run preparation is represented as a lease or running cell.
+    The global base policy, signer, ledger and anchor are never republished.
+    """
+    def __init__(self, bootstrap_path, bootstrap_sha256):
+        from . import run_factory
+        self._bootstrap = run_factory.load_bootstrap(bootstrap_path, bootstrap_sha256)
+
+    def _binding(self, configuration):
+        from . import operating_watchdog
+        value = {"schema": 1, "runtime_config_path": configuration.runtime_config_path,
+            "runtime_config_sha256": configuration.runtime_config_sha256,
+            "snapshot_manifest_sha256": configuration.manifest_sha256}
+        directory = operating_watchdog._private_directory(BOOTSTRAP_BINDINGS)
+        try:
+            name = "binding-" + ledger.digest(value) + ".json"
+            try:
+                operating_watchdog._save_once(directory, name, value)
+            except FileExistsError:
+                require(operating_watchdog._read(directory, name)[0] == value, "runtime-bootstrap-binding-held")
+        finally:
+            os.close(directory)
+
+    def _observe(self, connected, bootstrap, selector, operation):
+        from . import operating_custody, run_factory
+        challenge = run_factory.challenge_bootstrap(connected, bootstrap, selector)
+        _write(connected, {"schema": 2, "type": "challenge", "operation": operation,
+                          "phase": "observer", **challenge})
+        request = _authentication(connected, operation, challenge["nonce"],
+                                  bootstrap.value["runtime"]["authentication_timeout_seconds"])
+        proof = run_factory.verify_bootstrap_native(connected, bootstrap, selector, request["nonce"],
+            request["token"], request["api_token"], purpose="observer")
+        configuration = run_factory.find_existing_configuration(bootstrap, selector, proof)
+        _, who, remaining = run_factory.require_bootstrap_native(proof, connected, proof.policy,
+                                                                 request["token"], request["api_token"])
+        origin = run_factory.read_configuration_origin(configuration)
+        require((who.run_id, who.caller_sha, who.reusable_sha) ==
+                (origin["run_id"], origin["source_sha"], origin["reusable_sha"])
+                and who.check_run_id != origin["check_run_id"] and who.job_id != origin["job_id"],
+                "runtime-observer-original-invocation")
+        runtime = RuntimeRPC(configuration.runtime_config_path, configuration.runtime_config_sha256)
+        selected = runtime._registry.select(selector)
+        with ledger.Ledger(selected.ledger_path, clock=time.time) as store:
+            matches = [lease_id for lease_id in store.lease_ids()
+                if store.read(lease_id)["cell_sha256"] == selected.cell_sha256
+                and all(store.read(lease_id)["identity"][field] == origin[field] for field in ("run_id", "job_id", "check_run_id"))]
+            require(len(matches) == 1, "runtime-observer-original-lease")
+            lease_id = matches[0]
+            if "native_terminal" not in store.read(lease_id):
+                terminal = operating_custody.observe_native_terminal(runtime._registry, selector, store, lease_id,
+                                                                      api_token=request["api_token"])
+                store.bind_native_terminal(lease_id, terminal)
+            end = time.monotonic() + min(120, remaining)
+            while True:
+                require(time.monotonic() < end, "runtime-observer-wait-held")
+                record = store.read(lease_id)
+                if operation == "observe-operating" and record["state"] == "retained":
+                    receipt = operating_custody.operating_outcome(configuration.runtime_config_path,
+                        configuration.runtime_config_sha256, runtime._registry, selector, store, lease_id, retained=True)
+                    kind = "operating-receipt"
+                    break
+                if operation == "observe-profile" and record["state"] == "closed":
+                    run_factory.require_bootstrap_native(proof, connected, proof.policy, request["token"], request["api_token"])
+                    config = runtime._check()
+                    receipt = signed_context.RootSigner(config.signing_key_path, config.signing_public_key).issue_final_receipt(
+                        runtime._registry, selector, store, lease_id)
+                    kind = "final-receipt"
+                    break
+                require(not any(row["state"] == "unknown" for row in record["effects"].values()),
+                        "runtime-observer-cleanup-unknown")
+                time.sleep(min(1, max(0, end - time.monotonic())))
+            # No new authority or renewal: original observer JWT, same socket,
+            # same native job and Root controls are freshly rechecked at return.
+            run_factory.require_bootstrap_native(proof, connected, proof.policy, request["token"], request["api_token"])
+            del request["token"], request["api_token"]
+            outcome = {"schema": 2, "type": kind, "operation": operation, "cell": selector, "receipt": receipt}
+            _write(connected, outcome)
+            return outcome
+
+    def handle(self, connected):
+        from . import run_factory
+        operation, handed_off, staging = None, False, False
+        try:
+            admission._socket(connected)
+            message = _read(connected, 1024, IO_SECONDS)
+            require(set(message) in ({"schema", "cell", "operation"}, {"schema", "cell", "operation", "configuration"})
+                    and type(message.get("schema")) is int and message["schema"] == 2
+                    and type(message.get("cell")) is str and SELECTOR.fullmatch(message["cell"])
+                    and message.get("operation") in OPERATIONS | OBSERVER_OPERATIONS, "runtime-bootstrap-selector")
+            selector, operation = message["cell"], message["operation"]
+            bootstrap = run_factory.load_bootstrap(self._bootstrap.path, self._bootstrap.sha256)
+            if operation in OBSERVER_OPERATIONS:
+                require("configuration" not in message, "runtime-observer-no-admission-locator")
+                staging = True  # Native terminal readback may be durably recorded.
+                return self._observe(connected, bootstrap, selector, operation)
+            if "configuration" in message:
+                run_factory._worker(connected, bootstrap)  # Cheap managed-peer proof before fixed-catalogue reads.
+                configuration = run_factory.resolve_configuration(bootstrap, selector, message["configuration"])
+                handed_off = True
+                return RuntimeRPC(configuration.runtime_config_path, configuration.runtime_config_sha256,
+                    derived_configuration=configuration)._handle_selected(connected, (selector, operation))
+            challenge = run_factory.challenge_bootstrap(connected, bootstrap, selector)
+            _write(connected, {"schema": 2, "type": "challenge", "operation": operation,
+                              "phase": "intake", **challenge})
+            request = _authentication(connected, operation, challenge["nonce"],
+                                      bootstrap.value["runtime"]["authentication_timeout_seconds"])
+            proof = run_factory.verify_bootstrap_native(connected, bootstrap, selector, request["nonce"],
+                                                        request["token"], request["api_token"])
+            if operation == "run":
+                staging = True
+                # This factory performs the single authoritative archive stage;
+                # no redundant outer acquisition/readback or assumed receipt.
+                configuration = run_factory.create_run_configuration(proof, connected, bootstrap, selector,
+                    request["token"], request["api_token"])
+            else:
+                configuration = run_factory.find_existing_execution_configuration(bootstrap, selector, proof)
+            run_factory.require_bootstrap_native(proof, connected, proof.policy, request["token"], request["api_token"])
+            del request["token"], request["api_token"]
+            self._binding(configuration)
+            result = {"schema": 2, "type": "intake-ready", "operation": operation, "cell": selector,
+                "configuration": configuration.manifest_sha256, "deadline": configuration.deadline,
+                "lease_created": False}
+            _write(connected, result)
+            return result
+        except Exception:
+            if handed_off:
+                return {"type": "failure"}  # Inner dispatcher owns the sole reply.
+            failure = {"schema": 2, "type": "failure", "operation": operation,
+                       "disposition": "unknown-hold" if staging else "denied-before-intent"}
+            # FS intake intents can remain held, but no lease/workload authority
+            # has been admitted. Never print input, URL, credential or errors.
+            try:
+                _write(connected, failure)
+            except Exception:
+                pass
+            return failure

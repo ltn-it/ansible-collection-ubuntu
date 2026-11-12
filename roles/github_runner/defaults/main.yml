@@ -77,11 +77,21 @@ github_runner_instances:
 
 # Installation preparation only: this never enables or starts the socket.
 github_runner_runtime_v2_install: false
+# Registry mode preserves the existing sealed static configuration interface.
+# Bootstrap mode selects the reviewed per-job intake policy, never a job hint.
+github_runner_runtime_v2_bootstrap: false
 github_runner_runtime_v2_configuration_path: ""
 github_runner_runtime_v2_configuration_sha256: ""
+github_runner_runtime_v2_signing_public_key_hex: ""
 github_runner_runtime_v2_socket_group: ""
 github_runner_runtime_v2_module_sha256: {}
 github_runner_runtime_v2_client_sha256: {}
+github_runner_runtime_v2_operating_install: false
+github_runner_runtime_v2_watchdog_configuration_path: ""
+github_runner_runtime_v2_watchdog_configuration_sha256: ""
+github_runner_runtime_v2_mail_configuration_path: ""
+github_runner_runtime_v2_mail_configuration_sha256: ""
+github_runner_runtime_v2_mail_helper_sha256: {}
 
 # Independent supervision is separately opt-in; preparation does not activate.
 github_runner_ephemeral_watchdog_install: false

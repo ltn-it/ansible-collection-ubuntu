@@ -408,6 +408,12 @@ class RootFailureOwnerBoundaryTests(unittest.TestCase):
              mock.patch.object(engine_executor, "_command", side_effect=fixture.command), \
              mock.patch.object(engine_executor, "_withdraw"), mock.patch.object(engine_executor, "_drained"):
             dispatcher._retain_after_failure(store, lease_id, selector, receipt)
+            self.assertTrue(original.closed)
+            retained = store.read(lease_id)
+            # The exact original waiter is already drained/released. A later
+            # failure boundary cannot replace it or repeat its local stop.
+            dispatcher._retain_after_failure(store, lease_id, selector, receipt)
+            self.assertEqual(store.read(lease_id), retained)
         self.assertLess(time.monotonic()-before, 5)
         self.assertTrue(original.closed)
         self.assertEqual(original.returncode, -signal.SIGTERM)

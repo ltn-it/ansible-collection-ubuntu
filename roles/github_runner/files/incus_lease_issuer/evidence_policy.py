@@ -729,7 +729,7 @@ def _string_array(value: Any, *, nonempty: bool = False) -> bool:
     )
 
 
-def _manifest_structure_failures(manifest: dict[str, Any]) -> list[str]:
+def _manifest_structure_failures(manifest: dict[str, Any], *, preliminary: bool = False) -> list[str]:
     """Apply the repository schema without requiring a runtime JSON Schema package."""
 
     failures: list[str] = []
@@ -754,6 +754,13 @@ def _manifest_structure_failures(manifest: dict[str, Any]) -> list[str]:
         "prerequisites",
         "release_eligible",
     }
+    if preliminary:
+        required |= {"root_finalization", "execution_success", "candidate_execution_passed"}
+        if (manifest.get("root_finalization") != "pending" or type(manifest.get("execution_success")) is not bool
+                or manifest.get("candidate_execution_passed") is not False or manifest.get("release_eligible") is not False):
+            failures.append("preliminary manifest cannot claim final eligibility")
+    elif "root_finalization" in manifest:
+        failures.append("pending Root finalization is not final quality evidence")
     missing = sorted(required - set(manifest))
     failures.extend(f"manifest lacks required field {name}" for name in missing)
     if manifest.get("schema_version") != 2:
@@ -761,7 +768,7 @@ def _manifest_structure_failures(manifest: dict[str, Any]) -> list[str]:
     if manifest.get("mode") not in {"ci", "candidate", "release"}:
         failures.append("manifest mode is invalid")
     if manifest.get("mode") == "candidate":
-        if manifest.get("candidate_execution_passed") is not True:
+        if not preliminary and manifest.get("candidate_execution_passed") is not True:
             failures.append("candidate manifest did not record a passing execution")
         if manifest.get("release_eligible") is not False:
             failures.append("candidate evidence must never be release eligible")
@@ -917,6 +924,9 @@ def _manifest_structure_failures(manifest: dict[str, Any]) -> list[str]:
         failures.append("manifest prerequisites is invalid")
     elif prerequisites and set(prerequisites) != set(MANDATORY_PREREQUISITES):
         failures.append("manifest prerequisites has incomplete or unknown names")
+    elif preliminary:
+        if any(status not in {"success", "failure", "cancelled", "skipped", "pending"} for status in prerequisites.values()):
+            failures.append("preliminary manifest prerequisites contains an unknown status")
     elif any(status != "success" for status in prerequisites.values()):
         failures.append("manifest prerequisites contains a non-success status")
     if not isinstance(manifest.get("release_eligible"), bool):

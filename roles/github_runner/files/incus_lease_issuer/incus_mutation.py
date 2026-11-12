@@ -445,6 +445,45 @@ class RootIncusMutator:
                 "mutation-readback-denied")
         return envelope["metadata"]
 
+    def _image_path(self, project=None):
+        from . import operating_cells
+        return "/1.0/images/" + operating_cells.IMAGE + "?" + urlencode({"project": project or self._project.project})
+
+    def _image_observe(self, project=None):
+        self._backend()
+        status, envelope, _ = self._exchange("GET", self._image_path(project))
+        if status == 404 and envelope.get("type") == "error" and envelope.get("error_code") == 404:
+            return None
+        require(status == 200 and self._sync(status, envelope) and type(envelope.get("metadata")) is dict,
+                "mutation-image-readback")
+        return envelope["metadata"]
+
+    def _image_inventory(self):
+        status, envelope, _ = self._exchange("GET", "/1.0/images?" + urlencode({"project": self._project.project}))
+        require(status == 200 and self._sync(status, envelope) and type(envelope.get("metadata")) is list
+                and len(envelope["metadata"]) <= 1, "mutation-image-inventory")
+        return envelope["metadata"]
+
+    def image_copy(self):
+        """Only the pinned cached default-project VM image, no network alias."""
+        from . import operating_cells
+        require(self._image_inventory() == [] and self._image_observe() is None, "mutation-image-target-not-empty")
+        source = self._image_observe("default")
+        require(type(source) is dict and source.get("fingerprint") == operating_cells.IMAGE
+                and source.get("type") == "virtual-machine" and self._image_observe("default") == source
+                and self._image_inventory() == [], "mutation-image-source-drift")
+        return self._mutate("image-copy", "image:" + self._project.project + ":" + operating_cells.IMAGE,
+            "POST", "/1.0/images?" + urlencode({"project": self._project.project}),
+            {"public": False, "auto_update": False,
+             "source": {"type": "image", "project": "default", "fingerprint": operating_cells.IMAGE,
+                        "protocol": "incus", "mode": "pull"}})
+
+    def image_delete(self):
+        from . import operating_cells
+        require(self.readback("image")["state"] == "required_fields_match", "mutation-image-delete-not-owned")
+        return self._mutate("image-delete", "image:" + self._project.project + ":" + operating_cells.IMAGE,
+                            "DELETE", self._image_path())
+
     def _matches(self, kind, metadata):
         if kind == "profile":
             expected = self._profile()
@@ -472,8 +511,22 @@ class RootIncusMutator:
         Matching required fields is not a complete semantic/capacity assertion;
         Root cell policy still must evaluate backend-added configuration.
         """
-        require(type(kind) is str and kind in {"project", "bridge", "certificate", "profile"},
+        require(type(kind) is str and kind in {"project", "bridge", "certificate", "profile", "image"},
                 "mutation-readback-kind")
+        if kind == "image":
+            from . import operating_cells
+            first, metadata = self._image_inventory(), self._image_observe()
+            expected = "/1.0/images/" + operating_cells.IMAGE
+            require(first == self._image_inventory(), "mutation-image-inventory-drift")
+            if metadata is None:
+                require(first == [], "mutation-image-foreign-inventory")
+                return {"state": "absent_observed", "metadata_sha256": digest(None)}
+            require(first == [expected], "mutation-image-foreign-inventory")
+            require(metadata == self._image_observe(), "mutation-image-readback-drift")
+            return {"state": "required_fields_match" if metadata.get("fingerprint") == operating_cells.IMAGE
+                    and metadata.get("type") == "virtual-machine" and metadata.get("public") is False
+                    and metadata.get("auto_update") is False and metadata.get("aliases") == [] else "conflict",
+                    "metadata_sha256": digest(metadata)}
         metadata = self._observe(kind)
         return {"state": "absent_observed" if metadata is None else (
             "required_fields_match" if self._matches(kind, metadata) else "conflict"),
@@ -541,10 +594,11 @@ class RootIncusCleanup(RootIncusMutator):
         from . import cell_contract, ledger
         admin._root()
         try:
-            require(type(owned) is cell_contract.OwnedCellForCleanup and type(store) is ledger.Ledger
+            require(type(owned) in {cell_contract.OwnedCellForCleanup, cell_contract.OwnedCellForObservation} and type(store) is ledger.Ledger
                     and store.owner_uid == 0 and type(client) is admin.RootIncusAdmin, "mutation-cleanup-input")
-            require(cell_contract.owned_cell_for_cleanup(owned.registry, owned.selector, store, owned.lease_id) == owned,
-                    "mutation-cleanup-owner-drift")
+            factory = (cell_contract.owned_cell_for_observation if type(owned) is cell_contract.OwnedCellForObservation
+                       else cell_contract.owned_cell_for_cleanup)
+            require(factory(owned.registry, owned.selector, store, owned.lease_id) == owned, "mutation-cleanup-owner-drift")
             value = owned.incus
             owner = Ownership(**value["ownership"])
             project = ProjectSpec(value["project"], value["network"], value["pool"], ProjectLimits(**value["project_limits"]), owner)
@@ -566,13 +620,20 @@ class RootIncusCleanup(RootIncusMutator):
 
     def _scope(self):
         from . import cell_contract, ledger
-        require(cell_contract.owned_cell_for_cleanup(self._owner.registry, self._owner.selector,
+        factory = (cell_contract.owned_cell_for_observation if type(self._owner) is cell_contract.OwnedCellForObservation
+                   else cell_contract.owned_cell_for_cleanup)
+        require(factory(self._owner.registry, self._owner.selector,
                 self._store, self._owner.lease_id) == self._owner, "mutation-cleanup-owner-drift")
         record = self._store.read(self._owner.lease_id)
         creator = record["effects"][self._owner.creators["certificate-create"]["id"]]
         scope = creator.get("certificate_scope")
         ledger._certificate_scope(scope, self._owner.lease_id, creator, list(record["effects"].values()))
         return scope
+
+    def _mutate(self, operation, target, method, path, body=None, *, etag=None):
+        from . import cell_contract
+        require(type(self._owner) is cell_contract.OwnedCellForCleanup, "mutation-live-observation-read-only")
+        return super()._mutate(operation, target, method, path, body, etag=etag)
 
     def project_create(self):
         raise MutationDenied("mutation-cleanup-only")
@@ -595,6 +656,35 @@ class RootIncusCleanup(RootIncusMutator):
         second, operations2 = self._client.instances(), self._client.operations()
         require(second == first and operations2 == operations, "mutation-project-not-quiet")
         return {"state": "quiet_observed", "instances_sha256": digest(first), "operations_sha256": digest(operations)}
+
+    def wait_quiet(self, seconds):
+        """Wait for actual absence of briefly retained OWN terminal tasks.
+
+        No status group is filtered. Foreign, pending, failed or unjournaled
+        operations hold immediately; timeout never authorizes a new effect.
+        """
+        require(type(seconds) is int and 1 <= seconds <= 60, "mutation-quiet-wait-bound")
+        end = time.monotonic() + seconds
+        while True:
+            require(time.monotonic() < end, "mutation-project-not-quiet")
+            self._scope()
+            require(time.monotonic() < end, "mutation-project-not-quiet")
+            require(not self._client.instances(), "mutation-project-not-quiet")
+            require(time.monotonic() < end, "mutation-project-not-quiet")
+            operations = self._client.operations()
+            require(time.monotonic() < end, "mutation-project-not-quiet")
+            if all(not rows for rows in operations.values()):
+                observed = self.quiet_project()
+                require(time.monotonic() < end, "mutation-project-not-quiet")
+                return observed
+            record = self._store.read(self._owner.lease_id)
+            own = {row["incus_operation_id"] for row in record["effects"].values()
+                   if row["state"] == "verified" and "incus_operation_id" in row}
+            require(all(row["id"] in own and row["class"] == "task" and row["status_code"] == 200
+                        and row.get("err", "") == "" for rows in operations.values() for row in rows),
+                    "mutation-project-operation-held")
+            require(time.monotonic() < end, "mutation-project-not-quiet")
+            time.sleep(min(0.05, max(0, end - time.monotonic())))
 
     def stop_inventory(self):
         """Stable exact declared VM only; foreign resources/operations hold.
@@ -619,7 +709,7 @@ class RootIncusCleanup(RootIncusMutator):
             require(rows in ([], [expected_url]), "mutation-instance-inventory")
             record = self._store.read(self._owner.lease_id)
             permitted = {row["incus_operation_id"] for row in record["effects"].values()
-                if row["operation"] in {"certificate-revoke", "instance-stop"}
+                if row["operation"] in {"certificate-revoke", "instance-stop", "instance-destroy"}
                 and row["state"] in {"intent", "verified"} and "incus_operation_id" in row}
             require(all(row["id"] in permitted and row["class"] == "task" and row["status_code"] == 200
                         and row.get("err", "") == "" for group in operations.values() for row in group),
@@ -655,6 +745,31 @@ class RootIncusCleanup(RootIncusMutator):
         path = "/1.0/instances/" + value["instance"] + "/state?" + urlencode({"project": value["project"]})
         return self._mutate("instance-stop", target, "PUT", path,
                             {"action": "stop", "timeout": timeout, "force": False, "stateful": False})
+
+    def instance_delete(self):
+        """Delete only the independently observed, stopped original UUID.
+
+        The workload creates its VM inside the unique Root-created project;
+        observing it does not invent a Root instance-create effect.
+        """
+        from . import operating_custody
+        record = self._store.read(self._owner.lease_id)
+        observed = record.get("owned_instance")
+        operating_custody.validate_instance_record(observed, record, self._owner.lease_id)
+        value = self._owner.incus
+        target = "instance:" + value["project"] + ":" + value["instance"]
+        require(observed["project"] == value["project"] and observed["name"] == value["instance"]
+                and sum(row["operation"] == "instance-destroy" and row["target"] == target
+                        and row["state"] == "intent" for row in record["effects"].values()) == 1,
+                "mutation-instance-delete-intent")
+        require(self.stop_inventory()["state"] == "stopped_observed" and self.certificates_absent(),
+                "mutation-instance-delete-not-safe")
+        vm = self._client.instance()
+        require(vm.get("config", {}).get("volatile.uuid") == observed["uuid"]
+                and self.stop_inventory()["state"] == "stopped_observed" and self._client.instance() == vm,
+                "mutation-instance-delete-replaced")
+        return self._mutate("instance-destroy", target, "DELETE",
+            "/1.0/instances/" + value["instance"] + "?" + urlencode({"project": value["project"]}))
 
     def certificate_inventory(self):
         scope = self._scope()
@@ -693,7 +808,11 @@ class RootIncusCleanup(RootIncusMutator):
         return self._mutate("certificate-revoke", target, "DELETE", "/1.0/certificates/" + snapshot.fingerprints[0])
 
     def readback(self, kind):
-        require(type(kind) is str and kind in {"certificate", "project", "bridge", "profile"}, "mutation-cleanup-readback-kind")
+        require(type(kind) is str and kind in {"certificate", "project", "bridge", "profile", "instance", "image"}, "mutation-cleanup-readback-kind")
+        if kind == "instance":
+            observed = self.stop_inventory()
+            return {"state": "absent_observed" if observed["state"] == "absent_observed" else "required_fields_match",
+                    "metadata_sha256": digest(observed)}
         if kind == "certificate":
             snapshot = self.certificate_inventory()
             return {"state": "required_fields_match" if snapshot.fingerprints else "absent_observed",

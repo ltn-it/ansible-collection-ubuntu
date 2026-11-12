@@ -296,6 +296,37 @@ def install_baseline(root_policy_path, expected_sha256, root_configuration):
     """
     _root()
     policy = _bound(root_policy_path, expected_sha256, root_configuration)
+    return _install_baseline(policy, root_configuration)
+
+
+def _baseline_policy(binding):
+    """Closed Root maintenance bindings; never caller policy paths or hooks."""
+    if type(binding) is preparation.RootConfiguration:
+        return _bound(binding.host_api_fence_policy_path,
+                      binding.host_api_fence_policy_sha256, binding)
+    from . import run_factory
+    require(type(binding) is run_factory.RootBootstrapPolicy, "host-api-baseline-binding")
+    current = run_factory.load_bootstrap(binding.path, binding.sha256)
+    require(current == binding, "host-api-bootstrap-drift")
+    config = current.value["preparation"]
+    return _policy(config["host_api_fence_policy_path"], config["host_api_fence_policy_sha256"])
+
+
+def install_bootstrap_baseline(bootstrap_path, expected_sha256):
+    """Deny-first Root maintenance before any per-job registry exists.
+
+    The sealed bootstrap alone selects the host policy. This creates no lease,
+    signer, listener, native job or runtime grant and never adopts a journal.
+    """
+    _root()
+    from . import run_factory
+    bootstrap = run_factory.load_bootstrap(bootstrap_path, expected_sha256)
+    return _install_baseline(_baseline_policy(bootstrap), bootstrap)
+
+
+def _install_baseline(policy, binding):
+    _root()
+    require(_baseline_policy(binding) == policy, "host-api-policy-drift")
     parent, leaf = _journal_parent(policy)
     fd, attempted = None, False
     try:
@@ -309,13 +340,14 @@ def install_baseline(root_policy_path, expected_sha256, root_configuration):
                 if "table" in row:
                     require(type(row["table"]) is dict and not (row["table"].get("family") == "inet"
                             and row["table"].get("name") == policy.table), "host-api-preexisting-table")
+            require(_baseline_policy(binding) == policy, "host-api-policy-drift")
             fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
             _save_journal(fd, parent, leaf, _journal_value(policy, "intent"))
             attempted = True
             _nft(policy, "-j", "-f", "-", payload=ledger.canonical(_rules(policy)))
             handle, _, expires, deadline = _readback(policy, expected_deadline=0)
             require(expires == deadline == 0, "host-api-baseline-not-denied")
-            require(_bound(root_policy_path, expected_sha256, root_configuration) == policy, "host-api-policy-drift")
+            require(_baseline_policy(binding) == policy, "host-api-policy-drift")
             _save_journal(fd, parent, leaf, _journal_value(policy, "verified", handle))
             return _baseline(policy)
     except Exception:

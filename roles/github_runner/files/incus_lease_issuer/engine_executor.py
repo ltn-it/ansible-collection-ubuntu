@@ -1010,10 +1010,10 @@ def _withdraw_retained(config, registry, selector, store, lease_id):
         return True
 
 
-def wait_for_exit(config_path, config_sha256, registry, selector, store, lease_id, receipt):
+def wait_for_exit(config_path, config_sha256, registry, selector, store, lease_id, receipt, *, notification_socket=None):
     """Retain the actual original owner with current auth/deadline supervision."""
     return _wait_original(config_path, config_sha256, registry, selector, store, lease_id, receipt,
-                          stop_first=False)
+                          stop_first=False, notification_socket=notification_socket)
 
 
 def _abort_after_failure(config_path, config_sha256, registry, selector, store, lease_id, receipt):
@@ -1027,7 +1027,7 @@ def _abort_after_failure(config_path, config_sha256, registry, selector, store, 
                           stop_first=True)
 
 
-def _wait_original(config_path, config_sha256, registry, selector, store, lease_id, receipt, *, stop_first):
+def _wait_original(config_path, config_sha256, registry, selector, store, lease_id, receipt, *, stop_first, notification_socket=None):
     """Long-lived original owner; no preparation lock while pumping/waiting.
 
     Returns only a durable process/capture observation. Exit zero is not test
@@ -1044,24 +1044,37 @@ def _wait_original(config_path, config_sha256, registry, selector, store, lease_
         require(owned.exit_receipt is not None and owned.cgroup_state == "drained-observed"
                 and not owned.withdrawal_hold, "engine-retained-exit-held")
         return owned.exit_receipt
+    ready_notified = False
+    operating = identity.decode_json(manifest.canonical_bytes)["environment"].get("QUALITY_INPUT_PROFILE") == "operating"
     while True:
-        if stop_first and not owned.stop_attempted:
-            owned.stop_attempted = True
-            try:
-                cancel(config_path, config_sha256, registry, selector, store, lease_id, receipt)
-            except EngineUnknown:
-                owned.withdrawal_hold = True
         owned.pump(0.05)
         record = store.read(lease_id)
         authorization = record["authorizations"][-1]
         expired = int(time.time()) >= min(owned.prepared.expires_at, authorization["valid_until"])
-        if (expired or owned.capture.problem) and not owned.stop_attempted:
+        if expired and record["state"] == "prepared":
+            store.expire_authorization(lease_id)
+            record = store.read(lease_id)
+        # READY is a live phase, never a prerequisite for draining an original
+        # owner after abort, cancellation, expiry or a prior uncertain stop.
+        stopping = stop_first or expired or owned.capture.problem or record["state"] != "prepared"
+        if stopping and not owned.stop_attempted:
             owned.stop_attempted = True
             # cancel reacquires the lock only for its finite transition.
             try:
                 cancel(config_path, config_sha256, registry, selector, store, lease_id, receipt)
             except EngineUnknown:
                 owned.withdrawal_hold = True
+        if operating and not stopping and not owned.stop_attempted and not ready_notified and owned.returncode is None:
+            from . import operating_custody
+            # A raced live-authority/provenance denial stays strict. The normal
+            # exact-original-owner abort path can still drain without READY.
+            ready = operating_custody.operating_ready_tick(config_path, config_sha256, registry, selector, store, lease_id, receipt)
+            if ready is not None:
+                if notification_socket is not None:
+                    from . import runtime_rpc
+                    runtime_rpc._write(notification_socket, {"schema": 2, "type": "operating-ready", "operation": "run",
+                        "lease_id": lease_id, "case": ready["case"], "instance_uuid": ready["instance_uuid"]})
+                ready_notified = True
         if owned.returncode is not None:
             if not owned.stop_attempted:
                 owned.stop_attempted = True

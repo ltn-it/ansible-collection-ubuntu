@@ -40,6 +40,10 @@ MAX_BYTES = 1024 ** 4
 MAX_INODES = 2 ** 30
 MOUNTINFO_LIMIT = 8 * 1024 ** 2
 
+# Resolve the process-local symbol once, not the filesystem observation. Every
+# descriptor check below still makes its own real syscall with a fresh buffer.
+_FSTATFS = ctypes.CDLL(None, use_errno=True).fstatfs
+
 # Primary supported ABI: Linuxv6.8 include/uapi/linux/{loop,fiemap}.h.
 # FIEMAP rejects shared/delayed/unknown/encoded extents. UNWRITTEN is allocated
 # physical reservation, not a hole. Data contents and extent splitting may
@@ -65,7 +69,7 @@ def _root():
 
 def _fs_type(fd):
     buffer = ctypes.create_string_buffer(256)
-    require(ctypes.CDLL(None, use_errno=True).fstatfs(fd, buffer) == 0, "storage-quota-filesystem-stat")
+    require(_FSTATFS(fd, buffer) == 0, "storage-quota-filesystem-stat")
     return ctypes.c_long.from_buffer(buffer).value
 
 

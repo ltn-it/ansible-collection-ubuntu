@@ -460,8 +460,9 @@ references and hashes bind bytes; they do not establish operating acceptance.
 The fixed private launcher runs `/usr/bin/python3 -I -B`, inserts only the sealed
 `/usr/local/lib/lit-incus-runtime-v2` package path and consumes the connected Unix
 socket on fd0. Public clients are installed together under
-`/usr/libexec/lightning-it`; their Root0644 configuration points only to
-`/run/lightning-it/incus-runtime-v2/socket`. The Root0600 anchor lives at
+`/usr/libexec/lightning-it`; their Root0644 configuration fixes
+`/run/lightning-it/incus-runtime-v2/socket` and, in bootstrap mode, the independently
+verified public signing pin. No private signing bytes are copied or read by the installer. The Root0600 anchor lives at
 `/etc/lit/incus-lease-issuer/runtime-v2-anchor.json`. Unit definitions and tmpfiles
 configuration preserve these exact paths. A second identical preparation is
 idempotent; replacement of a different existing payload/configuration requires
@@ -469,13 +470,184 @@ a separately qualified inactive update procedure and is deliberately refused.
 
 This source unit does not bootstrap a native engine, establish host firewall
 baseline, migrate any registered runner, authorize a custodian/window/retention,
-install a watchdog, or qualify service hardening/runtime privileges. Actual
+activate a watchdog, or qualify service hardening/runtime privileges. Actual
 protected-runner/registry producers and all native package, kernel, endpoint,
 capacity, secret/credential and accepted operating inputs remain prerequisites
 to any later activation. The light contract scenario validates default-off and
 missing-input behavior only. The unit tests also exercise a freshly copied
 private package through the isolated launcher; neither is a native service or
 VM acceptance claim. No executable live activation command is provided here.
+
+### Disabled bootstrap and operating observer preparation
+
+`github_runner_runtime_v2_bootstrap: true` selects an existing sealed bootstrap
+configuration instead of a static job registry. It requires
+`github_runner_runtime_v2_signing_public_key_hex`, obtained through the independent
+public-key handoff. The fixed schema-2 Root anchor binds the bootstrap path and
+SHA256. This does not create a job, lease, credential or VM. Runtime intake still
+requires actual job authentication and a second fresh native authorization before
+lease creation; installation cannot manufacture those proofs.
+
+Before the private endpoint listens, the separate Root maintenance producer may
+call `host_api_fence.install_bootstrap_baseline(bootstrap_path, expected_sha256)`.
+It derives the host policy from that same sealed bootstrap without constructing
+a static registry, lease or signer. Bootstrap and host-policy bindings are
+rechecked before the deny-only table effect and after native readback. Existing
+tables or intent, unknown and verified journals are never adopted or replayed.
+This API neither activates a listener nor admits a job; the existing per-job
+grant and withdrawal bindings remain mandatory.
+
+`github_runner_runtime_v2_operating_install: true` additionally requires bootstrap
+mode and these explicit inputs, all defaulting to empty values:
+
+- `github_runner_runtime_v2_watchdog_configuration_path` and its `_sha256` pin;
+- `github_runner_runtime_v2_mail_configuration_path` and its `_sha256` pin;
+- `github_runner_runtime_v2_mail_helper_sha256`, exactly the six as-built pure
+  helper filenames checked by the role.
+
+The configurations must already be canonical Root0600 files for the actual
+machine and current boot. They must share an existing Root0700 private spool;
+the watchdog also needs an existing Root0700 bindings directory. Preparation
+installs fixed isolated launchers, sealed anchors, and disabled service/timer
+pairs named `lit-incus-operating-watchdog` and `lit-incus-operating-mail`.
+Every installation refuses active, enabled or foreign versions of these units
+before copying. It never starts, enables, stops or restarts them. Helpers live
+under `/usr/local/lib/lightning-it/incus-operating-mail-helper`; no legacy worker
+store or legacy admission path is constructed.
+
+The mail readback requires an already prepared local-only Postfix installation
+with the owned configuration recognized by `lit.ubuntu.local_mail`. That role is
+a separate explicit prerequisite; this installer does not install packages or
+replace an unknown mail configuration. The readback checks policy and tools but
+sends no mail. Actual submission and independent confirmation in the local root
+mailbox remain operating acceptance requirements. A sendmail exit code alone is
+insufficient. No external recipient or personal acknowledgement is inferred from
+`root@localhost` delivery.
+
+Confirmed event/receipt pairs are archived together in a durable Root-private
+record before either active-spool file is removed. This record prevents repeat
+submission after interruption or repeated watchdog observations. Historical
+confirmations do not consume the 256 pending-event limit; each tick processes
+at most 256 records. Replacement staging is separate from the active inventory,
+so an interrupted cursor or receipt replacement cannot poison every later tick.
+The mailbox fixtures use only private temporary paths, including the unchanged
+pure configuration and mailbox readers.
+
+The installation tests use actual Root-owned files and isolated fresh Python
+imports; systemd observations in those tests are modeled. They do not prove
+native timer activation, local Postfix delivery, kernel isolation or a full
+operating drill. Activation commands remain withheld until the complete sealed
+policy, native capacity and controller inputs have been qualified together.
+
+### Native job intake and failure custody
+
+Bootstrap policy fixes the supplementary repository and Main-push workflow,
+immutable validation controller, eligible native actors, runner identity and
+workflow content digest. A verified current job supplies its own read token only
+in memory. Public validation source reads are explicitly unauthenticated and
+must prove the expected public repository identity; a failed authenticated read
+is never retried with weaker credentials. Candidate bytes, Source and controller
+Git archives are joined to the same actual run before private sealing.
+
+The first connection can prepare only an immutable private run snapshot and job
+configuration. Its `intake-ready` response explicitly reports no lease. A second
+connection uses a new nonce, fresh OIDC and native assignment verification;
+run/job/check identities must match the sealed configuration before preparation
+or signing. The deadline is the earlier of the native job's reviewed deadline
+and the original fixed Root lease window. Reusing a configuration cannot reset
+that deadline, and the same check run cannot acquire a second lease.
+
+Physical execution leaves destruction pending. Its preliminary evidence keeps
+literal destruction `pending`, final eligibility false and actual raw test and
+capture outcomes. Execution CLI exit zero is not final quality acceptance. Root
+independently downloads the actual uploaded provider ZIP and compares every
+member with its retained sanitized export before accepting the upload. A private
+verification intent precedes filesystem staging; uncertain partial stages hold
+and cannot be replayed. No API bearer value or digest, or signed download URL, is stored.
+
+An independent watchdog observes the **original execution job's** actual native
+completion. Only successful execution, complete captured evidence and verified
+native upload contents permit immediate Root destruction. Failure, cancellation
+or expiry stops the owned VM, withdraws its access, and retains its private data
+for four hours measured from that native completion. Jobs cannot waive or extend
+custody; any separate operator retention decision is bounded by 24 hours.
+Known stopped custody retains the full storage reservation. Unknown cleanup or
+unavailable original process proof quarantines it and does not release running
+capacity.
+
+The watchdog visits bounded fair pages and retires bindings only after checking
+the original sealed configuration and closed Root ledger. It uses the producer's
+fixed bindings directory; an empty alternative directory is not supervision.
+After an operating cell's actual custody expires, normal finalization preserves
+Root-verified diagnostic-only evidence before removing its owned resources and
+releasing its reservation. That receipt grants neither business-quality PASS nor
+permission to shorten retention.
+Completed owned image-delete tasks must actually leave the native operations
+map before Root records a new project-delete intent. Foreign tasks, failed tasks
+and bounded-wait expiry hold cleanup; unknown writes are never retried.
+The original process owner drains after abort, cancellation, expiry or capture
+failure without requesting live READY again. Actual exit proof still requires
+the same child to finish; an uncertain stop remains held. Quiet-observation
+budgets include native reads and final snapshots before any new delete intent.
+
+A distinct authenticated observer job reads the original final state without a
+new lease or VM effects. Ordinary final quality requires an EdDSA receipt for the
+actual closed cleanup, original execution job and exact uploaded artifact. The
+public client verifies the independently installed public pin; the Source
+consumer must independently verify its own trusted pin and provider artifact.
+
+An ordinary run can still transfer its already sealed, independently validated
+diagnostics when finalization reports a safety-maintenance hold. The exact
+original-owner failure-retention safeguard remains required, and unknown native
+writes stay unknown without retries. This transfer does not grant final quality
+or release capacity. Changed runtime trust, a corrupt archive or a partial
+protocol stream must continue to deny delivery.
+
+The three closed operating selectors exercise workload failure, broker
+cancellation and client-heartbeat loss with the Root supervisor alive. Root must
+observe the owned VM running with the exact UUID, image and devices before
+writing its readiness acknowledgement. Expiry reports the actual earlier
+Root authorization or lease cutoff; it does not manufacture elapsed time. These
+expected negative cases publish operating metadata rather than business quality
+PASS. Their reviewed limits are a 900-second lease and 600-second engine budget;
+ordinary profile budgets remain unchanged. They are admitted only for the
+reviewed first Main transition, not on every subsequent Main push.
+
+Interrupted finalization after a verified project deletion rechecks that the
+original project is still absent and verifies the exact original child-deletion
+receipts before bypassing unavailable project-scoped inventories. A recreated
+project or missing or unknown child receipt holds cleanup; no DELETE is retried.
+The remaining global resource and namespace checks still precede ledger closure.
+
+Operating EE graph **cache children** may be pruned once after proven stopped
+custody, original process/cgroup drain, and preserved raw diagnostics. The original
+graph directory inode and all runroot, output, context, descriptors, captured
+streams, evidence spools, VM disks, project and copied image remain. This is not
+`engine-release`, full cleanup, a reduced reservation, or a retry of an unknown
+operation.
+
+Owned tree deletion retains every entry's original path, inode, mount and
+deadline checks. It persists each emptied child directory before removing its
+name, then persists the root before reporting completion; interrupted or failed
+batches remain unknown under the original durable intent. Filesystem checks
+cache only the process-local native function symbol, never descriptor results
+or observations. The existing cleanup deadline is unchanged.
+
+Root-only capacity policy binds separate owned ext4 project-quota proofs for the
+32-GiB dir pool and 17-GiB engine filesystem. Admission keeps a one-GiB pool
+reserve and checks eight GiB of cold-engine headroom plus a 512-MiB **preadmission**
+floor. The existing whole-filesystem hard cap does not guarantee that free floor
+against subsequent workload writes. Retained reservations count in full until
+cleanup; native physical use is counted once, without treating project logical
+usage as physical credit. Unknown volumes, ownership, writers or accounting
+remain holds. These inputs and native behavior must be qualified before enabling
+the runtime.
+
+The watchdog and mail sender use separate bounded locks. Failed-cell retention
+can generate a truthful local notification; this is distinct from a failed
+cleanup alarm. Local delivery requires actual mailbox confirmation and never
+implies personal acknowledgement. A busy or unavailable supervisor generates a
+hold without bypassing its lock, inventing process exit, or granting cleanup.
 
 ### Private runtime engine image preparation
 

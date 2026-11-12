@@ -1,3 +1,6 @@
-{{ {'schema': 1, 'config_path': github_runner_runtime_v2_configuration_path,
-    'config_sha256': github_runner_runtime_v2_configuration_sha256}
+{{ ({'schema': 2, 'bootstrap_path': github_runner_runtime_v2_configuration_path,
+     'bootstrap_sha256': github_runner_runtime_v2_configuration_sha256}
+    if github_runner_runtime_v2_bootstrap else
+    {'schema': 1, 'config_path': github_runner_runtime_v2_configuration_path,
+     'config_sha256': github_runner_runtime_v2_configuration_sha256})
     | to_json(sort_keys=true, separators=[',', ':'], allow_nan=false) -}}
