@@ -196,6 +196,438 @@ releases:
       - openssh-finalization.yml
       - podman-authoritative-dns-startup.yml
     release_date: '2026-10-21'
+  1.18.0:
+    changes:
+      bugfixes:
+        - Keep local-mail initialization check mode read-only without asserting unrendered
+          Postfix transport settings or creating an ownership receipt.
+        - Refuse managed AIDE policy changes in Level 2-only runs before mutation
+          and align the scheduler wrapper with the pinned native Level 1 initialization
+          and scheduling tags.
+        - Refuse whitespace, shell metacharacters and relative components in vendor
+          audit execution paths before Git or archive transport activity.
+        - Use Git's own read-only configuration parser, reject redirected Git metadata
+          and run admission probes with a fresh environment so legacy filter syntax
+          or inherited Git settings cannot bypass validation.
+        - Validate complete checkout and Git metadata before root Git probes, disable
+          executable Git features and reject conflicting effective auditor bindings.
+        - cis_ubuntu24 - align the immutable CIS 1.0.0 audit producer with remediation
+          role 1.8.0 so SSH and other audit checks use the supported variable contract
+          without template repairs or suppressed controls.
+        - cis_ubuntu24 - align the immutable remediation dependency with the standard
+          EE's Ubuntu24-CIS 1.8.0 while retaining the independent CIS v1.0.0 audit
+          and explicit exception guards.
+        - cis_ubuntu24 - bind managed AIDE initialization to the admitted age decision
+          so a later threshold crossing cannot authorize an unapproved database replacement.
+        - cis_ubuntu24 - compare offline archive contents with the admitted checkout
+          and prevent subsequent vendor extraction.
+        - cis_ubuntu24 - compare offline audit files with authenticated pinned Git
+          objects independently of index flags.
+        - cis_ubuntu24 - document the required AppArmor audit post-check in a subsequent
+          play after vendor end-host.
+        - cis_ubuntu24 - keep generated audit variables in protected storage outside
+          the source checkout.
+        - cis_ubuntu24 - quote both offline audit helper paths so collection installation
+          paths containing spaces cannot select another controller script.
+        - cis_ubuntu24 - reject non-Boolean effective values for wrapper-consumed
+          native switches before mutation, and retain the native section 3 and 6 scope
+          for corresponding wrapper helpers.
+        - cis_ubuntu24 - reject vendor overrides that redirect archive execution,
+          content mode or generated variables.
+        - cis_ubuntu24 - reject writable, executable or foreign AIDE databases before
+          accepting an existing baseline.
+        - cis_ubuntu24 - require an actual Boolean false for the native AppArmor rewrite
+          control when preserving approved attachments, so truthy strings cannot change
+          profiles before the postcheck.
+        - cis_ubuntu24 - require guarded rebaseline admission when clearing an already
+          managed AIDE exclusion policy.
+        - cis_ubuntu24 - require native AIDE section/control admission and Boolean
+          recreation inputs, and reject container overrides that skip initialization.
+        - cis_ubuntu24 - retain admitted AIDE presence and age decisions across native
+          register writes, reject conflicting caller bindings and recheck baseline
+          state before and after native remediation.
+        - cis_ubuntu24 - scope admitted transport parameters to one vendor invocation
+          so later plays retain their own inputs.
+        - cis_ubuntu24 - verify fixed auditor bytes through a bounded descriptor on
+          a protected controller path before vendor copying.
+        - cis_ubuntu24 independently pins canonical Goss 0.4.8 and architecture checksums,
+          verifies controller-acquired or offline bytes, and uses the vendor copy
+          interface without requiring target Internet access.
+        - github_runner - Accept one Root-qualified replacement Main run after the
+          recorded original client precheck failure, preserving attempt-one identities
+          and original failure evidence, and reject unknown, reused or partially consumed
+          invocations. Optional continuation controls bind the exact replacement run
+          and controller until the operator completes the pilot and removes that temporary
+          fence.
+        - github_runner - Bind deny-first host-fence maintenance to the sealed dynamic
+          bootstrap before the first native job, without creating a static registry
+          or weakening runtime grant ownership.
+        - github_runner - Check inactive systemd service templates through a concrete
+          read-only instance, retaining exact template-fragment, inactive-state, and
+          no-drop-in requirements for every instance.
+        - github_runner - Finalize retained operating cells from verified diagnostics
+          without business-quality acceptance, retire closed bindings through bounded
+          fair supervision, and reject mismatched watchdog directories.
+        - github_runner - Isolate interrupted mail replacements and archive confirmed
+          events durably without replay, so historical delivery records cannot exhaust
+          pending notification capacity; keep mail fixtures private.
+        - github_runner - Keep live READY separate from original-owner abort drainage
+          and enforce the original quiet-observation deadline across native reads
+          before authorizing another cleanup intent.
+        - github_runner - Keep physical test destruction pending until Root verifies
+          the original native job, captured evidence, provider upload contents and
+          owned cleanup; retain failed cells with revoked access for the configured
+          custody period.
+        - github_runner - Persist owned cleanup once per emptied directory and reuse
+          the native filesystem-stat symbol while preserving every actual descriptor,
+          mount, identity and deadline check.
+        - github_runner - Prepare repeatable authenticated Main-job intake, closed
+          operating drills, independent custody watchdog and verified local-root mail
+          through the disabled runtime-v2 installation path.
+        - github_runner - Preserve validated ordinary diagnostic delivery across typed
+          finalization holds while retaining the exact original owner and denying
+          trust, archive and partial-stream failures.
+        - github_runner - Resume interrupted finalization after verified parent deletion
+          using fresh parent absence and exact verified child receipts, preserving
+          recreated-resource and unknown-effect holds.
+        - github_runner - Traverse Root-owned search-only socket directories using
+          Linux O_PATH handles in both public Incus clients, preserving directory
+          ownership, mode and symlink checks without adding directory-read permission.
+        - github_runner - Wait for completed owned image-delete tasks to disappear
+          before recording project deletion, preserving unknown-effect holds and strict
+          proof-based cleanup fixtures.
+        - github_runner - accept an explicitly owner-approved open-ended maintenance
+          window for physical handoff, keeping bounded windows and independent job
+          expiry and retention limits unchanged.
+        - github_runner - accept the official runner archive's root directory marker
+          without recreating the private staging directory; reject non-directory root
+          entries before extraction.
+        - github_runner - add a fixed fourth-history continuation that preserves all
+          original failed native runs and authenticated no-work evidence without renewing
+          authority.
+        - github_runner - admit the publisher's bounded one-or-two-cell registry during
+          installation while preserving the shared-runner serial lease barrier between
+          Heavy and Application Acceptance selectors.
+        - github_runner - allow an explicitly Root-sealed initial transition floor
+          while reducing the configured maximum to the actual signed authorization
+          remainder and retaining the existing authorization and unwind reserves before
+          admitting a lease.
+        - github_runner - allow offline generic syntax checks of physical host preparation
+          while rejecting execution without an explicit target before host reads or
+          package effects.
+        - github_runner - charge slow native qualification and durable-intent writes
+          against the allocation window and recheck immediately before the local Incus
+          create request, preventing late VM creation after admission expiry.
+        - github_runner - download the pinned physical runner payload directly on
+          the target over verified HTTPS instead of relaying the large archive through
+          the operator connection.
+        - github_runner - explicitly disable disposable VM autostart and require native
+          readback of the value so a host restart cannot silently resume a worker.
+        - github_runner - expose a closed initial-auth-idle-v1 local client capability
+          check so physical callers reject incompatible installations before requesting
+          admission.
+        - github_runner - optionally restore only the exact installed Ubuntu package
+          Podman AppArmor conffile when a missing attachment flag blocks library loading;
+          reject unknown policy bytes.
+        - github_runner - populate each fresh private engine store with the pinned
+          image before publishing the runtime context, using Podman 4.9-compatible
+          options.
+        - github_runner - preserve all three failed native deliveries in the fixed
+          continuation contract without resetting history or relaxing admission.
+        - github_runner - preserve standard-library HTTP response EOF semantics without
+          reusing a closed socket, while rejecting truncated bodies and retaining
+          acquisition limits.
+        - github_runner - render runtime anchors with the publisher's exact compact
+          canonical JSON bytes so an existing legitimate published generation passes
+          installation readback without anchor replacement or authorization changes.
+        - github_runner - require the stopped legacy runner unit to be disabled before
+          issuing an expected-ID registration handoff target.
+        - github_runner - retain both proved failed Main histories in a closed Root-sealed
+          continuation while binding all pilot cells to the exact genuine successor
+          run.
+        - github_runner - retain bounded private runtime failure stages and allowlisted
+          reason codes without logging credentials or changing admission behavior.
+        - github_runner - retain fixed acquisition failure diagnostics before sanitizing
+          public errors, without inspecting exception text, partial bodies or credentials.
+        - github_runner - serialize Root provisioning and stopped handoff calls before
+          native effects and reject unsafe existing lock inodes without repair.
+        - github_runner - validate canonical paths without repeated path parsing,
+          reuse only the same collection's fresh verified host-file evidence while
+          rechecking process namespaces, and reject native proofs that expire during
+          worker reacquisition.
+        - github_runner - validate closed process-root inventories with a fresh anchored
+          metadata scan, retain only the managed Node process's exact non-executable
+          kernel io_uring backing, and separate the initial authentication idle wait
+          from bounded frame reads.
+        - host_firewall - hash coupled preview command bytes directly before Ansible's
+          native JSON conversion, keeping the approval digest identical to the transaction's
+          canonical policy digest.
+        - host_firewall - preserve actual numeric bridge interface-index operands
+          across device deletion, rejecting symbolic snapshot drift and unsupported
+          forms before mutation even when nft --numeric prints names.
+        - host_firewall - scope recovered coupled rollback bindings to one invocation
+          so subsequent policy inputs and fingerprints remain fresh.
+        - incus - bind maintenance Install and Configure actions to the exact changed
+          members of the pinned package closure, preserving already configured dependencies
+          without reinstalling them; keep full archive validation, final closure verification
+          and once-only unknown-outcome guards.
+        - incus - bound fixed Debconf public-file reads to their authenticated sizes
+          so the qualified Perl binary is not rejected by the smaller general input
+          limit.
+        - incus - keep the offline controller scenario unprivileged and verify the
+          unchanged Root-owned subordinate-ID task separately with real check-mode,
+          ownership, unrelated-entry preservation and idempotence tests in an isolated
+          Root EE.
+        - incus - require schema-2 private staging of all 32 canonical APT cache archives,
+          including separately verified copies of the six direct inputs, so offline
+          installs reach the final archive hook without broadening package or download
+          authority.
+      known_issues:
+        - Actual OIDC permission/token delivery, native physical-runner service integration
+          and complete Heavy/Main acceptance remain open.
+        - Guest prerequisite inspection is not image provenance, registration authorization
+          or operating acceptance; its native collection still requires qualification.
+        - Local alarm mail has no default installation or scheduler and does not constitute
+          personal acknowledgment or capacity release.
+        - Native executor/token transport, actual job assignment, cleanup and complete
+          operating acceptance remain unqualified.
+      minor_changes:
+        - Document Nexus candidates, exact-byte validated Galaxy promotion, transition
+          limitations, and per-Collection cutover evidence.
+        - Persist optional ephemeral VM UUID and operation binding through protected
+          registration and reattest identity on existing installations.
+        - Release preparation and back-sync rely on native central review events instead
+          of dispatching the retired local review workflow.
+        - automatic_updates - add a separate staged Ubuntu APT metadata verification
+          entrypoint with independent target, package-state, source, keyring, freshness
+          and signed decompressed index checks; verification never imports a cache.
+        - automatic_updates - add authenticated archive reception with bounded regular-file
+          staging and independent live-target verification before any cache import
+          or package installation.
+        - automatic_updates - add coupled list/archive cache import with generated-cache
+          invalidation, origin-based freshness, independent interruption recovery
+          and explicit confirmed or rolled-back snapshot pruning.
+        - automatic_updates - add explicit metadata-only import and rollback with
+          package locks, atomic list exchange, retained recovery journal and acquisition-derived
+          freshness; package installation remains separate.
+        - automatic_updates - add schema2 signed-index-bound deb verification without
+          package installation; metadata-only transactions reject payload-bearing
+          bundles until archive-cache handling is qualified.
+        - automatic_updates - add target resolver capture and unprivileged signed
+          APT acquisition using target status, preferences, phased-update identity
+          and APT policy, with authenticated bundle delivery.
+        - cis_ubuntu24 - add an explicit approval-bound AppArmor restoration entrypoint
+          with protected rollback.
+        - cis_ubuntu24 - add opt-in unused filesystem module blocking with live dependency
+          checks, effective non-loading verification and owned-fragment rollback;
+          never unload a module or rebuild boot images automatically.
+        - cis_ubuntu24 - add read-only complete password-aging evidence, including
+          global defaults and password-free hosts.
+        - cis_ubuntu24 - admit audit-only offline transport archives using an independent
+          transport digest and staged root-owned clean checkout at the same pinned
+          commit and origin; retain all existing profile and dependency pins.
+        - cis_ubuntu24 - keep upstream repeated audit extraction root-owned and bind
+          admitted transport variables above vendor variable loading without changing
+          normal Git mode or remediation selection.
+        - cis_ubuntu24 - verify exact accepted package-compatible AppArmor attachments
+          before and after upstream execution without changing kernel policy or reporting
+          exceptions as benchmark passes.
+        - cis_ubuntu24 can prepare inventory-scoped mutable-data AIDE exclusions before
+          initialization, suppress premature package jobs, validate and restore its
+          owned fragment, and require an exact reviewed binding before the upstream
+          role may recreate an existing database.
+        - github_runner - add a Root-only expiry watchdog tick and independently locked
+          durable pending-alarm spool; unknown outcomes reconcile read-only without
+          replay or release, and local spooling never implies external alarm delivery.
+        - github_runner - add a Root-private terminal-job retention gate with four-hour
+          failed-cell retention, exact custodian-approved extensions bounded to 24
+          hours, private-evidence verification and UUID/ticket binding before deletion.
+        - github_runner - add a UUID-bound graceful stop provider and native PID/state
+          quiescence reconciliation; unknown or failed stops never retry, force-stop,
+          delete resources or release global capacity.
+        - github_runner - add a UUID-bound one-shot local Incus start provider with
+          durable dispatch, exact operation completion, deadline checks and read-only
+          recovery after proven completion; unknown starts retain capacity.
+        - github_runner - add a disabled-by-default independent local-mail timer with
+          pinned target preflight, bounded fair dispatch and durable historical confirmation.
+        - github_runner - add a fixed profile/scenario/target locator to the installed
+          RuntimeV2 client without extending its execution authority or success criteria.
+        - github_runner - add a one-shot stopped-UUID removal component gated by trusted
+          retention/evidence authorization and native operation/absence readback;
+          uncertain deletion never replays or releases capacity.
+        - github_runner - add a read-only fresh-guest prerequisite check before protected
+          registration when an explicit native guest UUID is supplied.
+        - github_runner - add a read-only native queued-job admission building block
+          for the external disposable VM controller; allocation and operating acceptance
+          remain separate.
+        - github_runner - add a root-local GET-only Incus inventory adapter with Unix
+          peer and endpoint checks, pinned profile/image readback and narrowed VM
+          observations; native mutation and cleanup remain separate.
+        - github_runner - add a root-local Incus create provider that submits one
+          stopped VM through the durable dispatch fence and reads back the exact native
+          operation without retrying unknown outcomes.
+        - github_runner - add a root-private single-worker fence that retains allocation
+          intents after controller exit and refuses implicit capacity reuse.
+        - github_runner - add an explicit-host physical handoff playbook for an already
+          installed reviewed Root helper, with read-only check mode, native machine/time
+          checks and a bounded external maintenance-window reference.
+        - github_runner - add an explicitly machine-bound physical runtime host preparation
+          playbook using the existing Podman role and an exact package version.
+        - github_runner - add an explicitly opted-in protected installation path with
+          verified current runner archives, dedicated identity, root-owned code and
+          transaction records; existing legacy registrations are rejected before service
+          effects while their preserving migration remains unqualified.
+        - github_runner - add an opt-in library for fixed local Root alarm mail with
+          durable no-replay dispatch and mailbox confirmation.
+        - github_runner - add an unpublished Root-private pending-alarm forwarder
+          with explicit mutual TLS, native source identity, exact Alertmanager API
+          readback and separate ingestion receipts; no notification acceptance, automatic
+          installation, incident resolution or worker-capacity release is implied.
+        - github_runner - add bounded Linux peer and process readers, fixed service-lineage
+          checks, root-selected systemd metadata acquisition and installation-manifest
+          verification as internal components; operating admission remains unqualified.
+        - github_runner - add byte-pinned stock Linux service-script generation for
+          the exact Root-fenced organization registration without replaying configuration,
+          writing files or changing services; the full preserving migration remains
+          unqualified.
+        - github_runner - add explicit offline Root generation acquisition, authenticated
+          Git/archive provenance, collector descriptor translation, static cell sealing
+          and compare-and-swap anchor publication; inactive maintenance exclusion
+          and closed leases are required, with no automatic activation or cleanup.
+        - github_runner - add explicit private-store initialization, durable worker-bound
+          replay and effect records, and identity refresh without extending fixed
+          lease deadlines for the future issuer.
+        - github_runner - add integrated root process acquisition and an internal
+          expected-ID credential replacement component with persistent RSA parameters
+          and unknown-result holds; native migration remains unqualified.
+        - github_runner - add opt-in private rootless Podman service preparation for
+          a fresh stopped protected ephemeral runner, with sealed fixed-endpoint client,
+          disjoint sub-ID ranges and write-ahead refusal of uncertain retries.
+        - github_runner - add schema3 one-shot create-only provider dispatch with
+          durable pre-effect intent and synchronous completion readback; interrupted
+          or unknown effects retain capacity, and older state is never silently migrated.
+        - github_runner - add separately opt-in pinned Root watchdog preparation and
+          systemd timer activation with target/boot identity, private-path and existing
+          asset guards; default runner behavior remains unchanged.
+        - github_runner - add the signature and native assignment verification component
+          for a future scoped Incus issuer; existing role tasks do not enable a service
+          or issue runtime credentials.
+        - github_runner - allow explicit Root reconciliation of a proved rejected
+          authentication response without resetting its original intent or regenerating
+          its key; a proved read-only preparation rejection can continue after fresh
+          preparation, while attempted or unknown replacement outcomes remain held.
+        - github_runner - allow fresh protected entries to request ephemeral registration,
+          verify the persisted lifecycle flag before service publication, and refuse
+          a second start after an ephemeral listener exits.
+        - github_runner - bind prepared Validation Main cells to the independently
+          verified native run before lease preparation and recheck that binding for
+          execution and cleanup.
+        - github_runner - complete an unpublished registered handoff only after verifying
+          its entire retained staging tree against the pinned package; publish the
+          new service stopped and disabled without registering again.
+        - github_runner - connect the Root-only stopped expected-ID handoff to fresh
+          protected installation while retaining uncertain journals and disabling
+          the new service.
+        - github_runner - derive stopped create-only allocation inputs from the durable
+          worker intent and bind the first observed native VM UUID without releasing
+          capacity or adopting replacement instances.
+        - github_runner - expose separate Root-only read-only inspection and stopped
+          handoff stdin actions with closed inputs and no job hooks or token-bearing
+          arguments.
+        - github_runner - join stopped ephemeral registration to the Root controller
+          lease fence with one-shot dispatch and guest/GitHub readback.
+        - github_runner - prepare a fresh dedicated physical account, private pinned
+          payload and enforcing profile without registration or service effects; verify
+          exact receipt-backed reentry and reject unbound state.
+        - github_runner - prepare only the machine-bound private physical handoff
+          library from exact packaged helper bytes, with closed Root receipt/inventory
+          verification and no registration or service action.
+        - github_runner - prepare the physical runtime from the exact Validation Main
+          Nexus-readback artifact, with separate source, caller and controller identities
+          and matching profile selectors.
+        - github_runner - seal the authenticated Source commit, tree and complete
+          Git blob inventory alongside the candidate so the runtime can verify exact
+          archived Source without manufacturing Git checkout metadata.
+        - github_runner - support the stock legacy registration flow through discovered
+          TaskAgent resource routes, binding replacement to the existing pool and
+          runner ID, projecting only pinned DTO members and retaining the V2 flow
+          and one-effect journal.
+        - github_runner - verify exact completed stopped handoffs on repeated calls
+          without another credential or service mutation; retain uncertain or changed
+          state for reconciliation.
+        - github_runner - verify the exact Root-bound Validation Main release-App
+          dispatch independently of legacy human Main pushes while retaining native
+          job and physical runner assignment.
+        - host_firewall - add read-only rootful container namespace and bidirectional
+          veth discovery for bridge ingress guard planning, with identity-race rejection
+          and no raw application environment inspection.
+        - host_firewall - couple an explicitly managed bridge guard with the inet
+          candidate, canonical readback, metadata and rollback while preserving the
+          default single-table representation.
+        - incus - add an explicitly invoked runtime_packages entry for one byte-bound
+          Incus and container-engine package transaction, with fresh full-plan validation,
+          a fixed final archive hook, retained uncertain intents, and invocation-private
+          fixed-profile Ubuntu Debconf compatibility; normal role behavior remains
+          unchanged.
+        - incus_instance - add opt-in stopped create-only allocation with native absence
+          checks and config included in the initial allocation request; refuse existing
+          resources without adoption or automatic allocation retry.
+        - local_mail - add a disabled-by-default Ubuntu 24 Postfix candidate for local
+          system mailbox delivery without network listeners or outbound SMTP/LMTP
+          transports, guarded initialization and configuration ownership.
+      security_fixes:
+        - Reject alternate unit fragments and unapproved full-name, hierarchical,
+          type-wide and runtime systemd overrides before installing the ephemeral-worker
+          watchdog or local alarm sender. Verify effective fragments and drop-ins
+          after reload and before activation.
+    fragments:
+      - 399-cis-audit-producer-alignment.yml
+      - 399-cis-auditor-runtime.yml
+      - aide-admitted-age-decision.yml
+      - apparmor-native-control-boolean.yml
+      - automatic-updates-staged-verification.yml
+      - central-collection-review-policy.yml
+      - central-release-review.yml
+      - cis-aide-guarded-exclusions.yml
+      - cis-apparmor-preserved-profiles.yml
+      - cis-apparmor-restoration.yml
+      - cis-audit-aide-review-fixes.yml
+      - cis-audit-immutable-admission.yml
+      - cis-audit-offline-archive.yml
+      - cis-native-input-and-state-boundaries.yml
+      - cis-password-aging-evidence.yml
+      - cis-unused-filesystems.yml
+      - cis18-runtime-contract.yml
+      - container-ssh-ingress-discovery.yml
+      - ephemeral-worker-bootstrap-readiness.yml
+      - ephemeral-worker-local-mail.yml
+      - ephemeral-worker-registration.yml
+      - g06-http-eof-four-history.yml
+      - g06-supervisor-overrides-and-mail-check.yml
+      - github-runner-alarm-ingestion.yml
+      - github-runner-client-search-only-parents.yml
+      - github-runner-ephemeral-worker-admission.yml
+      - github-runner-incus-identity.yml
+      - github-runner-main-artifact-intake.yml
+      - github-runner-native-custody.yml
+      - github-runner-private-engine-image.yml
+      - github-runner-private-runtime-diagnostics.yml
+      - github-runner-protected-ephemeral.yml
+      - github-runner-rootless-podman-client.yml
+      - github-runner-runtime-anchor-canonical.yml
+      - github-runner-runtime-profile-client.yml
+      - github-runner-runtime-v2-template-observation.yml
+      - github-runner-three-history-continuation.yml
+      - github-runner-validation-main-identity.yml
+      - github_runner-runtime-initial-auth-collector.yml
+      - incus-basic-root-idmap-fixture.yml
+      - incus-instance-create-only.yml
+      - incus-reviewed-partial-package-plan.yml
+      - incus-runtime-packages.yml
+      - local-mail-only.yml
+      - nexus-candidate-guidance.yml
+      - wunderbox-native-admission-and-rollback-scope.yml
+    release_date: '2026-11-13'
   1.2.0:
     changes:
       bugfixes:

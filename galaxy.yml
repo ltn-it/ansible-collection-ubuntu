@@ -1,7 +1,7 @@
 ---
 namespace: lit
 name: ubuntu
-version: 1.17.0
+version: 1.18.0
 readme: README.md
 description: Ubuntu-focused collection for OS baseline, hardening, user/package management,
   and day-2 operational tasks.

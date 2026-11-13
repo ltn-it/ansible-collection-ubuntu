@@ -1,6 +1,0 @@
----
-minor_changes:
-  - >-
-    local_mail - add a disabled-by-default Ubuntu 24 Postfix candidate for local
-    system mailbox delivery without network listeners or outbound SMTP/LMTP
-    transports, guarded initialization and configuration ownership.
