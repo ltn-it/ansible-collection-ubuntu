@@ -554,6 +554,42 @@ SHA256. This does not create a job, lease, credential or VM. Runtime intake stil
 requires actual job authentication and a second fresh native authorization before
 lease creation; installation cannot manufacture those proofs.
 
+The installer normally requires every runtime instance to be inactive/dead.
+`github_runner_runtime_v2_terminal_history` optionally supplies an explicit,
+nonsecret Root-observed snapshot of preserved terminal failures during cold
+maintenance. It defaults to `{}` and never discovers, adopts or resets failures.
+The closed schema is `schema: 1`, `source_machine_id`, `source_boot_id`, and
+`units`, keyed by exact numeric socket-instance unit names. Each unit row
+contains the string-valued systemd properties `Id`, `LoadState`, `ActiveState`,
+`SubState`, `UnitFileState`, `FragmentPath`, `DropInPaths`, `InvocationID`, `Result`,
+`ExecMainCode`, `ExecMainStatus`, `MainPID`, `ControlPID`, `ControlGroup`, `Slice`,
+`Job`, plus `cgroup_state` (`absent` or `empty`). The supplying maintenance owner
+must authenticate the snapshot against the actual machine, boot and original
+failed invocation records; an automatically collected current failure is not
+historical authorization.
+
+Both before-copy and after-copy probes compare the same expected snapshot with
+fresh machine/boot, complete instance enumeration and exact live unit metadata.
+Only loaded failed/failed instances with no process, control process, pending job
+or drop-in, the fixed template fragment, an unchanged nonzero invocation and
+original nonzero exit-code result qualify. The exact template cgroup must remain
+absent or empty as specified; an empty cgroup requires both no direct PIDs and a
+kernel `populated=0` descendant observation. Missing, extra, reset, re-created,
+changed or active units, nonempty descendants, unknown metadata or a different
+boot deny. Socket, template, watchdog and mail service/timer guards remain
+strictly inactive/dead. No reset-failed, stop, deletion, activation or additional
+private ledger read is performed by this history check. Existing configuration
+and store-integrity verification remains mandatory and unchanged.
+
+The optional history is the final probe argument, after the existing operating
+configuration. Existing legacy probe argument forms remain strict; the role
+always passes its explicit history mapping to both phases. Consumers that render
+or bind the entire probe command must bind this additional argument, the actual
+changed probe-template digest and final role source bytes. The runtime modules,
+public clients, six mail helpers and fourteen installed asset templates do not
+change merely because this installer check changes. A local modeled systemd test
+or successful package render is not native cold-installation acceptance.
+
 Before the private endpoint listens, the separate Root maintenance producer may
 call `host_api_fence.install_bootstrap_baseline(bootstrap_path, expected_sha256)`.
 It derives the host policy from that same sealed bootstrap without constructing
