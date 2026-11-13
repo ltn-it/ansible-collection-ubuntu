@@ -189,9 +189,18 @@ class _HTTP:
         self.deadline = deadline
 
     def read(self, count):
-        self.socket.settimeout(min(10, _remaining(self.deadline)))
-        raw = self.response.read(count)
+        remaining = _remaining(self.deadline)
+        # HTTPResponse closes its file (and the cached socket descriptor) once
+        # the framed body completes. EOF still has both deadline checks, but
+        # must not configure a descriptor that the response already released.
+        if self.response.isclosed():
+            raw = b""
+        else:
+            self.socket.settimeout(min(10, remaining))
+            raw = self.response.read(count)
         _remaining(self.deadline)
+        if self.response.isclosed() and self.response.length not in (None, 0):
+            raise http.client.IncompleteRead(raw, self.response.length)
         return raw
 
     def close(self):

@@ -120,6 +120,25 @@ class RootMemoryTests(unittest.TestCase):
         self.assertEqual(len([p for h, _, p, _ in self.fx.calls
                               if h == "productionresultssa1.blob.core.windows.net"]), 1)
 
+    def test_real_download_digest_failure_keeps_fixed_diagnostic_and_public_denial(self):
+        import test_github_runner_incus_runtime_diagnostics as diagnostics
+        diag = diagnostics.DiagnosticsTests(methodName="runTest")
+        diag.setUp(); self.addCleanup(diag.doCleanups)
+        request = replace(self.request, artifact=replace(self.request.artifact, digest_sha256="0" * 64))
+        self.fx.artifact_metadata["digest"] = "sha256:" + "0" * 64
+        self.fx.json(self.fx.artifact_path, self.fx.artifact_metadata)
+        with self.assertRaisesRegex(Denied, "^intake-acquisition-held$"):
+            with identity._diagnostic_request():
+                self.acquire(request)
+        diag.log.assert_called_once()
+        record = diag.record()
+        self.assertEqual((record["stage"], record["reason"]),
+                         ("snapshot-acquisition", "acquisition-download-digest"))
+        self.assertNotIn(self.token.encode(), diag.log.call_args.args[0])
+        self.assertGreater(os.fstat(self.fx.fds[0]).st_size, 0)
+        self.assertEqual(len([path for host, _, path, _ in self.fx.calls
+                             if host == "productionresultssa1.blob.core.windows.net"]), 1)
+
     def test_native_drift_after_download_denies_and_redacts_transport_error(self):
         count = 0
         def drift(host, method, path):

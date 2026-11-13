@@ -293,6 +293,26 @@ def _continuation_third_native(get):
     commit = get("/git/commits/" + origin["source_sha"])
     return operating_cells.third_native_projection(run, {"total_count": total, "jobs": rows}, checks, commit)
 
+@identity._diagnostic_step("native-histories")
+def _continuation_fourth_native(get):
+    origin = operating_cells.continuation_fourth_origin()
+    prefix = "/actions/runs/" + str(origin["run_id"])
+    run = get(prefix)
+    rows, total = [], None
+    for page in range(1, 5):
+        data = get(prefix + "/attempts/1/jobs?per_page=100&page=" + str(page))
+        count, batch = data.get("total_count"), data.get("jobs")
+        require(type(count) is int and count == 24 and type(batch) is list and len(batch) <= 100
+                and (total is None or count == total), "continuation-original-pagination")
+        total = count; rows.extend(batch)
+        if len(rows) >= count:
+            break
+    require(len(rows) == total, "continuation-original-pagination")
+    checks = [get("/check-runs/" + str(row["check_run_id"]))
+              for row in origin["jobs"]]
+    commit = get("/git/commits/" + origin["source_sha"])
+    return operating_cells.fourth_native_projection(run, {"total_count": total, "jobs": rows}, checks, commit)
+
 
 def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, templates, *, intake):
     """Only exact successor metadata can follow the original empty catalogue."""
@@ -408,16 +428,19 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
         # opaque native proof. Current authorization and original absence are
         # still freshly checked on every revalidation; no shared cache exists.
         if check_origin:
-            previous = receipt["previous_qualification"] if descriptor["schema"] == 3 else receipt
-            legacy = previous["legacy_qualification"] if descriptor["schema"] in {2, 3} else previous
+            three = receipt["previous_qualification"] if descriptor["schema"] == 4 else receipt
+            previous = three["previous_qualification"] if descriptor["schema"] in {3, 4} else three
+            legacy = previous["legacy_qualification"] if descriptor["schema"] in {2, 3, 4} else previous
             require(_continuation_original_native(get) == legacy["native_origin"], "continuation-original-native-drift")
-            if descriptor["schema"] in {2, 3}:
+            if descriptor["schema"] in {2, 3, 4}:
                 require(_continuation_original_native(get, prior=True) == previous["native_prior"],
                         "continuation-prior-native-drift")
-            if descriptor["schema"] == 3:
-                require(_continuation_third_native(get) == receipt["native_third"], "continuation-third-native-drift")
+            if descriptor["schema"] in {3, 4}:
+                require(_continuation_third_native(get) == three["native_third"], "continuation-third-native-drift")
+            if descriptor["schema"] == 4:
+                require(_continuation_fourth_native(get) == receipt["native_fourth"], "continuation-fourth-native-drift")
         _continuation_origin_absent(selected.bootstrap, qualified)
-        if descriptor["schema"] == 3 or identity.decode_json(selected.template_bytes)["kind"] == "operating":
+        if descriptor["schema"] in {3, 4} or identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
                                                          who.caller_sha, who.run_id, who.reusable_sha)
     elif identity.decode_json(selected.template_bytes)["kind"] == "operating":
