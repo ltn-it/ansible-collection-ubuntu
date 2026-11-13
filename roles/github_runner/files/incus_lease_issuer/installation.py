@@ -8,12 +8,14 @@ configuration or startup environment, and grants no lease/TLS/engine authority.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 import hashlib
 import os
 from pathlib import PurePosixPath
 import re
 import stat
+import threading
 from types import MappingProxyType
 from typing import Mapping
 
@@ -25,8 +27,11 @@ MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ENTRIES = 20000
 MAX_DEPTH = 32
+HASH_WORKERS = 4
+HASH_PARALLEL_MIN_BYTES = 1024 * 1024
 MAX_LINK_TARGET_BYTES = 1024
 HEX = re.compile(r"[0-9a-f]{64}\Z")
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 BASH = "/usr/bin/bash"
 SUPPORTED_VERSION = "2.338.2"
 REQUIRED_FILES = frozenset({
@@ -72,6 +77,10 @@ class InstallationProof:
     manifest_sha256: str
     package_sha256: str
     runner_version: str
+    trusted_files: Mapping[str, TrustedFile] = field(default_factory=lambda: MappingProxyType({}))
+    file_stamps: Mapping[str, tuple] = field(default_factory=lambda: MappingProxyType({}))
+    tree_stamps: Mapping[str, tuple] = field(default_factory=lambda: MappingProxyType({}))
+    runtime_stamps: Mapping[str, tuple] = field(default_factory=lambda: MappingProxyType({}))
 
 
 def _root():
@@ -80,22 +89,22 @@ def _root():
 
 def _absolute(path):
     require(type(path) is str and 0 < len(path) <= 4096 and path.startswith("/")
-            and not path.startswith("//") and not any(ord(c) < 32 or ord(c) == 127 for c in path)
-            and ".." not in PurePosixPath(path).parts and str(PurePosixPath(path)) == path,
-            "installation-path")
+            and not CONTROL.search(path), "installation-path")
+    parts = () if path == "/" else tuple(path[1:].split("/"))
+    require(all(part not in {"", ".", ".."} for part in parts), "installation-path")
     try:
         path.encode("utf-8")
     except UnicodeError:
         raise Denied("installation-path") from None
-    return PurePosixPath(path).parts[1:]
+    return parts
 
 
 def _relative(path):
     require(type(path) is str and 0 < len(path) <= 1024 and not path.startswith("/")
-            and not any(ord(c) < 32 or ord(c) == 127 for c in path), "installation-relative-path")
-    parts = PurePosixPath(path).parts
-    require(parts and len(parts) <= MAX_DEPTH and path != "." and ".." not in parts
-            and str(PurePosixPath(path)) == path, "installation-relative-path")
+            and not CONTROL.search(path), "installation-relative-path")
+    parts = path.split("/")
+    require(len(parts) <= MAX_DEPTH and all(part not in {"", ".", ".."} for part in parts),
+            "installation-relative-path")
     try:
         path.encode("utf-8")
     except UnicodeError:
@@ -289,8 +298,52 @@ def _manifest(raw, policy):
     return value
 
 
+def _start_hash_workers(pool):
+    """Establish the entire fixed pool before transferring any file FD."""
+    gate = threading.Barrier(HASH_WORKERS + 1)
+    def ready():
+        gate.wait(5)
+        return threading.current_thread()
+    try:
+        started = [pool.submit(ready) for _ in range(HASH_WORKERS)]
+        gate.wait(5)
+        threads = tuple(future.result() for future in started)
+        require(len(set(threads)) == HASH_WORKERS, "installation-hash-worker-count")
+        return threads
+    except BaseException:
+        # A lazy executor start can fail after enqueue. Here that queue contains
+        # only barrier tasks, never a file descriptor with ambiguous ownership.
+        gate.abort()
+        raise
+
 def _inventory(root_fd, root, *, hash_files, service_uid):
     files, directories, links, stamps, startup, runtime, size = {}, set(), {}, {}, {}, {}, 0
+
+    pending, owned = [], []
+
+    def hash_owned(work):
+        child, relative, expected = work["fd"], work["relative"], work["stamp"]
+        # Ownership of this bounded FD transfers to one worker, including on error.
+        try:
+            require(_stamp(os.fstat(child)) == expected, "installation-entry-changed")
+            result = _hash_file(child, root + "/" + relative,
+                1024 * 1024 if relative == ".runner" else MAX_FILE_BYTES, keep=relative == ".runner")
+            require(result[2] == expected, "installation-entry-changed")
+            return result
+        finally:
+            try:
+                os.close(child)
+            finally:
+                work["closed"] = True
+
+    def complete_one():
+        relative, future, work = pending.pop(0)
+        result, content, stamp = future.result()
+        require(work["closed"], "installation-hash-file-ownership")
+        files[relative], stamps[relative] = result, stamp
+        if content is not None:
+            startup[relative] = content
+        owned.remove(work)
 
     def walk(fd, prefix, depth):
         nonlocal size
@@ -328,34 +381,68 @@ def _inventory(root_fd, root, *, hash_files, service_uid):
                 else:
                     _regular(info)
                     child = os.open(name, FILE_FLAGS, dir_fd=fd)
+                    work = None
                     try:
-                        require(_stamp(info) == _stamp(os.fstat(child)), "installation-entry-changed")
-                        if hash_files:
-                            limit = 1024 * 1024 if relative == ".runner" else MAX_FILE_BYTES
-                            result, content, stamp = _hash_file(child, root + "/" + relative, limit,
-                                                                keep=relative == ".runner")
-                            files[relative] = result
+                        last = os.fstat(child)
+                        _regular(last)
+                        require(_stamp(info) == _stamp(last), "installation-entry-changed")
+                        require(0 <= last.st_size <= MAX_FILE_BYTES, "installation-file-limit")
+                        stamp = _stamp(last)
+                        files[relative] = None
+                        size += stamp[6]
+                        require(size <= MAX_TOTAL_BYTES, "installation-inventory-limit")
+                        if hash_files and stamp[6] >= HASH_PARALLEL_MIN_BYTES:
+                            require(len(owned) < HASH_WORKERS, "installation-hash-queue-bound")
+                            work = {"fd": child, "relative": relative, "stamp": stamp, "closed": False}
+                            owned.append(work)  # Register ownership BEFORE possibly ambiguous submit.
+                            child = None
+                            future = pool.submit(hash_owned, work)
+                            pending.append((relative, future, work))
+                            if len(pending) >= HASH_WORKERS:
+                                complete_one()
+                        elif hash_files:
+                            result, content, actual_stamp = _hash_file(child, root + "/" + relative,
+                                1024 * 1024 if relative == ".runner" else MAX_FILE_BYTES,
+                                keep=relative == ".runner")
+                            require(actual_stamp == stamp, "installation-entry-changed")
+                            files[relative], stamps[relative] = result, actual_stamp
                             if content is not None:
                                 startup[relative] = content
                         else:
-                            last = os.fstat(child)
-                            _regular(last)
-                            require(0 <= last.st_size <= MAX_FILE_BYTES, "installation-file-limit")
-                            stamp = _stamp(last)
-                            files[relative] = None
-                        stamps[relative] = stamp
-                        size += stamp[6]
-                        require(size <= MAX_TOTAL_BYTES, "installation-inventory-limit")
+                            stamps[relative] = stamp
                     finally:
-                        os.close(child)
+                        if child is not None and not any(item is work for item in owned):
+                            os.close(child)
         after = os.fstat(fd)
         require(_stamp(before) == _stamp(after), "installation-directory-changed")
         stamps[prefix[:-1] if prefix else "."] = _stamp(after)
 
-    walk(root_fd, "", 0)
+    if hash_files:
+        # Only >=1MiB independent files use futures; small files stay synchronous.
+        # At most four retained large-file tasks; no unbounded work queue.
+        # Context shutdown joins every worker even when walking/hash validation fails.
+        threads = ()
+        try:
+            with ThreadPoolExecutor(max_workers=HASH_WORKERS, thread_name_prefix="lit-stock-hash") as pool:
+                threads = _start_hash_workers(pool)
+                walk(root_fd, "", 0)
+                while pending:
+                    complete_one()
+        finally:
+            # Never close an uncertain submitted FD while any worker could still
+            # use its number. Unknown shutdown holds the FD until process exit.
+            require(not owned or (threads and all(not thread.is_alive() for thread in threads)),
+                    "installation-hash-workers-not-joined")
+            for work in owned:
+                if not work["closed"]:
+                    try:
+                        os.close(work["fd"])
+                    finally:
+                        work["closed"] = True
+    else:
+        walk(root_fd, "", 0)
     require(set(runtime) == {"_diag"}, "installation-runtime-missing")
     return files, directories, links, stamps, startup, runtime
-
 
 def verify_installation(policy):
     """Acquire current root-owned FS evidence. Never consume caller snapshots."""
@@ -425,6 +512,9 @@ def verify_installation(policy):
             tuple(sorted(policy.root + "/" + name for name in directories)),
             (policy.root + "/_diag",),
             manifest.path, manifest.sha256, value["package_sha256"], value["runner_version"],
+            MappingProxyType({result.path: result for result in files.values()}),
+            MappingProxyType({policy.root + "/" + name: stamps[name] for name in files}),
+            MappingProxyType(dict(stamps)), MappingProxyType(dict(runtime)),
         )
     except OSError:
         raise Denied("installation-filesystem") from None

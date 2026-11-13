@@ -1,0 +1,20 @@
+---
+bugfixes:
+  - >-
+    github_runner - validate closed process-root inventories with a fresh anchored metadata scan,
+    retain only the managed Node process's exact non-executable kernel io_uring backing,
+    and separate the initial authentication idle wait from bounded frame reads.
+  - >-
+    github_runner - expose a closed initial-auth-idle-v1 local client capability check
+    so physical callers reject incompatible installations before requesting admission.
+  - >-
+    github_runner - allow an explicitly Root-sealed initial transition floor while reducing
+    the configured maximum to the actual signed authorization remainder and retaining
+    the existing authorization and unwind reserves before admitting a lease.
+  - >-
+    github_runner - validate canonical paths without repeated path parsing, reuse only
+    the same collection's fresh verified host-file evidence while rechecking process
+    namespaces, and reject native proofs that expire during worker reacquisition.
+  - >-
+    github_runner - retain both proved failed Main histories in a closed Root-sealed
+    continuation while binding all pilot cells to the exact genuine successor run.

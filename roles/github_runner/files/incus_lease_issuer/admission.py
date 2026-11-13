@@ -254,6 +254,8 @@ def _require_native(proof, connected_socket, selected):
     _socket(connected_socket)
     require(_controls(selected)[0] == proof.controls
             and _worker(connected_socket, selected) == proof.worker, "runtime-native-provenance-drift")
+    require(time.monotonic() < proof.until and int(time.time()) < proof.identity.valid_until,
+            "runtime-native-proof-expired")
     return proof.worker, proof.identity
 
 

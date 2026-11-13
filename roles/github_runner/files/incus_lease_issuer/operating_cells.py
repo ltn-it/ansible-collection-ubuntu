@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 2:
+        return _validate_two_history_descriptor(value, workflow_sha256, reusable_sha)
     engine_policy._keys(value, {"schema", "reason", "origin", "qualification", "successor"})
     require(type(value["schema"]) is int and value["schema"] == 1
             and value["reason"] == "original-client-precheck-denied"
@@ -131,7 +133,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
-                    for p in parents) and parents[0]["sha"] == ORIGIN_MAIN
+                    for p in parents) and parents[0]["sha"] == (PRIOR_MAIN if value["schema"] == 2 else ORIGIN_MAIN)
             and len({p["sha"] for p in parents}) == len(parents)
             and caller_sha not in {p["sha"] for p in parents}, "continuation-first-parent")
 
@@ -186,6 +188,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 2:
+        return _validate_two_history_qualification(value)
     engine_policy._keys(value, {"schema", "purpose", "origin", "native_origin", "no_intake_receipt_b64", "old_public_clients"})
     require(type(value["schema"]) is int and value["schema"] == 1
             and value["purpose"] == "g06-original-client-precheck-no-intake"
@@ -240,6 +244,182 @@ def continuation_qualification(run, inventory, checks, commit, no_intake_raw, ol
         "native_origin": origin_native_projection(run, inventory, checks, commit),
         "no_intake_receipt_b64": base64.b64encode(no_intake_raw).decode("ascii"),
         "old_public_clients": old_public_clients}
+    validate_continuation_qualification(value)
+    return value
+
+
+# Closed second-history contract. These identifiers are historical evidence,
+# never permission to replay either failed run or extend a running lease.
+PRIOR_MAIN = "f27c1d4edff75377f285275cec9bfec6bc3081f6"
+PRIOR_RUN = 43317193171
+PRIOR_REUSABLE = "1d88e96e9dd6fb5ccdb052b3e76685e538bf5c66"
+PRIOR_WORKFLOW = "92b6c14a01972f9dcf2cb15b5f9d07ac128803931c960e128e92b16142fbfb49"
+PRIOR_CLIENTS = {
+    "incus_job_client.py": "01d70ce938ede0e6a7f5cbb094650c9d6560b350bab37a4a3e9d261322ccfb9e",
+    "incus_runtime_client.py": "80ecc1883318e488b3f9d919cce70aaa94dad3488333194c64141e7358d2f3d9",
+}
+LEGACY_QUALIFICATION = "3ff4bbd29b74d14a92bb2be7cfd03faa15d688ca9da7ea24a0f52bfc0f8220ea"
+PRIOR_NO_WORK = "a89d08dfa2c9992026750e24998ef4ffdd4eb2794424c797a4ede10b347f56af"
+TWO_HISTORY_REUSABLE = "c6d9445151c2e3e3312949f27eb624964a7b644d"
+TWO_HISTORY_WORKFLOW = "c1f44472b712ad72df4b49c448bf0aba31ecb2234682f394d5f72b6cb7af16fe"
+
+
+def continuation_prior_origin():
+    """Fixed second failed native run, distinct from the immutable first origin."""
+    prefix = "Heavy matrix / central protected validation / "
+    return {"repository": "ltn-it/ansible-collection-supplementary", "repository_id": 1103407173,
+        "workflow_id": 214182490, "workflow_path": ".github/workflows/collection-ci.yml",
+        "source_sha": PRIOR_MAIN, "run_id": PRIOR_RUN, "run_attempt": 1,
+        "first_parent": ORIGIN_MAIN, "source_workflow_sha256": PRIOR_WORKFLOW,
+        "reusable_sha": PRIOR_REUSABLE, "jobs": [
+            {"job_id": 131529364095, "check_run_id": 131529364095,
+             "name": prefix + "heavy / keycloak-heavy / ubuntu-24.04",
+             "started_at": "2026-11-12T22:14:27Z", "completed_at": "2026-11-12T22:14:38Z", "conclusion": "failure"},
+            {"job_id": 131531244775, "check_run_id": 131531244775,
+             "name": prefix + "Final quality / heavy / keycloak-heavy / ubuntu-24.04",
+             "started_at": "2026-11-12T22:14:43Z", "completed_at": "2026-11-12T22:14:53Z", "conclusion": "failure"}]}
+
+
+def _validate_two_history_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "origin", "prior", "qualification", "successor"})
+    require(value["reason"] == "prior-initial-preauth-denied"
+            and ledger.canonical(value["origin"]) == ledger.canonical(continuation_origin())
+            and ledger.canonical(value["prior"]) == ledger.canonical(continuation_prior_origin()),
+            "continuation-two-history-origin")
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"]); engine_policy._hash(ref["sha256"])
+    row = engine_policy._keys(value["successor"], {"source_sha", "run_id", "run_attempt", "first_parent",
+                                                 "source_workflow_sha256", "reusable_sha"})
+    cell_contract._commit(row["source_sha"])
+    engine_policy._integer(row["run_id"], 1, 2**63 - 1)
+    require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN}
+            and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN}
+            and type(row["run_attempt"]) is int and row["run_attempt"] == 1
+            and row["first_parent"] == PRIOR_MAIN, "continuation-two-history-successor")
+    require(row["source_workflow_sha256"] == workflow_sha256 == TWO_HISTORY_WORKFLOW
+            and row["reusable_sha"] == reusable_sha == TWO_HISTORY_REUSABLE,
+            "continuation-two-history-contract")
+    return value
+
+
+def prior_native_projection(run, inventory, checks, commit):
+    """Validate prior terminal provider data, retaining complete native job inventory."""
+    origin = continuation_prior_origin()
+    require(type(run) is dict and all(run.get(k) == v and type(run.get(k)) is type(v) for k, v in {
+        "id": PRIOR_RUN, "run_attempt": 1, "head_sha": PRIOR_MAIN, "event": "push", "head_branch": "main",
+        "workflow_id": 214182490, "status": "completed", "conclusion": "failure"}.items()), "continuation-prior-run")
+    for field in ("repository", "head_repository"):
+        require(type(run.get(field)) is dict and run[field].get("id") == 1103407173, "continuation-prior-repository")
+    actor = {"login": "litroc", "id": 76040632, "type": "User"}
+    require(all(type(run.get(field)) is dict and all(run[field].get(k) == v for k, v in actor.items())
+                for field in ("actor", "triggering_actor")), "continuation-prior-actor")
+    refs = run.get("referenced_workflows")
+    expected_ref = "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + PRIOR_REUSABLE
+    require(type(refs) is list and any(type(item) is dict and item.get("path") == expected_ref
+            and item.get("sha") == PRIOR_REUSABLE for item in refs), "continuation-prior-reusable")
+    require(type(commit) is dict and commit.get("sha") == PRIOR_MAIN, "continuation-prior-commit")
+    parents = commit.get("parents")
+    require(type(parents) is list and 1 <= len(parents) <= 2
+            and all(type(p) is dict and type(p.get("sha")) is str
+                    and re.fullmatch("[0-9a-f]{40}", p["sha"]) for p in parents)
+            and parents[0]["sha"] == ORIGIN_MAIN
+            and len({p["sha"] for p in parents}) == len(parents)
+            and PRIOR_MAIN not in {p["sha"] for p in parents}, "continuation-prior-parent")
+    require(type(inventory) is dict and type(inventory.get("total_count")) is int
+            and inventory["total_count"] == 24 and type(inventory.get("jobs")) is list
+            and len(inventory["jobs"]) == 24, "continuation-prior-complete-inventory")
+    rows, ids = [], set()
+    for job in inventory["jobs"]:
+        require(type(job) is dict and type(job.get("id")) is int and job["id"] > 0 and job["id"] not in ids
+                and job.get("run_id") == PRIOR_RUN and type(job.get("run_attempt")) is int
+                and job["run_attempt"] == 1 and job.get("head_sha") == PRIOR_MAIN
+                and job.get("status") == "completed" and type(job.get("conclusion")) is str
+                and type(job.get("name")) is str, "continuation-prior-job-inventory")
+        ids.add(job["id"])
+        rows.append({k: job[k] for k in ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion")})
+    require(type(checks) is list and len(checks) == 2, "continuation-prior-checks")
+    for expected, check in zip(origin["jobs"], checks):
+        job = next((j for j in inventory["jobs"] if j["id"] == expected["job_id"]), None)
+        require(job is not None and all(job.get(k) == expected[k] for k in ("name", "started_at", "completed_at", "conclusion"))
+                and job.get("runner_id") == 78 and job.get("runner_group_id") == 8
+                and job.get("check_run_url") == "https://api.github.com/repos/" + origin["repository"]
+                    + "/check-runs/" + str(expected["check_run_id"]), "continuation-prior-terminal-job")
+        require(type(check) is dict and check.get("id") == expected["check_run_id"]
+                and check.get("name") == expected["name"] and check.get("head_sha") == PRIOR_MAIN
+                and check.get("status") == "completed" and check.get("conclusion") == "failure"
+                and check.get("started_at") == expected["started_at"] and check.get("completed_at") == expected["completed_at"]
+                and type(check.get("app")) is dict and check["app"].get("id") == 15368
+                and check["app"].get("slug") == "github-actions", "continuation-prior-terminal-check")
+    return {"origin": origin, "actor": actor, "jobs": sorted(rows, key=lambda row: row["id"])}
+
+
+
+def _validate_two_history_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "legacy_qualification", "prior", "native_prior",
+                               "no_work_receipt_b64", "prior_public_clients"})
+    require(value["purpose"] == "g06-two-history-preauth-no-work"
+            and ledger.canonical(value["prior"]) == ledger.canonical(continuation_prior_origin())
+            and value["prior_public_clients"] == PRIOR_CLIENTS, "continuation-two-history-qualification")
+    legacy = value["legacy_qualification"]
+    require(type(legacy) is dict and type(legacy.get("schema")) is int and legacy["schema"] == 1
+            and ledger.digest(legacy) == LEGACY_QUALIFICATION, "continuation-legacy-qualification-seal")
+    counts = validate_continuation_qualification(legacy)
+    encoded = value["no_work_receipt_b64"]
+    require(type(encoded) is str and len(encoded) <= 16384, "continuation-prior-no-work-bound")
+    raw = base64.b64decode(encoded, validate=True)
+    require(hashlib.sha256(raw).hexdigest() == PRIOR_NO_WORK, "continuation-prior-no-work-seal")
+    observed = engine_policy._keys(identity.decode_json(raw), {"rc", "observed", "stderr_bytes"})
+    require(type(observed["rc"]) is int and observed["rc"] == 0
+            and type(observed["stderr_bytes"]) is int and observed["stderr_bytes"] == 0,
+            "continuation-prior-native-no-work")
+    row = engine_policy._keys(observed["observed"], {"schema", "state", "at", "boot_id", "machine_id",
+        "bootstrap_sha256", "current_core_sha256", "counts", "nonce_history_absence_claimed",
+        "operator_raw_ledger_or_signing_key_read_export_or_hash", "prior_attempt", "prior_head",
+        "prior_public_clients", "prior_run", "probe_sent_no_challenge_or_job_request",
+        "product_store_validation_and_lease_ids_only", "test_state_reset_or_cleanup_performed"})
+    require(type(row["schema"]) is int and row["schema"] == 1
+            and row["state"] == "ACTUAL_PRIOR_F27_PRODUCT_STORE_AND_CATALOGUES_EMPTY_NO_LEASE"
+            and type(row["at"]) in (int, float) and 1794524418 <= row["at"] < 2**63
+            and type(row["prior_run"]) is int and row["prior_run"] == PRIOR_RUN
+            and type(row["prior_attempt"]) is int and row["prior_attempt"] == 1
+            and row["prior_head"] == PRIOR_MAIN and row["prior_public_clients"] == PRIOR_CLIENTS
+            and row["nonce_history_absence_claimed"] is False
+            and row["operator_raw_ledger_or_signing_key_read_export_or_hash"] is False
+            and row["probe_sent_no_challenge_or_job_request"] is True
+            and row["product_store_validation_and_lease_ids_only"] is True
+            and row["test_state_reset_or_cleanup_performed"] is False,
+            "continuation-prior-no-work-observation")
+    require(ledger.canonical(row["counts"]) == ledger.canonical(counts), "continuation-same-empty-catalogues")
+    native = engine_policy._keys(value["native_prior"], {"origin", "actor", "jobs"})
+    require(ledger.canonical(native["origin"]) == ledger.canonical(continuation_prior_origin())
+            and native["actor"] == {"login": "litroc", "id": 76040632, "type": "User"}
+            and type(native["jobs"]) is list and len(native["jobs"]) == 24, "continuation-qualified-native-prior")
+    ids = set()
+    expected = {job["job_id"]: job for job in continuation_prior_origin()["jobs"]}
+    for job in native["jobs"]:
+        engine_policy._keys(job, {"id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion"})
+        require(type(job["id"]) is int and job["id"] > 0 and job["id"] not in ids
+                and type(job["run_id"]) is int and job["run_id"] == PRIOR_RUN
+                and type(job["run_attempt"]) is int and job["run_attempt"] == 1 and job["head_sha"] == PRIOR_MAIN
+                and job["status"] == "completed" and type(job["name"]) is str and type(job["conclusion"]) is str,
+                "continuation-qualified-prior-jobs")
+        if job["id"] in expected:
+            require(job["name"] == expected[job["id"]]["name"] and job["conclusion"] == "failure",
+                    "continuation-qualified-prior-physical-job")
+        ids.add(job["id"])
+    require(ids >= expected.keys(), "continuation-prior-jobs-missing")
+    return counts
+
+
+def two_history_continuation_qualification(legacy_qualification, run, inventory, checks, commit,
+                                         no_work_raw, prior_public_clients):
+    """Pure receipt assembly, not authentication, private sealing or permission."""
+    require(type(no_work_raw) is bytes and len(no_work_raw) <= 12288, "continuation-prior-no-work-bound")
+    value = {"schema": 2, "purpose": "g06-two-history-preauth-no-work",
+        "legacy_qualification": legacy_qualification, "prior": continuation_prior_origin(),
+        "native_prior": prior_native_projection(run, inventory, checks, commit),
+        "no_work_receipt_b64": base64.b64encode(no_work_raw).decode("ascii"),
+        "prior_public_clients": prior_public_clients}
     validate_continuation_qualification(value)
     return value
 
