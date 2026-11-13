@@ -573,6 +573,43 @@ OBSERVER_OPERATIONS = frozenset({"observe-profile", "observe-operating"})
 BOOTSTRAP_BINDINGS = "/var/lib/lightning-it/incus-operating-bindings"
 
 
+def _operating_retained_receipt(configuration, registry, selector, store, lease_id):
+    """Await only pre-entry lock contention; verify and report in one Root session."""
+    from contextlib import ExitStack
+    import errno
+    from . import capacity, cell_contract, cleanup_storage, operating_custody, root_session
+    record = store.read(lease_id)
+    require(record["state"] == "retained", "runtime-observer-prune-not-retained")
+    rows = [row for row in record["effects"].values() if row["operation"] == "engine-graph-prune"]
+    if not rows:
+        return None
+    require(len(rows) == 1 and rows[0]["target"] == "engine:" + lease_id
+            and rows[0]["state"] in {"intent", "verified"}, "runtime-observer-prune-held")
+    if rows[0]["state"] == "intent":
+        return None
+    reference = operating_custody._preparation_reference(
+        configuration.runtime_config_path, configuration.runtime_config_sha256)
+    with ExitStack() as stack:
+        try:
+            session = stack.enter_context(root_session._session(*reference))
+        except BlockingIOError as error:
+            # ONLY a failed context ENTER can be a known no-effect lock wait.
+            # Errors after entry (including from receipt reads) remain HOLD.
+            if type(error) is BlockingIOError and error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                return None
+            raise
+        config = root_session._require_session(session)
+        owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
+        require(store.read(lease_id) == record, "runtime-observer-prune-drift")
+        _, start = cleanup_storage._drain_engine(owner, store, config)
+        capacity._graph(owner, start, record)
+        require(store.read(lease_id) == record, "runtime-observer-prune-drift")
+        receipt = operating_custody.operating_outcome(configuration.runtime_config_path,
+            configuration.runtime_config_sha256, registry, selector, store, lease_id, retained=True, session=session)
+        root_session._require_session(session)
+        return receipt
+
+
 class BootstrapRuntimeRPC:
     """Repeatable native Main intake, then separately fresh actual admission.
 
@@ -633,10 +670,11 @@ class BootstrapRuntimeRPC:
                 require(time.monotonic() < end, "runtime-observer-wait-held")
                 record = store.read(lease_id)
                 if operation == "observe-operating" and record["state"] == "retained":
-                    receipt = operating_custody.operating_outcome(configuration.runtime_config_path,
-                        configuration.runtime_config_sha256, runtime._registry, selector, store, lease_id, retained=True)
-                    kind = "operating-receipt"
-                    break
+                    receipt = _operating_retained_receipt(configuration, runtime._registry, selector, store, lease_id)
+                    if receipt is not None:
+                        require(time.monotonic() < end, "runtime-observer-wait-held")
+                        kind = "operating-receipt"
+                        break
                 if operation == "observe-profile" and record["state"] == "closed":
                     run_factory.require_bootstrap_native(proof, connected, proof.policy, request["token"], request["api_token"])
                     config = runtime._check()
