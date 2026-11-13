@@ -65,6 +65,7 @@ class InitialChallengeTests(unittest.TestCase):
         self.assertEqual(client.FRAME_SECONDS, 5)
 
 
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root proper EE only")
 class CapabilityTests(unittest.TestCase):
     setUp = fixture.RootRuntimeClientTests.setUp
     accept = fixture.RootRuntimeClientTests.accept

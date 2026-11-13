@@ -2,6 +2,7 @@
 from dataclasses import replace
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 from types import MappingProxyType
@@ -14,9 +15,16 @@ from incus_lease_issuer import collector, installation  # noqa: E402
 from incus_lease_issuer.identity import Denied  # noqa: E402
 
 
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Linux UID0 EE only")
 class ClosedInventoryTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(dir="/run/proof")
+        base = Path("/run/proof")
+        if not base.is_dir():
+            self.skipTest("pre-provision /run/proof as private tmpfs in the isolated EE")
+        info = base.stat()
+        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+            self.skipTest("/run/proof must be root-owned0700, no test owner exception")
+        self.temporary = tempfile.TemporaryDirectory(dir=base)
         self.addCleanup(self.temporary.cleanup)
         self.runner = Path(self.temporary.name) / "stock"
         self.runner.mkdir(mode=0o700)
