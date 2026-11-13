@@ -88,6 +88,7 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_fixed_third_history_reason_is_allowed_without_reflecting_neighbors(self):
         for reason, expected in (("continuation-third-native-drift", "continuation-third-native-drift"),
+                                 ("continuation-first-parent", "continuation-first-parent"),
                                  ("continuation-third-native-drift synthetic-secret", "unclassified")):
             with self.subTest(reason=reason), identity._diagnostic_request():
                 identity._diagnostic_failed("native-histories", identity.Denied(reason))

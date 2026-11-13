@@ -417,7 +417,7 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             if descriptor["schema"] == 3:
                 require(_continuation_third_native(get) == receipt["native_third"], "continuation-third-native-drift")
         _continuation_origin_absent(selected.bootstrap, qualified)
-        if identity.decode_json(selected.template_bytes)["kind"] == "operating":
+        if descriptor["schema"] == 3 or identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
                                                          who.caller_sha, who.run_id, who.reusable_sha)
     elif identity.decode_json(selected.template_bytes)["kind"] == "operating":

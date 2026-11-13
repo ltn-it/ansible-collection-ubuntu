@@ -65,7 +65,7 @@ _DIAGNOSTIC_REASONS = frozenset({
     "native-job-cell-name", "native-check-job-join", "incomplete-job-inventory",
     "current-protected-main", "native-reusable-workflow", "native-repository-mismatch",
     "native-actor", "continuation-original-native-drift", "continuation-prior-native-drift",
-    "continuation-exact-current-native-tuple", "continuation-original-or-unknown-lease",
+    "continuation-exact-current-native-tuple", "continuation-original-or-unknown-lease", "continuation-first-parent",
     "continuation-third-run", "continuation-third-repository", "continuation-third-actor",
     "continuation-third-reusable", "continuation-third-commit", "continuation-third-parent",
     "continuation-third-complete-inventory", "continuation-third-job-inventory", "continuation-third-checks",

@@ -509,6 +509,12 @@ All three historical native projections are freshly compared once per opaque
 proof; current native assignment, worker, controls and absence checks remain
 fresh on every revalidation. The third history adds five provider reads to that
 initial proof and changes no deadline, hash pass, retention or admission rule.
+Every schema-3 selection, including business execution and observer proofs,
+also freshly verifies the actual successor commit's first parent. For business
+intake this adds four commit reads across the existing native validations:
+55 pre-mkdir provider reads for the observed one-page inventories, with the
+same ten collectors and twenty complete installation hashes. Native timing
+feasibility and operating acceptance remain unproven by these modeled checks.
 No compiler, activation, rerun or dispatch is performed by these pure helpers.
 
 ### Disabled bootstrap and operating observer preparation

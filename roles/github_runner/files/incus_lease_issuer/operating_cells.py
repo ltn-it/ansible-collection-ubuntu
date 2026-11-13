@@ -269,7 +269,7 @@ TWO_HISTORY_WORKFLOW = "c1f44472b712ad72df4b49c448bf0aba31ecb2234682f394d5f72b6c
 
 
 def continuation_prior_origin():
-    """Fixed second failed native run, distinct from the immutable first origin."""
+    """Fixed third failed native run, distinct from both earlier origins."""
     prefix = "Heavy matrix / central protected validation / "
     return {"repository": "ltn-it/ansible-collection-supplementary", "repository_id": 1103407173,
         "workflow_id": 214182490, "workflow_path": ".github/workflows/collection-ci.yml",

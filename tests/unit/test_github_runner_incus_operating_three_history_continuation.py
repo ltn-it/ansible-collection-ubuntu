@@ -226,6 +226,25 @@ class RootThreeHistoryTests(unittest.TestCase):
             with self.subTest(origin=native[0]['id']), self.assertRaises(Denied): self.old.mint()
             native[2][0]['conclusion'] = 'failure'
 
+    def test_each_cell_rejects_wrong_actual_successor_parent_at_mint_and_readback(self):
+        for selector in self.helper.value['cells']:
+            for purpose in ('execution', 'observer'):
+                with self.subTest(selector=selector, purpose=purpose):
+                    self.old.parent = cells.PRIOR_MAIN
+                    try:
+                        with self.assertRaises(Denied):
+                            self.old.mint(selector, purpose)
+                    finally:
+                        self.old.parent = cells.THIRD_MAIN
+                    proof, token = self.old.mint(selector, purpose)
+                    self.old.parent = cells.PRIOR_MAIN
+                    try:
+                        with self.assertRaises(Denied):
+                            factory.require_bootstrap_native(
+                                proof, self.helper.server, proof.policy, token, 'synthetic-job-token')
+                    finally:
+                        self.old.parent = cells.THIRD_MAIN
+
     def test_current_job_and_absence_checks_remain_fresh(self):
         proof, token = self.old.mint()
         self.helper.native.job['status'] = 'completed'
