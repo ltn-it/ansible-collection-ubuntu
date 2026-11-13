@@ -137,13 +137,16 @@ def _diagnostic_step(stage):
 
 
 @contextmanager
-def _diagnostic_request():
+def _diagnostic_request(*, reuse=False):
     """One Root AUTHPRIV terminal record; no public framing or policy change.
 
     The existing journal attaches the real PID/UID/unit. Consumers must verify
     that provenance; the JSON is not an authentication or acceptance receipt.
     No durable request data or cross-request cache is introduced.
     """
+    if reuse and _DIAGNOSTIC.get() is not None:
+        yield
+        return
     token = _DIAGNOSTIC.set(_Diagnostic(time.monotonic(), time.process_time(), os.getpid()))
     try:
         yield

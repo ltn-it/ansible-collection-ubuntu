@@ -93,6 +93,7 @@ def _anchor():
     return value, proof, stamp
 
 
+@identity._diagnostic_request()
 def serve_inherited():
     """Consume duplicated connected fd0 only; no listener or policy argument.
 
@@ -118,7 +119,8 @@ def serve_inherited():
         if outcome.get("type") == "terminal" and outcome.get("capture", {}).get("state") == "verified":
             return 0
         return 1
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("runtime-selected" if handed_off else "bootstrap-policy", error)
         if connected is not None and not handed_off:
             try:
                 from . import runtime_rpc

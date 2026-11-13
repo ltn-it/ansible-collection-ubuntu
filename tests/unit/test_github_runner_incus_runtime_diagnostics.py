@@ -12,7 +12,7 @@ from unittest import mock
 
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
-from incus_lease_issuer import identity, run_factory, runtime_rpc
+from incus_lease_issuer import identity, run_factory, runtime_entry, runtime_rpc
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -118,6 +118,41 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.log.call_count, 2)
         self.assertEqual(self.record(0)["stage"], "observer-lookup")
         self.assertEqual(self.record(1)["stage"], "native-current")
+        self.assertIsNone(identity._DIAGNOSTIC.get())
+
+    def entry(self):
+        connected = mock.Mock()
+        self.enterContext(mock.patch.object(runtime_entry, "_single_thread"))
+        self.enterContext(mock.patch.object(runtime_entry.socket_entry, "_connected_stdin", return_value=connected))
+        self.enterContext(mock.patch.object(runtime_entry, "_anchor", return_value=(
+            {"schema": 2, "bootstrap_path": "/fixed-private-bootstrap", "bootstrap_sha256": "a" * 64},
+            object(), object())))
+        writes = self.enterContext(mock.patch.object(runtime_rpc, "_write"))
+        return connected, writes
+
+    def test_entry_bootstrap_constructor_failure_is_recorded_before_public_denial(self):
+        connected, writes = self.entry()
+        self.enterContext(mock.patch.object(run_factory, "load_bootstrap",
+            side_effect=identity.Denied("bootstrap-policy-changed")))
+        self.assertEqual(runtime_entry.serve_inherited(), 1)
+        writes.assert_called_once_with(connected, {"schema": 2, "type": "failure", "operation": None,
+                                                  "disposition": "denied-before-intent"})
+        connected.close.assert_called_once()
+        self.log.assert_called_once()
+        self.assertEqual((self.record()["stage"], self.record()["reason"]),
+                         ("bootstrap-policy", "bootstrap-policy-changed"))
+        self.assertIsNone(identity._DIAGNOSTIC.get())
+
+    def test_entry_and_dispatch_share_one_terminal_scope_and_first_error(self):
+        connected, writes = self.entry()
+        obj, _ = self.bootstrap()
+        self.enterContext(mock.patch.object(run_factory, "challenge_bootstrap",
+            side_effect=identity.Denied("collector-maps-changed")))
+        self.enterContext(mock.patch.object(runtime_rpc, "BootstrapRuntimeRPC", return_value=obj))
+        self.assertEqual(runtime_entry.serve_inherited(), 1)
+        self.log.assert_called_once()
+        self.assertEqual(self.record()["reason"], "collector-maps-changed")
+        connected.close.assert_called_once()
         self.assertIsNone(identity._DIAGNOSTIC.get())
 
     def test_counts_saturate_and_unknown_stage_is_not_reflected(self):

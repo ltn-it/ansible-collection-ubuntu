@@ -321,7 +321,7 @@ class RuntimeRPC:
             # or unverified local stop/paired withdrawal. No fabricated stop.
             self._stop_remote_after_abort(store, lease_id, selector)
 
-    @identity._diagnostic_request()
+    @identity._diagnostic_request(reuse=True)
     def handle(self, connected):
         return self._handle_selected(connected, None)
 
@@ -655,7 +655,7 @@ class BootstrapRuntimeRPC:
             _write(connected, outcome)
             return outcome
 
-    @identity._diagnostic_request()
+    @identity._diagnostic_request(reuse=True)
     def handle(self, connected):
         from . import run_factory
         operation, handed_off, staging = None, False, False
