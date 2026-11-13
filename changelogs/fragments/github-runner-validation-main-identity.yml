@@ -1,7 +1,0 @@
----
-minor_changes:
-  - github_runner - verify the exact Root-bound Validation Main release-App dispatch independently of legacy
-    human Main pushes while retaining native job and physical runner assignment.
-known_issues:
-  - Actual OIDC permission/token delivery, native physical-runner service integration and complete Heavy/Main
-    acceptance remain open.
