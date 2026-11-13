@@ -495,6 +495,28 @@ failure frames and fail-closed behavior remain unchanged if logging fails. The
 single local journal datagram is nonblocking; no
 diagnostic operation grants a retry, renews a deadline or changes a lease.
 
+The fixed schema-3 continuation preserves the original failed runs `43242971437`,
+`43317193171` and `43351436938`, each at attempt one. It embeds the unchanged
+schema-2 qualification and its legacy qualification, then validates the third
+complete terminal job inventory, the exact failed Heavy/observer checks, and a
+separately authenticated Root no-work observation. That observation preserves
+catalogue identities and zero leases; it does not assert unused challenges,
+identify the earlier failure cause, or authorize another request.
+
+Schema 1 and schema 2 remain supported unchanged. Schema 3 permits only the
+fixed reviewed workflow with a genuine successor whose first parent is `3d84e26`.
+All three historical native projections are freshly compared once per opaque
+proof; current native assignment, worker, controls and absence checks remain
+fresh on every revalidation. The third history adds five provider reads to that
+initial proof and changes no deadline, hash pass, retention or admission rule.
+Every schema-3 selection, including business execution and observer proofs,
+also freshly verifies the actual successor commit's first parent. For business
+intake this adds four commit reads across the existing native validations:
+55 pre-mkdir provider reads for the observed one-page inventories, with the
+same ten collectors and twenty complete installation hashes. Native timing
+feasibility and operating acceptance remain unproven by these modeled checks.
+No compiler, activation, rerun or dispatch is performed by these pure helpers.
+
 ### Disabled bootstrap and operating observer preparation
 
 `github_runner_runtime_v2_bootstrap: true` selects an existing sealed bootstrap
