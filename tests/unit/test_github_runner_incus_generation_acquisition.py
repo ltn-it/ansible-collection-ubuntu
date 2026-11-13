@@ -151,11 +151,17 @@ class RootGenerationAcquisitionTests(unittest.TestCase):
                 class Response:
                     def __init__(self):
                         self.status, self.headers, self.stream = status, Message(), io.BytesIO(body)
+                        self.length = None
                         for key, value in headers.items():
                             self.headers[key] = value
+                    def isclosed(self):
+                        return self.stream.closed
                     def read(self, count):
                         owner.read_sizes.append(count)
-                        return self.stream.read(count)
+                        raw = self.stream.read(count)
+                        if not raw:
+                            self.stream.close()
+                        return raw
                     def close(self):
                         self.stream.close()
                 return Response()

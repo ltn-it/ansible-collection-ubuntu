@@ -238,7 +238,13 @@ def _acquire_memory(request, api_token, *, artifact_fd, source_fd, controller_fd
         acquisition._remaining(deadline)
         return acquisition.Acquisition(*commits, request.artifact, artifact_sha, artifact_size,
                                        hashlib.sha256(repr(native).encode("ascii")).hexdigest())
-    except Exception:
+    except Exception as error:
+        # Inspect only the exact stdlib type, never its partial body or text.
+        # Capture before the public wrapper; later wrappers preserve this first
+        # bounded record. Unknown/foreign exceptions remain unclassified.
+        if type(error) is acquisition.http.client.IncompleteRead:
+            error = Denied("acquisition-framing")
+        identity._diagnostic_failed("snapshot-acquisition", error)
         # No bearer, signed URL, HTTP body, request/file path or exception text.
         raise Denied("intake-acquisition-held") from None
 
