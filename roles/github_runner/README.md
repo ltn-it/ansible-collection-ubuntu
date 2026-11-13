@@ -522,7 +522,9 @@ and all four original failed runs, adding only `43375902417` at attempt one.
 Its fourth origin binds historical Main `f138a227` and its historical workflow;
 the genuine successor must instead use the separately reviewed workflow whose
 three operating guards also admit that exact predecessor. Its first parent
-must be `f138a227`. The fourth history adds five fresh provider reads once per
+must be `f138a227`. Its controller pin includes the corrected hosted admission
+action; the historical fourth controller and workflow remain unchanged.
+The fourth history adds five fresh provider reads once per
 opaque proof. A separately authenticated zero-lease, empty-catalogue observation
 retains the full original Root receipt; it does not prove nonce absence, reset
 an attempt, grant a retry or replace native operating acceptance. Schemas 1–3

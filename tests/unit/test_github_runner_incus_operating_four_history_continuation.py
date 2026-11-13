@@ -70,6 +70,23 @@ class FourHistoryTests(unittest.TestCase):
         self.assertEqual(self.validate(self.descriptor),self.descriptor)
         cells.validate_continuation_commit({'sha':'e'*40,'parents':[{'sha':cells.FOURTH_MAIN}]},self.descriptor,
             'e'*40,cells.FOURTH_RUN+1,cells.FOUR_HISTORY_REUSABLE)
+    def test_successor_controller_is_distinct_without_relabeling_fourth_history(self):
+        self.assertEqual(cells.FOURTH_REUSABLE,'c6d9445151c2e3e3312949f27eb624964a7b644d')
+        self.assertEqual(cells.FOURTH_WORKFLOW,'af6adf27e2be7551ff1c12090d06e6ff987cb8a8c456f0d308b84d08567eabe4')
+        self.assertEqual(cells.FOUR_HISTORY_REUSABLE,'a94f4234ee6d14308e341d1c9d0d9ce9d2277e3a')
+        self.assertEqual(cells.FOUR_HISTORY_WORKFLOW,'c11d85264a1e492e1a16b76f78f54309584f649cdfdf64f6a335b38b80966e73')
+        self.assertEqual(self.validate(self.descriptor),self.descriptor)
+        for key,value in [('reusable_sha',cells.FOURTH_REUSABLE),
+                          ('source_workflow_sha256','c7313135711b311584de7a02d8b0a2dfc85d368e73f3b5ba4de46d7d9b4bf07e')]:
+            changed=deepcopy(self.descriptor);changed['successor'][key]=value
+            with self.subTest(successor=key),self.assertRaises(Denied):self.validate(changed)
+        changed=deepcopy(self.descriptor);changed['fourth']['reusable_sha']=cells.FOUR_HISTORY_REUSABLE
+        with self.assertRaises(Denied):self.validate(changed)
+        native=deepcopy(self.native)
+        native[0]['referenced_workflows'][0].update(sha=cells.FOUR_HISTORY_REUSABLE,
+            path='ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@'+cells.FOUR_HISTORY_REUSABLE)
+        with self.assertRaises(Denied):cells.fourth_native_projection(*native)
+
     def test_descriptor_denies_history_loss_old_workflow_replay_and_parent(self):
         changes=[lambda v:v.update(schema=True),lambda v:v.update(reason='retry'),lambda v:v.pop('origin'),
             lambda v:v.pop('prior'),lambda v:v.pop('third'),lambda v:v.pop('fourth'),lambda v:v.update(extra=True),
