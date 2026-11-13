@@ -517,6 +517,28 @@ same ten collectors and twenty complete installation hashes. Native timing
 feasibility and operating acceptance remain unproven by these modeled checks.
 No compiler, activation, rerun or dispatch is performed by these pure helpers.
 
+The fixed schema-4 continuation retains that complete schema-3 qualification
+and all four original failed runs, adding only `43375902417` at attempt one.
+Its fourth origin binds historical Main `f138a227` and its historical workflow;
+the genuine successor must instead use the separately reviewed workflow whose
+three operating guards also admit that exact predecessor. Its first parent
+must be `f138a227`. The fourth history adds five fresh provider reads once per
+opaque proof. A separately authenticated zero-lease, empty-catalogue observation
+retains the full original Root receipt; it does not prove nonce absence, reset
+an attempt, grant a retry or replace native operating acceptance. Schemas 1–3
+remain unchanged.
+
+HTTP acquisition handles a fully consumed standard-library response without
+reusing its closed socket. Premature Content-Length EOF still fails closed;
+chunk framing, archive size/hash, redirect origins and credential scopes retain
+their existing checks and deadlines. Local tests exercise real HTTP framing and
+the complete private stage/configuration/readback path with provider/archive IO
+modeled. That full path makes 26 fresh collector calls and 12 native-validation
+calls, including all post-discovery materialization checks. The original
+intake authentication budget and the later initial-effects budget are distinct;
+neither is renewed or increased. Local modeled materialization cannot establish
+native whole-job timing, successful workloads or the remaining operating proof.
+
 ### Disabled bootstrap and operating observer preparation
 
 `github_runner_runtime_v2_bootstrap: true` selects an existing sealed bootstrap

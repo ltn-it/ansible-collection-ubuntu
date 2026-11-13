@@ -1,0 +1,8 @@
+---
+bugfixes:
+  - >-
+    github_runner - preserve standard-library HTTP response EOF semantics without reusing
+    a closed socket, while rejecting truncated bodies and retaining acquisition limits.
+  - >-
+    github_runner - add a fixed fourth-history continuation that preserves all original
+    failed native runs and authenticated no-work evidence without renewing authority.
