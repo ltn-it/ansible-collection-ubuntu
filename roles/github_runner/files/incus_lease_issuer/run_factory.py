@@ -193,6 +193,7 @@ def derive_selection(bootstrap, selector, caller_sha_locator, *, purpose="execut
         template["lease_seconds"], template["job_timeout_seconds"])
 
 
+@identity._diagnostic_step("native-worker")
 def _worker(connected, bootstrap):
     admission._socket(connected)
     value = collector.collect_worker(connected, bootstrap.collector)
@@ -203,6 +204,7 @@ def _worker(connected, bootstrap):
     return value
 
 
+@identity._diagnostic_step("native-controls")
 def _controls(bootstrap):
     require(load_bootstrap(bootstrap.path, bootstrap.sha256) == bootstrap, "bootstrap-policy-changed")
     controls = {"bootstrap_sha256": bootstrap.sha256, "stamp": list(bootstrap.file_stamp),
@@ -249,6 +251,7 @@ def _continuation_receipt(value):
     return descriptor, receipt, counts, stamp
 
 
+@identity._diagnostic_step("native-histories")
 def _continuation_original_native(get, *, prior=False):
     origin = operating_cells.continuation_prior_origin() if prior else operating_cells.continuation_origin()
     prefix = "/actions/runs/" + str(origin["run_id"])
@@ -268,6 +271,27 @@ def _continuation_original_native(get, *, prior=False):
     commit = get("/git/commits/" + origin["source_sha"])
     project = operating_cells.prior_native_projection if prior else operating_cells.origin_native_projection
     return project(run, {"total_count": total, "jobs": rows}, checks, commit)
+
+
+@identity._diagnostic_step("native-histories")
+def _continuation_third_native(get):
+    origin = operating_cells.continuation_third_origin()
+    prefix = "/actions/runs/" + str(origin["run_id"])
+    run = get(prefix)
+    rows, total = [], None
+    for page in range(1, 5):
+        data = get(prefix + "/attempts/1/jobs?per_page=100&page=" + str(page))
+        count, batch = data.get("total_count"), data.get("jobs")
+        require(type(count) is int and count == 24 and type(batch) is list and len(batch) <= 100
+                and (total is None or count == total), "continuation-original-pagination")
+        total = count; rows.extend(batch)
+        if len(rows) >= count:
+            break
+    require(len(rows) == total, "continuation-original-pagination")
+    checks = [get("/check-runs/" + str(row["check_run_id"]))
+              for row in origin["jobs"]]
+    commit = get("/git/commits/" + origin["source_sha"])
+    return operating_cells.third_native_projection(run, {"total_count": total, "jobs": rows}, checks, commit)
 
 
 def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, templates, *, intake):
@@ -346,6 +370,7 @@ def _continuation_origin_absent(bootstrap, qualified):
                     and who["reusable_sha"] == successor["reusable_sha"], "continuation-original-or-unknown-lease")
 
 
+@identity._diagnostic_step("native-current")
 def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
     admission._secret(token); admission._secret(api_token)
     controls = _controls(selected.bootstrap)
@@ -383,13 +408,16 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
         # opaque native proof. Current authorization and original absence are
         # still freshly checked on every revalidation; no shared cache exists.
         if check_origin:
-            legacy = receipt["legacy_qualification"] if descriptor["schema"] == 2 else receipt
+            previous = receipt["previous_qualification"] if descriptor["schema"] == 3 else receipt
+            legacy = previous["legacy_qualification"] if descriptor["schema"] in {2, 3} else previous
             require(_continuation_original_native(get) == legacy["native_origin"], "continuation-original-native-drift")
-            if descriptor["schema"] == 2:
-                require(_continuation_original_native(get, prior=True) == receipt["native_prior"],
+            if descriptor["schema"] in {2, 3}:
+                require(_continuation_original_native(get, prior=True) == previous["native_prior"],
                         "continuation-prior-native-drift")
+            if descriptor["schema"] == 3:
+                require(_continuation_third_native(get) == receipt["native_third"], "continuation-third-native-drift")
         _continuation_origin_absent(selected.bootstrap, qualified)
-        if identity.decode_json(selected.template_bytes)["kind"] == "operating":
+        if descriptor["schema"] == 3 or identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
                                                          who.caller_sha, who.run_id, who.reusable_sha)
     elif identity.decode_json(selected.template_bytes)["kind"] == "operating":
@@ -399,6 +427,7 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
     return worker, who, controls, stamp
 
 
+@identity._diagnostic_step("bootstrap-initial-native")
 def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_token, *, purpose="execution"):
     _root()
     try:
@@ -420,10 +449,12 @@ def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_to
             connected.fileno(), os.getpid(), threading.get_ident(), time.monotonic() + remaining, started)
         with _GUARD: _PROOFS.add(proof)
         return proof
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("bootstrap-initial-native", error)
         raise Denied("bootstrap-native-denied") from None
 
 
+@identity._diagnostic_step("bootstrap-final-native")
 def require_bootstrap_native(proof, connected, selected, token, api_token):
     _root()
     try:
@@ -441,7 +472,8 @@ def require_bootstrap_native(proof, connected, selected, token, api_token):
         remaining = min(600, int(proof.expires_monotonic - time.monotonic()), who.valid_until - int(time.time()) - 31)
         require(remaining > 0, "bootstrap-native-expired")
         return worker, who, remaining
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("bootstrap-final-native", error)
         raise Denied("bootstrap-native-denied") from None
 
 
@@ -578,6 +610,7 @@ def _build(directory, selected, who, snapshot, created_at, deadline):
         for fd in fds: os.close(fd)
 
 
+@identity._diagnostic_step("bootstrap-configuration")
 def create_run_configuration(proof, connected, bootstrap, selector, token, api_token, sealed_snapshot=None):
     """One immutable original-job config. Unknown/partial directories stay held."""
     _root()
@@ -627,7 +660,8 @@ def create_run_configuration(proof, connected, bootstrap, selector, token, api_t
         require_bootstrap_native(proof, connected, selected, token, api_token)
         require(_read_complete(directory)[0] == result, "run-config-final-drift")
         return result
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("bootstrap-configuration", error)
         raise Denied("run-configuration-held") from None
     finally:
         if root is not None: os.close(root)
@@ -642,6 +676,7 @@ def find_existing_execution_configuration(bootstrap, selector, execution_proof):
     return _find_existing_configuration(bootstrap, selector, execution_proof, purpose="execution")
 
 
+@identity._diagnostic_step("observer-lookup")
 def _find_existing_configuration(bootstrap, selector, observer_proof, *, purpose):
     """Read-only original-execution locator; caller freshly revalidates proof.
 
@@ -683,7 +718,8 @@ def _find_existing_configuration(bootstrap, selector, observer_proof, *, purpose
                 and connected.fileno() == observer_proof.fd and _worker(connected, bootstrap) == observer_proof.worker,
                 "run-config-observer")
         return found[0]
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("observer-lookup", error)
         raise Denied("run-configuration-lookup-held") from None
     finally:
         if root is not None: os.close(root)

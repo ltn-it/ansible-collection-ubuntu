@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 3:
+        return _validate_three_history_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 2:
         return _validate_two_history_descriptor(value, workflow_sha256, reusable_sha)
     engine_policy._keys(value, {"schema", "reason", "origin", "qualification", "successor"})
@@ -133,7 +135,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
-                    for p in parents) and parents[0]["sha"] == (PRIOR_MAIN if value["schema"] == 2 else ORIGIN_MAIN)
+                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN}[value["schema"]])
             and len({p["sha"] for p in parents}) == len(parents)
             and caller_sha not in {p["sha"] for p in parents}, "continuation-first-parent")
 
@@ -188,6 +190,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 3:
+        return _validate_three_history_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 2:
         return _validate_two_history_qualification(value)
     engine_policy._keys(value, {"schema", "purpose", "origin", "native_origin", "no_intake_receipt_b64", "old_public_clients"})
@@ -420,6 +424,184 @@ def two_history_continuation_qualification(legacy_qualification, run, inventory,
         "native_prior": prior_native_projection(run, inventory, checks, commit),
         "no_work_receipt_b64": base64.b64encode(no_work_raw).decode("ascii"),
         "prior_public_clients": prior_public_clients}
+    validate_continuation_qualification(value)
+    return value
+
+
+# Exactly one bounded successor preserving all three original failed deliveries.
+# These fixed identifiers never authorize a rerun, dispatch or nonce reset.
+THIRD_MAIN = "3d84e26d90cc778fb8c4f462ce481584da57fb5a"
+THIRD_RUN = 43351436938
+THIRD_REUSABLE = TWO_HISTORY_REUSABLE
+THIRD_WORKFLOW = TWO_HISTORY_WORKFLOW
+THIRD_CLIENTS = {
+    "incus_job_client.py": "01d70ce938ede0e6a7f5cbb094650c9d6560b350bab37a4a3e9d261322ccfb9e",
+    "incus_runtime_client.py": "260a190c57ca146ab335ec93aa4e29dd3563003daa85e6b0773a063ed2013346",
+}
+TWO_HISTORY_QUALIFICATION = "99c1d6fe8b2ac39376af4bf558364b1452c66a0e8990783a4f8e214c330d5deb"
+# Authenticated Root typed observation; its hash preserves evidence, not authority.
+THIRD_NO_WORK = "c0a2c14336fe263bdebe43352455afb362a1f2f0f09d6b618503e865cfef349c"
+THREE_HISTORY_WORKFLOW = "af6adf27e2be7551ff1c12090d06e6ff987cb8a8c456f0d308b84d08567eabe4"
+THREE_HISTORY_REUSABLE = TWO_HISTORY_REUSABLE
+
+
+def continuation_third_origin():
+    """Fixed third failed native run, distinct from both earlier origins."""
+    prefix = "Heavy matrix / central protected validation / "
+    return {"repository": "ltn-it/ansible-collection-supplementary", "repository_id": 1103407173,
+        "workflow_id": 214182490, "workflow_path": ".github/workflows/collection-ci.yml",
+        "source_sha": THIRD_MAIN, "run_id": THIRD_RUN, "run_attempt": 1,
+        "first_parent": PRIOR_MAIN, "source_workflow_sha256": THIRD_WORKFLOW,
+        "reusable_sha": THIRD_REUSABLE, "jobs": [
+            {"job_id": 131644158626, "check_run_id": 131644158626,
+             "name": prefix + "heavy / keycloak-heavy / ubuntu-24.04",
+             "started_at": "2026-11-13T02:23:25Z", "completed_at": "2026-11-13T02:24:37Z", "conclusion": "failure"},
+            {"job_id": 131644930593, "check_run_id": 131644930593,
+             "name": prefix + "Final quality / heavy / keycloak-heavy / ubuntu-24.04",
+             "started_at": "2026-11-13T02:24:41Z", "completed_at": "2026-11-13T02:25:26Z", "conclusion": "failure"}]}
+
+
+def third_native_projection(run, inventory, checks, commit):
+    """Validate third terminal provider data, retaining complete native job inventory."""
+    origin = continuation_third_origin()
+    require(type(run) is dict and all(run.get(k) == v and type(run.get(k)) is type(v) for k, v in {
+        "id": THIRD_RUN, "run_attempt": 1, "head_sha": THIRD_MAIN, "event": "push", "head_branch": "main",
+        "workflow_id": 214182490, "status": "completed", "conclusion": "failure"}.items()), "continuation-third-run")
+    for field in ("repository", "head_repository"):
+        require(type(run.get(field)) is dict and run[field].get("id") == 1103407173, "continuation-third-repository")
+    actor = {"login": "litroc", "id": 76040632, "type": "User"}
+    require(all(type(run.get(field)) is dict and all(run[field].get(k) == v for k, v in actor.items())
+                for field in ("actor", "triggering_actor")), "continuation-third-actor")
+    refs = run.get("referenced_workflows")
+    expected_ref = "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + THIRD_REUSABLE
+    require(type(refs) is list and any(type(item) is dict and item.get("path") == expected_ref
+            and item.get("sha") == THIRD_REUSABLE for item in refs), "continuation-third-reusable")
+    require(type(commit) is dict and commit.get("sha") == THIRD_MAIN, "continuation-third-commit")
+    parents = commit.get("parents")
+    require(type(parents) is list and 1 <= len(parents) <= 2
+            and all(type(p) is dict and type(p.get("sha")) is str
+                    and re.fullmatch("[0-9a-f]{40}", p["sha"]) for p in parents)
+            and parents[0]["sha"] == PRIOR_MAIN
+            and len({p["sha"] for p in parents}) == len(parents)
+            and THIRD_MAIN not in {p["sha"] for p in parents}, "continuation-third-parent")
+    require(type(inventory) is dict and type(inventory.get("total_count")) is int
+            and inventory["total_count"] == 24 and type(inventory.get("jobs")) is list
+            and len(inventory["jobs"]) == 24, "continuation-third-complete-inventory")
+    rows, ids = [], set()
+    for job in inventory["jobs"]:
+        require(type(job) is dict and type(job.get("id")) is int and job["id"] > 0 and job["id"] not in ids
+                and job.get("run_id") == THIRD_RUN and type(job.get("run_attempt")) is int
+                and job["run_attempt"] == 1 and job.get("head_sha") == THIRD_MAIN
+                and job.get("status") == "completed" and type(job.get("conclusion")) is str
+                and type(job.get("name")) is str, "continuation-third-job-inventory")
+        ids.add(job["id"])
+        rows.append({k: job[k] for k in ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion")})
+    require(type(checks) is list and len(checks) == 2, "continuation-third-checks")
+    for expected, check in zip(origin["jobs"], checks):
+        job = next((j for j in inventory["jobs"] if j["id"] == expected["job_id"]), None)
+        require(job is not None and all(job.get(k) == expected[k] for k in ("name", "started_at", "completed_at", "conclusion"))
+                and job.get("runner_id") == 78 and job.get("runner_group_id") == 8
+                and job.get("check_run_url") == "https://api.github.com/repos/" + origin["repository"]
+                    + "/check-runs/" + str(expected["check_run_id"]), "continuation-third-terminal-job")
+        require(type(check) is dict and check.get("id") == expected["check_run_id"]
+                and check.get("name") == expected["name"] and check.get("head_sha") == THIRD_MAIN
+                and check.get("status") == "completed" and check.get("conclusion") == "failure"
+                and check.get("started_at") == expected["started_at"] and check.get("completed_at") == expected["completed_at"]
+                and type(check.get("app")) is dict and check["app"].get("id") == 15368
+                and check["app"].get("slug") == "github-actions", "continuation-third-terminal-check")
+    return {"origin": origin, "actor": actor, "jobs": sorted(rows, key=lambda row: row["id"])}
+
+
+
+def _validate_three_history_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "origin", "prior", "third", "qualification", "successor"})
+    require(value["reason"] == "third-runtime-failed-no-work-observed"
+            and ledger.canonical(value["origin"]) == ledger.canonical(continuation_origin())
+            and ledger.canonical(value["prior"]) == ledger.canonical(continuation_prior_origin())
+            and ledger.canonical(value["third"]) == ledger.canonical(continuation_third_origin()),
+            "continuation-three-history-origin")
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"]); engine_policy._hash(ref["sha256"])
+    row = engine_policy._keys(value["successor"], {"source_sha", "run_id", "run_attempt", "first_parent",
+                                                 "source_workflow_sha256", "reusable_sha"})
+    cell_contract._commit(row["source_sha"])
+    engine_policy._integer(row["run_id"], 1, 2**63 - 1)
+    require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN, THIRD_MAIN}
+            and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN}
+            and type(row["run_attempt"]) is int and row["run_attempt"] == 1
+            and row["first_parent"] == THIRD_MAIN, "continuation-three-history-successor")
+    require(row["source_workflow_sha256"] == workflow_sha256 == THREE_HISTORY_WORKFLOW
+            and row["reusable_sha"] == reusable_sha == THREE_HISTORY_REUSABLE,
+            "continuation-three-history-contract")
+    return value
+
+
+def _validate_three_history_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "previous_qualification", "third", "native_third",
+                               "no_work_receipt_b64", "third_public_clients"})
+    require(value["purpose"] == "g06-three-history-runtime-failure-no-work"
+            and ledger.canonical(value["third"]) == ledger.canonical(continuation_third_origin())
+            and value["third_public_clients"] == THIRD_CLIENTS, "continuation-three-history-qualification")
+    previous = value["previous_qualification"]
+    require(type(previous) is dict and type(previous.get("schema")) is int and previous["schema"] == 2
+            and ledger.digest(previous) == TWO_HISTORY_QUALIFICATION, "continuation-two-history-seal")
+    counts = validate_continuation_qualification(previous)
+    encoded = value["no_work_receipt_b64"]
+    require(type(encoded) is str and len(encoded) <= 16384, "continuation-third-no-work-bound")
+    raw = base64.b64decode(encoded, validate=True)
+    require(type(THIRD_NO_WORK) is str and hashlib.sha256(raw).hexdigest() == THIRD_NO_WORK,
+            "continuation-third-no-work-seal")
+    observed = engine_policy._keys(identity.decode_json(raw), {"rc", "observed", "stderr_bytes"})
+    require(type(observed["rc"]) is int and observed["rc"] == 0
+            and type(observed["stderr_bytes"]) is int and observed["stderr_bytes"] == 0,
+            "continuation-third-native-no-work")
+    row = engine_policy._keys(observed["observed"], {"schema", "state", "at", "boot_id", "machine_id",
+        "bootstrap_sha256", "current_core_sha256", "counts", "nonce_history_absence_claimed",
+        "operator_raw_ledger_or_signing_key_read_export_or_hash", "third_attempt", "third_head",
+        "third_public_clients", "third_run", "probe_sent_no_challenge_or_job_request",
+        "product_store_validation_and_lease_ids_only", "test_state_reset_or_cleanup_performed"})
+    require(type(row["schema"]) is int and row["schema"] == 1
+            and row["state"] == "ACTUAL_THIRD_3D84_PRODUCT_STORE_AND_CATALOGUES_EMPTY_NO_LEASE"
+            and type(row["at"]) in (int, float) and 1794537761 <= row["at"] < 2**63
+            and type(row["third_run"]) is int and row["third_run"] == THIRD_RUN
+            and type(row["third_attempt"]) is int and row["third_attempt"] == 1
+            and row["third_head"] == THIRD_MAIN and row["third_public_clients"] == THIRD_CLIENTS
+            and row["nonce_history_absence_claimed"] is False
+            and row["operator_raw_ledger_or_signing_key_read_export_or_hash"] is False
+            and row["probe_sent_no_challenge_or_job_request"] is True
+            and row["product_store_validation_and_lease_ids_only"] is True
+            and row["test_state_reset_or_cleanup_performed"] is False, "continuation-third-no-work-observation")
+    require(ledger.canonical(row["counts"]) == ledger.canonical(counts), "continuation-same-empty-catalogues")
+    native = engine_policy._keys(value["native_third"], {"origin", "actor", "jobs"})
+    require(ledger.canonical(native["origin"]) == ledger.canonical(continuation_third_origin())
+            and native["actor"] == {"login": "litroc", "id": 76040632, "type": "User"}
+            and type(native["jobs"]) is list and len(native["jobs"]) == 24, "continuation-qualified-native-third")
+    ids = set()
+    expected = {job["job_id"]: job for job in continuation_third_origin()["jobs"]}
+    for job in native["jobs"]:
+        engine_policy._keys(job, {"id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion"})
+        require(type(job["id"]) is int and job["id"] > 0 and job["id"] not in ids
+                and type(job["run_id"]) is int and job["run_id"] == THIRD_RUN
+                and type(job["run_attempt"]) is int and job["run_attempt"] == 1 and job["head_sha"] == THIRD_MAIN
+                and job["status"] == "completed" and type(job["name"]) is str and type(job["conclusion"]) is str,
+                "continuation-qualified-third-jobs")
+        if job["id"] in expected:
+            require(job["name"] == expected[job["id"]]["name"] and job["conclusion"] == "failure",
+                    "continuation-qualified-third-physical-job")
+        ids.add(job["id"])
+    require(ids >= expected.keys(), "continuation-third-jobs-missing")
+    return counts
+
+
+def three_history_continuation_qualification(previous_qualification, run, inventory, checks, commit,
+                                           no_work_raw, third_public_clients):
+    """Pure fixed-three assembly; Root sealing and live native proofs remain mandatory."""
+    require(type(no_work_raw) is bytes and len(no_work_raw) <= 12288, "continuation-third-no-work-bound")
+    value = {"schema": 3, "purpose": "g06-three-history-runtime-failure-no-work",
+        "previous_qualification": previous_qualification, "third": continuation_third_origin(),
+        "native_third": third_native_projection(run, inventory, checks, commit),
+        "no_work_receipt_b64": base64.b64encode(no_work_raw).decode("ascii"),
+        "third_public_clients": third_public_clients}
     validate_continuation_qualification(value)
     return value
 

@@ -142,6 +142,7 @@ def _selector(connected):
     return value["cell"], value["operation"]
 
 
+@identity._diagnostic_step("bootstrap-authentication")
 def _authentication(connected, operation, nonce, seconds):
     value = _read(connected, MAX_AUTH, seconds)
     fields = {"schema", "operation", "nonce", "token", "api_token"}
@@ -320,9 +321,11 @@ class RuntimeRPC:
             # or unverified local stop/paired withdrawal. No fabricated stop.
             self._stop_remote_after_abort(store, lease_id, selector)
 
+    @identity._diagnostic_request(reuse=True)
     def handle(self, connected):
         return self._handle_selected(connected, None)
 
+    @identity._diagnostic_step("runtime-selected")
     def _handle_selected(self, connected, selection):
         # Selection is only a locator parsed by the fixed bootstrap entry.
         # Fresh normal native authentication below grants all actual authority.
@@ -542,7 +545,8 @@ class RuntimeRPC:
             if exported is not None:
                 _stream(connected, lease_id, exported)
             return outcome
-        except Exception:
+        except Exception as error:
+            identity._diagnostic_failed("runtime-selected", error)
             if accepted and store is not None and not retention_attempted:
                 # An error/failed terminal send NEVER abandons an original
                 # child. No replay, replacement Popen or guessed wait status.
@@ -594,6 +598,7 @@ class BootstrapRuntimeRPC:
         finally:
             os.close(directory)
 
+    @identity._diagnostic_step("observer")
     def _observe(self, connected, bootstrap, selector, operation):
         from . import operating_custody, run_factory
         challenge = run_factory.challenge_bootstrap(connected, bootstrap, selector)
@@ -650,6 +655,7 @@ class BootstrapRuntimeRPC:
             _write(connected, outcome)
             return outcome
 
+    @identity._diagnostic_request(reuse=True)
     def handle(self, connected):
         from . import run_factory
         operation, handed_off, staging = None, False, False
@@ -695,7 +701,8 @@ class BootstrapRuntimeRPC:
                 "lease_created": False}
             _write(connected, result)
             return result
-        except Exception:
+        except Exception as error:
+            identity._diagnostic_failed("bootstrap", error)
             if handed_off:
                 return {"type": "failure"}  # Inner dispatcher owns the sole reply.
             failure = {"schema": 2, "type": "failure", "operation": operation,
