@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - wait for the original verified empty engine graph before returning operating custody,
+    so the next case retains its normal capacity admission requirements.

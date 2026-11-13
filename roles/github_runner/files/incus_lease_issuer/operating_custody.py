@@ -550,12 +550,15 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
             "native_acceptance": False}
 
 
-def operating_outcome(root_config_path, expected_sha256, registry, selector, store, lease_id, *, retained=False):
+def operating_outcome(root_config_path, expected_sha256, registry, selector, store, lease_id, *, retained=False, session=None):
     """Closed-case negative proof, never a business quality/PASS receipt."""
     from . import cell_contract, incus_admin, incus_mutation, network_fence, operating_cells, root_session
+    from contextlib import nullcontext
     require(type(retained) is bool, "operating-outcome-purpose")
-    with root_session._session(*_preparation_reference(root_config_path, expected_sha256)) as session:
+    reference = _preparation_reference(root_config_path, expected_sha256)
+    with (root_session._session(*reference) if session is None else nullcontext(session)) as session:
         config = root_session._require_session(session)
+        require((config.path, config.sha256) == reference, "operating-outcome-session-domain")
         owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
         descriptor = identity.decode_json(owner.engine_descriptor_bytes)
         env = descriptor["environment"]
