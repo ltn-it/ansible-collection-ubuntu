@@ -432,6 +432,16 @@ class RootAdmissionBridgeTests(unittest.TestCase):
                     admission._require_native(proof, server, self.policy)
         self.assertEqual((self.store_path / "state.json").read_bytes(), before)
 
+    def test_v2_native_proof_must_remain_fresh_after_full_worker_reacquisition(self):
+        body = self.admit_body(self.challenge())
+        with _pair() as (server, client):
+            proof = admission.verify_runtime_native(server, self.policy, body["nonce"], body["token"], body["api_token"])
+            before = self.collected.call_count
+            with mock.patch.object(admission.time, "monotonic", side_effect=[proof.until - 1, proof.until + .01]):
+                with self.assertRaisesRegex(Denied, "runtime-native-proof-expired"):
+                    admission._require_native(proof, server, self.policy)
+            self.assertEqual(self.collected.call_count, before + 1)
+
     def test_v2_native_proof_reacquires_worker_and_rejects_policy_or_control_drift(self):
         body = self.admit_body(self.challenge())
         with _pair() as (server, client):

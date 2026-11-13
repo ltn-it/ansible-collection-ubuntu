@@ -100,7 +100,13 @@ class CollectorCompositionTests(unittest.TestCase):
         self.proof = installation.InstallationProof(
             install.root, f.policy.main, f.policy.node, f.policy.listener, f.policy.worker,
             MappingProxyType({install.root + "/runsvc.sh": "e" * 64}), MappingProxyType({}), (),
-            (install.root + "/_diag",), install.manifest_path, "f" * 64, "1" * 64, "2.338.2")
+            (install.root + "/_diag",), install.manifest_path, "f" * 64, "1" * 64, "2.338.2",
+            MappingProxyType({install.root + "/runsvc.sh": installation.TrustedFile(
+                install.root + "/runsvc.sh", 1, 42, "e" * 64, 123)}),
+            MappingProxyType({install.root + "/runsvc.sh": (1, 42, 0o100644, 0, 0, 1, 123, 0, 0)}),
+            MappingProxyType({".": (1, 41, 0o40755, 0, 0, 2, 4096, 0, 0),
+                "runsvc.sh": (1, 42, 0o100644, 0, 0, 1, 123, 0, 0)}),
+            MappingProxyType({"_diag": (1, 43, 0o40700, 2101, 2101)}))
         self.peer = kernel.Peer(106, 2101, 2101)
 
     def compose(self, **changes):
@@ -127,9 +133,19 @@ class CollectorCompositionTests(unittest.TestCase):
         # verifier executes. This is explicitly not systemd/AppArmor proof.
         result, controls, chain, closure = self.compose()
         self.assertEqual((result.pid, result.start_ticks, result.runner_id, result.uid), (104, 10400, 61, 2101))
+        for call in closure.call_args_list:
+            self.assertEqual({key: call.args[4][key] for key in self.proof.files}, dict(self.proof.trusted_files))
+        self.assertEqual(len({id(call.args[5]) for call in closure.call_args_list}), 1)
+        self.assertIs(closure.call_args_list[0].args[5].proof, self.proof)
         self.assertEqual(chain.call_count, 2)
         self.assertEqual(controls.call_count, 2)
         self.assertEqual([call.args[0] for call in closure.call_args_list], [104, 103, 102, 101] * 2)
+
+    def test_missing_or_partial_same_call_stock_file_evidence_is_not_reusable(self):
+        for changed in (replace(self.proof, trusted_files=MappingProxyType({})),
+                        replace(self.proof, file_stamps=MappingProxyType({}))):
+            with self.subTest(changed=changed), self.assertRaises(Denied):
+                self.compose(proof=[changed, changed])
 
     def test_peer_boot_service_or_manifest_change_denies(self):
         cases = ({"peer": [self.peer, replace(self.peer, pid=107)]},

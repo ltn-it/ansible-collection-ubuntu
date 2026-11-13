@@ -49,6 +49,8 @@ MAX_EVIDENCE_FILES = 10000
 MAX_EVIDENCE_FILE_BYTES = 256 * 1024 ** 2
 MAX_EVIDENCE_TOTAL_BYTES = 512 * 1024 ** 2
 FRAME_SECONDS = 5
+AUTHENTICATION_IDLE_SECONDS = 60
+INITIAL_AUTH_CAPABILITY = "initial-auth-idle-v1"
 sys.dont_write_bytecode = True
 
 
@@ -182,7 +184,7 @@ def _authenticated_reply(connected):
     # Native GitHub/Root authentication may occupy its sealed <=60s allowance.
     # Idle wait is distinct from the five-second bounded frame-read deadline;
     # neither extends authorization, the lease or a Root transition budget.
-    ready, _, _ = select.select([connected], [], [], 60)
+    ready, _, _ = select.select([connected], [], [], AUTHENTICATION_IDLE_SECONDS)
     require(ready)
     return _receive(connected)
 
@@ -221,15 +223,17 @@ def _close(connection):
     os.close(connection[2])
 
 
-def check():
+def check(required_capability=None):
     """Local config/code/Root-peer prerequisites only; no challenge/admission."""
     connection = None
     try:
-        require(sys.platform == "linux")
+        require(sys.platform == "linux" and required_capability in {None, INITIAL_AUTH_CAPABILITY})
         _authentication()
         connection = _connect()
         _stable(connection)
-        return {"schema": 2, "operation": "check", "state": "local-prerequisites-only"}
+        return {"schema": 2, "operation": "check", "state": "local-prerequisites-only",
+                "capabilities": [INITIAL_AUTH_CAPABILITY],
+                "authentication_idle_seconds": AUTHENTICATION_IDLE_SECONDS, "frame_seconds": FRAME_SECONDS}
     except Exception:
         raise ClientDenied("incus-runtime-client-denied") from None
     finally:
@@ -267,7 +271,9 @@ def _authenticate(selector, operation, lease_id=None, *, artifact=None):
             require(type(locator) is str and HEX.fullmatch(locator))
             message["configuration"] = locator
         connected.sendall(_frame(message, 1024))
-        challenge = _receive(connected)
+        # Root collects complete installed/process evidence before issuing its
+        # nonce. Reuse the existing auth idle wait; frame/nonce deadlines stay fixed.
+        challenge = _authenticated_reply(connected)
         _failure(challenge, operation)
         intake = challenge.get("phase") == "intake"
         observer = challenge.get("phase") == "observer"
@@ -1149,7 +1155,8 @@ def main(argv=None):
             raise ClientDenied("incus-runtime-client-denied")
     parser = Parser(add_help=False)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("check", add_help=False)
+    check_parser = sub.add_parser("check", add_help=False)
+    check_parser.add_argument("--require-capability", choices=(INITIAL_AUTH_CAPABILITY,))
     run = sub.add_parser("run-cell", add_help=False)
     run.add_argument("--selector", required=True)
     profile = sub.add_parser("run-profile", add_help=False)
@@ -1174,10 +1181,11 @@ def main(argv=None):
         supplied = sys.argv[1:] if argv is None else argv
         limit = 11 if supplied and supplied[0] == "record-upload" else (7 if supplied and supplied[0] in {"run-profile", "observe-profile"} else 5)
         require(len(supplied) <= limit and all(supplied.count(flag) <= 1 for flag in
-            ("--selector", "--lease-id", "--profile", "--scenario", "--target", "--artifact-id", "--artifact-digest", "--case")))
+            ("--selector", "--lease-id", "--profile", "--scenario", "--target", "--artifact-id", "--artifact-digest",
+             "--case", "--require-capability")))
         args = parser.parse_args(supplied)
         if args.command == "check":
-            result = check()
+            result = check(args.require_capability)
         elif args.command == "run-operating":
             result = run_operating(args.case)
         elif args.command == "observe-operating":

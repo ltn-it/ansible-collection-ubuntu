@@ -133,6 +133,11 @@ class RootInstallationFilesystemTests(unittest.TestCase):
         self.assertEqual(proof.worker.inode, (self.root / "bin/Runner.Worker").stat().st_ino)
         self.assertEqual(proof.files[str(self.root / ".runner")],
                          hashlib.sha256((self.root / ".runner").read_bytes()).hexdigest())
+        self.assertEqual(set(proof.trusted_files), set(proof.files))
+        self.assertEqual(set(proof.file_stamps), set(proof.files))
+        for path, trusted in proof.trusted_files.items():
+            self.assertEqual(trusted, installation.trusted_file(path))
+            self.assertEqual(proof.file_stamps[path], installation._stamp(Path(path).stat()))
         self.assertEqual(proof.package_sha256, "a" * 64)
         self.assertEqual(dict(proof.symlinks), {})
         self.assertEqual(proof.runtime_directories, (str(self.runtime),))

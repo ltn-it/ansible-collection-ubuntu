@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 import base64
 import os
 import re
@@ -45,6 +46,7 @@ class _Configuration:
     cleanup_timeout_seconds: int
     capture: MappingProxyType
     capacity: MappingProxyType | None = None
+    initial_transition_minimum_seconds: int | None = None
 
 
 def _root():
@@ -74,7 +76,8 @@ def _configuration(path, sha):
     required = {"schema", "registry_path", "registry_sha256", "preparation_config_path",
         "preparation_config_sha256", "authentication_timeout_seconds", "initial_transition_timeout_seconds",
         "heartbeat_lead_seconds", "cleanup_timeout_seconds", "capture"}
-    engine_policy._keys(data, required | ({"capacity"} if "capacity" in data else set()))
+    optional = {"capacity", "initial_transition_minimum_seconds"} & set(data)
+    engine_policy._keys(data, required | optional)
     capacity = _capacity_policy(data["capacity"]) if "capacity" in data else None
     require(type(data["schema"]) is int and data["schema"] == 2, "runtime-config-schema")
     for key in ("registry_path", "preparation_config_path"):
@@ -84,6 +87,9 @@ def _configuration(path, sha):
     for key, ceiling in (("authentication_timeout_seconds", 60), ("initial_transition_timeout_seconds", 300),
                          ("heartbeat_lead_seconds", 120), ("cleanup_timeout_seconds", 1800)):
         engine_policy._integer(data[key], 1, ceiling)
+    if "initial_transition_minimum_seconds" in data:
+        engine_policy._integer(data["initial_transition_minimum_seconds"], 1,
+                               data["initial_transition_timeout_seconds"])
     capture = engine_policy._keys(data["capture"], {"stdout_limit", "stderr_limit", "total_limit",
                                                    "max_total_evidence_bytes", "max_members", "max_member_bytes"})
     for key in ("stdout_limit", "stderr_limit"):
@@ -94,6 +100,28 @@ def _configuration(path, sha):
     engine_policy._integer(capture["max_member_bytes"], 1, capture["max_total_evidence_bytes"])
     return _Configuration(path, sha, **{key: value for key, value in data.items() if key not in {"schema", "capture", "capacity"}},
                           capture=MappingProxyType(dict(capture)), capacity=capacity)
+
+
+
+def _initial_transition_budget(config, valid_until, now):
+    """Reduce a Root-sealed maximum; never extend signed authorization.
+
+    Absent minimum preserves the legacy full-maximum requirement. A separately
+    reviewed explicit floor authorizes a shorter bounded initialization attempt,
+    not a promise that the complete native setup will finish within that floor.
+    """
+    require(type(config) is _Configuration and type(valid_until) is int
+            and type(now) in {int, float} and math.isfinite(now), "runtime-initial-budget-input")
+    maximum = config.initial_transition_timeout_seconds
+    minimum = config.initial_transition_minimum_seconds
+    minimum = maximum if minimum is None else minimum
+    engine_policy._integer(maximum, 1, 300)
+    engine_policy._integer(minimum, 1, maximum)
+    # Keep the existing 31-second authorization reserve and one further second
+    # for transition bookkeeping/unwind before the signed absolute boundary.
+    effective = min(maximum, math.floor(valid_until - now - 31 - 1))
+    require(effective >= minimum, "runtime-initial-authorization-budget")
+    return effective, valid_until - 31
 
 
 def _read(connected, maximum, seconds):
@@ -374,12 +402,9 @@ class RuntimeRPC:
                     # The client can renew 30 seconds before authorization expires.
                     # Preparation holds the Root session, so reserve that lead
                     # outside the full initial transition before admitting effects.
-                    initial_timeout = self._config.initial_transition_timeout_seconds
-                    # Leave one second for the session to unwind before renewal.
-                    preparation_deadline = who.valid_until - 31
-                    require(time.time() + initial_timeout < preparation_deadline
-                            and who.valid_until <= selected.deadline,
-                            "runtime-initial-authorization-budget")
+                    initial_timeout, preparation_deadline = _initial_transition_budget(
+                        self._config, who.valid_until, time.time())
+                    require(who.valid_until <= selected.deadline, "runtime-initial-authorization-budget")
                     lease_id = store.runtime_prepare(native.nonce, current_worker, who,
                         policy_sha256=selected.custody_policy_sha256, cell_sha256=selected.cell_sha256,
                         deadline=selected.deadline, identity_policy_sha256=identity.policy_digest(selected.identity))

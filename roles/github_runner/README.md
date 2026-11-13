@@ -557,6 +557,29 @@ or signing. The deadline is the earlier of the native job's reviewed deadline
 and the original fixed Root lease window. Reusing a configuration cannot reset
 that deadline, and the same check run cannot acquire a second lease.
 
+The client capability check
+`incus-runtime-client check --require-capability initial-auth-idle-v1`
+reports only local prerequisites. It does not send a challenge or establish
+remote health or authorization. Initial authentication may wait up to the
+existing 60-second idle bound; individual frames remain bounded by five seconds.
+
+Root policy may explicitly seal `initial_transition_minimum_seconds` between one
+and the configured initial maximum. Without it, the minimum equals the maximum.
+Before admitting a lease, Root reduces the initial allowance to the smaller of
+the configured maximum and the signed authorization remainder, retaining the
+31-second reserve and a further unwind second. Too little remaining allowance
+denies preparation. A selected minimum is an operator policy, not evidence that
+native initialization will finish within it; jobs cannot override either bound.
+
+A closed two-history operating continuation retains both authenticated failed
+Main-run histories and their Root-private no-work qualification. Each opaque
+native proof verifies both historical terminal projections once, while every
+refresh still checks current assignment, sealed controls and original absence.
+The exact successor run/attempt fence applies to all five cells and observers;
+it neither resets history nor permits another attempt. After genuine pilot
+acceptance, removing that temporary fence requires an explicit guarded Root
+configuration successor before ordinary future Main runs can use the service.
+
 Physical execution leaves destruction pending. Its preliminary evidence keeps
 literal destruction `pending`, final eligibility false and actual raw test and
 capture outcomes. Execution CLI exit zero is not final quality acceptance. Root

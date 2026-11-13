@@ -11,9 +11,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
 import os
+import pwd
 from pathlib import PurePosixPath
 import re
 import stat
+from types import MappingProxyType
 
 from .identity import Denied, require
 from . import installation, kernel, service, worker
@@ -28,6 +30,8 @@ FILE = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 JIT_NAME = "/memfd:doublemapper (deleted)"
 JIT_PERMISSIONS = frozenset({"---s", "r-xs", "rw-s"})
 MAX_PROCESS_FDS = 4096
+IO_URING_NAME = "anon_inode:[io_uring]"
+IO_URING_OFFSETS = (0, 0x10000000)
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,8 @@ class MappedFile:
     minor: int
     inode: int
     jit: bool = False
+    io_uring: bool = False
+    offsets: tuple[int, ...] = ()
 
 
 def parse_maps(raw, *, role=None):
@@ -57,7 +63,7 @@ def parse_maps(raw, *, role=None):
     except UnicodeError:
         raise Denied("invalid-process-maps") from None
     require(0 < len(lines) <= MAX_MAPPINGS, "invalid-process-maps")
-    found = {}
+    found, ring_offsets = {}, {}
     for line in lines:
         columns = line.split(None, 5)
         require(5 <= len(columns) <= 6, "invalid-process-maps")
@@ -75,19 +81,33 @@ def parse_maps(raw, *, role=None):
                     "unsupported-anonymous-mapping")
             continue
         major, minor = (int(part, 16) for part in device.split(":"))
-        jit = path == JIT_NAME
-        if jit:
+        jit, ring = path == JIT_NAME, path == IO_URING_NAME
+        if ring:
+            require(role == "node" and permissions == "rw-s" and major == 0 and minor > 0,
+                    "unsupported-io-uring-mapping")
+            position = int(offset, 16)
+            key = (path, major, minor, number)
+            offsets = ring_offsets.setdefault(key, set())
+            require(position in IO_URING_OFFSETS and position not in offsets, "unsupported-io-uring-offsets")
+            offsets.add(position)
+        elif jit:
             require(role in {"listener", "worker"} and permissions in JIT_PERMISSIONS
                     and (major, minor) == (0, 1), "unsupported-jit-mapping")
         else:
             require(worker.absolute_path(path) and not any(c.isspace() for c in path)
                     and "\\" not in path and "memfd:" not in path and not path.endswith("(deleted)"),
                     "unsupported-file-mapping")
-        record = MappedFile(path, major, minor, number, jit)
-        require(path not in found or found[path] == record, "mapping-backing-changed")
-        found[path] = record
+        record = MappedFile(path, major, minor, number, jit, ring)
+        key = (path, major, minor, number) if ring else path
+        require(key not in found or found[key] == record, "mapping-backing-changed")
+        found[key] = record
         require(len(found) <= MAX_NAMED_FILES, "process-map-limit")
-    return tuple(sorted(found.values(), key=lambda row: row.path))
+    for key, offsets in ring_offsets.items():
+        require(offsets == set(IO_URING_OFFSETS), "incomplete-io-uring-mapping")
+        value = found[key]
+        found[key] = MappedFile(value.path, value.major, value.minor, value.inode,
+                                io_uring=True, offsets=IO_URING_OFFSETS)
+    return tuple(sorted(found.values(), key=lambda row: (row.path, row.major, row.minor, row.inode)))
 
 
 def _retained_jit(process_fd, mapping, uid):
@@ -140,6 +160,66 @@ def _retained_jit(process_fd, mapping, uid):
             finally:
                 os.close(opened)
         require(False, "jit-backing-not-retained")
+    finally:
+        os.close(directory)
+
+
+
+def _retained_io_uring(process_fd, mapping, uid, gid):
+    """Retain only the managed Node's exact non-executable kernel data object.
+
+    An O_PATH handle never reads/submits ring data. The kernel-generated label,
+    map coordinates and repeated same-PID alias metadata must identify the same
+    type-zero anon inode; regular files, memfds and other anonymous types deny.
+    This is data backing evidence, never a substitute for sealed code hashes.
+    """
+    require(type(mapping) is MappedFile and mapping.io_uring and not mapping.jit
+            and mapping.path == IO_URING_NAME and mapping.major == 0 and mapping.minor > 0
+            and mapping.offsets == IO_URING_OFFSETS
+            and type(uid) is int and uid >= 0 and type(gid) is int and gid >= 0,
+            "invalid-io-uring-backing")
+    directory = os.open("fd", DIR, dir_fd=process_fd)
+    try:
+        names = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                require(len(names) < MAX_PROCESS_FDS
+                        and re.fullmatch(r"0|[1-9][0-9]{0,9}", entry.name), "process-fd-limit")
+                names.append(entry.name)
+        def stamp(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                    info.st_gid, info.st_nlink, info.st_size)
+        for name in names:
+            try:
+                target = os.readlink(name, dir_fd=directory)
+            except FileNotFoundError:
+                continue
+            require(len(target) <= 4096, "process-fd-link-limit")
+            if target != IO_URING_NAME:
+                continue
+            try:
+                before = os.stat(name, dir_fd=directory)
+            except FileNotFoundError:
+                continue
+            if (os.major(before.st_dev), os.minor(before.st_dev), before.st_ino) != (
+                    mapping.major, mapping.minor, mapping.inode):
+                continue
+            # Intentional kernel /proc/PID/fd alias of this same process only.
+            opened = os.open(name, os.O_PATH | os.O_CLOEXEC, dir_fd=directory)
+            try:
+                held = os.fstat(opened)
+                require(stat.S_IFMT(held.st_mode) == 0 and stat.S_IMODE(held.st_mode) == 0o600
+                        and held.st_uid == uid and held.st_gid == gid
+                        and held.st_nlink == 1 and held.st_size == 0, "untrusted-io-uring-backing")
+                current = os.stat(name, dir_fd=directory)
+                after = os.fstat(opened)
+                require(os.readlink(name, dir_fd=directory) == IO_URING_NAME
+                        and stamp(before) == stamp(held) == stamp(current) == stamp(after),
+                        "io-uring-backing-changed")
+                return stamp(after)
+            finally:
+                os.close(opened)
+        require(False, "io-uring-backing-not-retained")
     finally:
         os.close(directory)
 
@@ -207,48 +287,80 @@ def _view(root, path, *, directory=False):
         os.close(fd)
 
 
+def _same_regular_file(fd, host):
+    info = os.fstat(fd)
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+            and not stat.S_IMODE(info.st_mode) & 0o022
+            and not info.st_mode & (stat.S_ISUID | stat.S_ISGID)
+            and (info.st_dev, info.st_ino, info.st_size) == (host.device, host.inode, host.size),
+            "process-root-file-mismatch")
+
+
 def _same_file(root, path, host):
     with _view(root, path) as fd:
-        info = os.fstat(fd)
-        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
-                and not stat.S_IMODE(info.st_mode) & 0o022
-                and not info.st_mode & (stat.S_ISUID | stat.S_ISGID)
-                and (info.st_dev, info.st_ino, info.st_size) == (host.device, host.inode, host.size),
-                "process-root-file-mismatch")
+        _same_regular_file(fd, host)
 
 
-def _view_inventory(root, proof, uid):
-    """Compare closed startup/code names, including absence of .env/.path extras.
+@dataclass(frozen=True)
+class _TreeLayout:
+    proof: installation.InstallationProof
+    files: frozenset
+    directories: frozenset
+    links: MappingProxyType
+    runtime: frozenset
 
-    The mutable _diag directory contents are never opened as code evidence.
-    Recovery or other unrelated private mounts need not match the host view.
-    """
-    names = set(proof.files) | set(proof.symlinks) | set(proof.directories) | set(proof.runtime_directories)
-    for directory in (proof.runner_root, *proof.directories):
-        expected = {PurePosixPath(path).name for path in names if str(PurePosixPath(path).parent) == directory}
-        with _view(root, directory, directory=True) as fd:
-            with os.scandir(fd) as entries:
-                actual = set()
-                for entry in entries:
-                    actual.add(entry.name)
-                    require(len(actual) <= installation.MAX_ENTRIES, "process-root-inventory-limit")
-            require(actual == expected, "process-root-inventory-mismatch")
-    for path, target in proof.symlinks.items():
-        with _view(root, str(PurePosixPath(path).parent), directory=True) as fd:
-            info = os.stat(PurePosixPath(path).name, dir_fd=fd, follow_symlinks=False)
-            require(stat.S_ISLNK(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
-                    and os.readlink(PurePosixPath(path).name, dir_fd=fd) == target,
-                    "process-root-symlink-mismatch")
-    for path in proof.runtime_directories:
-        with _view(root, str(PurePosixPath(path).parent), directory=True) as fd:
-            child = os.open(PurePosixPath(path).name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                            dir_fd=fd)
-            try:
-                info = os.fstat(child)
-                require(stat.S_ISDIR(info.st_mode) and info.st_uid == uid
-                        and stat.S_IMODE(info.st_mode) == 0o700, "process-runtime-directory")
-            finally:
-                os.close(child)
+
+def _tree_layout(proof):
+    """Validate immutable same-call proof bindings once, never process snapshots."""
+    require(type(proof) is installation.InstallationProof
+            and all(type(value) is MappingProxyType for value in (proof.files, proof.symlinks,
+                proof.trusted_files, proof.file_stamps, proof.tree_stamps, proof.runtime_stamps))
+            and type(proof.directories) is tuple and type(proof.runtime_directories) is tuple,
+            "process-root-immutable-evidence")
+    prefix = proof.runner_root + "/"
+    require(type(proof) is installation.InstallationProof
+            and set(proof.trusted_files) == set(proof.files)
+            and set(proof.file_stamps) == set(proof.files), "process-root-file-evidence")
+    require(all(path.startswith(prefix) for path in set(proof.files) | set(proof.symlinks)
+                | set(proof.directories) | set(proof.runtime_directories)), "process-root-inventory-path")
+    expected_files = {path[len(prefix):] for path in proof.files}
+    expected_dirs = {path[len(prefix):] for path in proof.directories}
+    expected_links = {path[len(prefix):]: target for path, target in proof.symlinks.items()}
+    expected_runtime = {path[len(prefix):] for path in proof.runtime_directories}
+    require(set(proof.tree_stamps) == {"."} | expected_files | expected_dirs | set(expected_links)
+            and set(proof.runtime_stamps) == expected_runtime, "process-root-tree-evidence")
+    require(all(type(stamp) is tuple and len(stamp) == 9
+                and all(type(part) is int for part in stamp) for stamp in proof.tree_stamps.values())
+            and all(type(stamp) is tuple and len(stamp) == 5
+                and all(type(part) is int for part in stamp) for stamp in proof.runtime_stamps.values()),
+            "process-root-tree-evidence")
+    for path, value in proof.trusted_files.items():
+        stamp = proof.file_stamps[path]
+        require(type(value) is installation.TrustedFile and value.path == path
+                and value.sha256 == proof.files[path] and type(stamp) is tuple and len(stamp) == 9
+                and (value.device, value.inode, value.size) == (stamp[0], stamp[1], stamp[6])
+                and stamp == proof.tree_stamps[path[len(prefix):]], "process-root-file-evidence")
+    return _TreeLayout(proof, frozenset(expected_files), frozenset(expected_dirs),
+                       MappingProxyType(expected_links), frozenset(expected_runtime))
+
+
+def _view_inventory(root, layout, uid):
+    """Fresh FD-anchored process tree scan; no namespace observations are cached."""
+    require(type(layout) is _TreeLayout, "process-root-layout")
+    proof = layout.proof
+    with _view(root, proof.runner_root, directory=True) as fd:
+        before = installation._stamp(os.fstat(fd))
+        require(before == proof.tree_stamps["."], "process-root-directory-changed")
+        files, directories, links, stamps, _, runtime = installation._inventory(
+            fd, proof.runner_root, hash_files=False, service_uid=uid)
+        require(set(files) == layout.files and directories == layout.directories and links == layout.links
+                and set(runtime) == layout.runtime, "process-root-inventory-mismatch")
+        require(stamps == proof.tree_stamps and runtime == proof.runtime_stamps,
+                "process-root-tree-changed")
+        require(installation._stamp(os.fstat(fd)) == before, "process-root-directory-changed")
+        # Reject path replacement instead of accepting only a detached retained FD.
+        with _view(root, proof.runner_root, directory=True) as confirmed:
+            require(installation._stamp(os.fstat(confirmed)) == before, "process-root-directory-changed")
 
 
 def _controls(policy):
@@ -270,8 +382,9 @@ def _controls(policy):
     return result
 
 
-def _closure(pid, snapshot, proof, policy, hosts):
+def _closure(pid, snapshot, proof, policy, hosts, layout):
     """Acquire actual maps, effective label, flag and root-view identity."""
+    require(type(layout) is _TreeLayout and layout.proof is proof, "process-root-layout-binding")
     total_host_bytes = sum(item.size for item in hosts.values())
 
     def host(path):
@@ -292,7 +405,8 @@ def _closure(pid, snapshot, proof, policy, hosts):
         require((before.pid, before.ppid, before.start_ticks)
                 == (snapshot.stat.pid, snapshot.stat.ppid, snapshot.stat.start_ticks), "collector-process-changed")
         role = ("listener" if snapshot.executable == proof.listener.path else
-                "worker" if snapshot.executable == proof.worker.path else None)
+                "worker" if snapshot.executable == proof.worker.path else
+                "node" if snapshot.executable == proof.node.path else None)
         mapped = parse_maps(kernel.bounded_file(fd, "maps", MAPS_LIMIT), role=role)
         require(any(item.path == snapshot.executable
                     and (item.major, item.minor, item.inode)
@@ -308,14 +422,15 @@ def _closure(pid, snapshot, proof, policy, hosts):
         # root is a deliberate /proc kernel magic-link exception, never a job path.
         root = os.open("root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd)
         try:
-            _view_inventory(root, proof, policy.service.installation.service_uid)
-            for path, digest in proof.files.items():
-                value = host(path)
-                require(value.sha256 == digest, "runner-file-changed")
-                _same_file(root, path, value)
+            _view_inventory(root, layout, policy.service.installation.service_uid)
             for path in (policy.profile_path, policy.config_path):
                 _same_file(root, path, host(path))
             for item in mapped:
+                if item.io_uring:
+                    account = pwd.getpwnam(policy.service.service_user)
+                    require(account.pw_uid == policy.service.installation.service_uid, "io-uring-service-user")
+                    _retained_io_uring(fd, item, account.pw_uid, account.pw_gid)
+                    continue
                 if item.jit:
                     _retained_jit(fd, item, policy.service.installation.service_uid)
                     continue
@@ -343,6 +458,7 @@ def collect_worker(connected_unix_socket, policy):
         proof = installation.verify_installation(install_policy)
         require(initial_service.service_uid == install_policy.service_uid
                 and proof.runner_root == install_policy.root, "collector-service-identity")
+        layout = _tree_layout(proof)
         boot = kernel.read_boot_id()
         first = kernel.read_chain(peer.pid, initial_service.main_pid)
         lineage = worker.LineagePolicy(initial_service.main_pid, install_policy.service_uid,
@@ -357,11 +473,16 @@ def collect_worker(connected_unix_socket, policy):
         order.append(current)
         require(len(order) == 4, "collector-service-layout")
         hosts = dict(controls)
-        closures = {pid: _closure(pid, first[pid], proof, policy, hosts) for pid in order}
+        # Only this call's completed fresh stock verification seeds its existing
+        # host cache. Namespace checks and the second full stock hash remain fresh.
+        require(set(proof.trusted_files) == set(proof.files)
+                and set(proof.file_stamps) == set(proof.files), "collector-stock-file-evidence")
+        hosts.update(proof.trusted_files)
+        closures = {pid: _closure(pid, first[pid], proof, policy, hosts, layout) for pid in order}
         second = kernel.read_chain(peer.pid, initial_service.main_pid)
         require(set(second) == set(first), "collector-lineage-changed")
         for pid in order:
-            require(_closure(pid, second[pid], proof, policy, hosts) == closures[pid], "collector-maps-changed")
+            require(_closure(pid, second[pid], proof, policy, hosts, layout) == closures[pid], "collector-maps-changed")
         final_proof = installation.verify_installation(install_policy)
         require(final_proof == proof and service.read_service(policy.service) == initial_service
                 and _controls(policy) == controls, "collector-trust-changed")
