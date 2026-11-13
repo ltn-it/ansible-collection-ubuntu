@@ -19,6 +19,7 @@
       - github_runner_runtime_v2_configuration_sha256 is match('^[0-9a-f]{64}$')
       - github_runner_runtime_v2_socket_group is match('^[a-z_][a-z0-9_-]{0,31}$')
       - github_runner_runtime_v2_socket_group not in ['root', 'sudo', 'docker', 'incus', 'incus-admin']
+      - github_runner_runtime_v2_terminal_history is mapping
       - github_runner_runtime_v2_module_sha256 is mapping
       - github_runner_runtime_v2_module_sha256 | length > 0
       - github_runner_runtime_v2_client_sha256 is mapping

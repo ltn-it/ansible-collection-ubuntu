@@ -86,6 +86,8 @@ github_runner_runtime_v2_signing_public_key_hex: ""
 github_runner_runtime_v2_socket_group: ""
 github_runner_runtime_v2_module_sha256: {}
 github_runner_runtime_v2_client_sha256: {}
+# Exact nonsecret Root-observed terminal failures; empty keeps strict inactive/dead guards.
+github_runner_runtime_v2_terminal_history: {}
 github_runner_runtime_v2_operating_install: false
 github_runner_runtime_v2_watchdog_configuration_path: ""
 github_runner_runtime_v2_watchdog_configuration_sha256: ""

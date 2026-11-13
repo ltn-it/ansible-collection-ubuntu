@@ -3,6 +3,7 @@
 Systemd observations are modeled, never native service/host qualification.
 The fresh private launcher/package import is an actual isolated subprocess.
 """
+import copy
 import hashlib
 import json
 import os
@@ -38,6 +39,7 @@ class InstallationContractTests(unittest.TestCase):
             self.assertEqual(defaults["github_runner_runtime_v2_"+key], "")
         self.assertEqual(defaults["github_runner_runtime_v2_module_sha256"], {})
         self.assertEqual(defaults["github_runner_runtime_v2_client_sha256"], {})
+        self.assertEqual(defaults["github_runner_runtime_v2_terminal_history"], {})
         main = (ROLE / "tasks/main.yml").read_text()
         self.assertLess(main.index("runtime_v2.yml"), main.index("Ensure GitHub runner packages"))
         self.assertIn("github_runner_runtime_v2_install or github_runner_runtime_v2_operating_install", main)
@@ -51,6 +53,9 @@ class InstallationContractTests(unittest.TestCase):
         self.assertLess(next(i for i,t in enumerate(changes) if "before copying" in t["name"]),
                         next(i for i,t in enumerate(changes) if "ansible.builtin.file" in t))
         self.assertIn("install_probe.py.j2", changes[-1]["ansible.builtin.command"]["argv"][4])
+        probes = [task["ansible.builtin.command"]["argv"] for task in changes if "ansible.builtin.command" in task]
+        self.assertEqual(len(probes), 2)
+        self.assertTrue(all(argv[-1] == "{{ github_runner_runtime_v2_terminal_history | to_json }}" for argv in probes))
 
     def test_fixed_launcher_socket_and_service_contract(self):
         launcher = (TEMPLATES / "entry.py.j2").read_text()
@@ -140,6 +145,132 @@ class InstallationContractTests(unittest.TestCase):
              mock.patch.object(probe.sys,"argv",["probe"]):
             with mock.patch("sys.stderr"):
                 self.assertEqual(probe.main(),1)
+
+
+class TerminalHistoryInstallationTests(unittest.TestCase):
+    """Actual probe entry/FS, modeled systemd; no native-host acceptance claim."""
+    def setUp(self):
+        self.history = {"schema": 1, "source_machine_id": "a" * 32,
+                        "source_boot_id": "11111111-2222-4333-8444-555555555555", "units": {}}
+        for index in range(4):
+            unit = "lit-incus-runtime-v2@" + str(index) + "-1716702-995.service"
+            self.history["units"][unit] = {"Id": unit, "LoadState": "loaded", "ActiveState": "failed",
+                "SubState": "failed", "UnitFileState": "static", "FragmentPath": "/etc/systemd/system/lit-incus-runtime-v2@.service",
+                "DropInPaths": "", "InvocationID": str(index + 1) * 32, "Result": "exit-code", "ExecMainCode": "1",
+                "ExecMainStatus": "1", "MainPID": "0", "ControlPID": "0", "ControlGroup": "",
+                "Slice": probe.HISTORY_SLICE, "Job": "", "cgroup_state": "absent"}
+        self.live = copy.deepcopy(self.history["units"])
+        self.enumerated = list(self.live)
+        self.calls = []
+
+    def observed(self, values):
+        return SimpleNamespace(returncode=0, stdout="".join(key + "=" + value + "\n" for key, value in values.items()).encode())
+
+    def systemctl(self, argv, **_kwargs):
+        self.calls.append(argv)
+        if argv[1] == "list-units":
+            return SimpleNamespace(returncode=0, stdout="".join(unit + " loaded failed failed\n" for unit in self.enumerated).encode())
+        self.assertEqual(argv[1], "show")
+        unit = argv[argv.index("--no-pager") + 1]
+        if unit in self.live:
+            return self.observed({key: value for key, value in self.live[unit].items() if key != "cgroup_state"})
+        fragment = "lit-incus-runtime-v2@.service" if "@" in unit else unit
+        return self.observed({"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+            "UnitFileState": "static", "FragmentPath": "/etc/systemd/system/" + fragment, "DropInPaths": ""})
+
+    def guards(self, history=None):
+        with mock.patch.object(probe, "sealed", return_value=b"a" * 32), \
+             mock.patch.object(probe, "boot_id", return_value=self.history["source_boot_id"]), \
+             mock.patch.object(probe.os.path, "lexists", return_value=False), \
+             mock.patch.object(probe, "cgroup_state", return_value="absent"), \
+             mock.patch.object(probe.subprocess, "run", side_effect=self.systemctl):
+            probe.inactive(self.history if history is None else history)
+
+    def test_exact_four_failed_invocations_preserved_without_reset(self):
+        self.guards()
+        self.assertEqual(self.live, self.history["units"])
+        self.assertEqual(sum(argv[1] == "list-units" for argv in self.calls), 2)
+        self.assertTrue(all(argv[1] in {"show", "list-units"} for argv in self.calls))
+
+    def test_failed_default_extra_missing_and_duplicate_units_deny(self):
+        for units, history in [(list(self.live), {}), (list(self.live) + ["lit-incus-runtime-v2@9-22-995.service"], self.history),
+                               (list(self.live)[1:], self.history), (list(self.live) + [next(iter(self.live))], self.history)]:
+            with self.subTest(units=units, history=bool(history)):
+                self.enumerated = units
+                with self.assertRaises(ValueError):
+                    self.guards(history)
+
+    def test_reset_changed_invocation_pid_job_fragment_and_active_neighbors_deny(self):
+        unit = next(iter(self.live))
+        original = copy.deepcopy(self.live)
+        changes = [{"ActiveState": "inactive", "SubState": "dead"}, {"InvocationID": "b" * 32},
+                   {"MainPID": "12"}, {"ControlPID": "13"}, {"Job": "42"}, {"ActiveState": "active"},
+                   {"SubState": "running"}, {"Result": "success"}, {"ExecMainCode": "2"}, {"ExecMainStatus": "2"},
+                   {"DropInPaths": "/etc/systemd/system/foreign.conf"}, {"UnitFileState": "enabled"},
+                   {"FragmentPath": "/run/systemd/system/foreign.service"}, {"ControlGroup": "/foreign"}]
+        for change in changes:
+            with self.subTest(change=change):
+                self.live = copy.deepcopy(original)
+                self.live[unit].update(change)
+                with self.assertRaises(ValueError):
+                    self.guards()
+
+    def test_snapshot_machine_boot_schema_or_unknown_fields_deny(self):
+        unit = next(iter(self.history["units"]))
+        variants = [dict(self.history, source_machine_id="b" * 32),
+                    dict(self.history, source_boot_id="22222222-2222-4333-8444-555555555555"),
+                    dict(self.history, schema=True), dict(self.history, extra=True), dict(self.history, units={})]
+        for change in [{"MainPID": "1"}, {"ExecMainStatus": "0"}, {"InvocationID": "0" * 32},
+                       {"cgroup_state": "unknown"}, {"Id": "foreign"}, {"extra": "unknown"}]:
+            value = copy.deepcopy(self.history)
+            value["units"][unit].update(change)
+            variants.append(value)
+        for value in variants:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self.guards(value)
+
+    def test_live_cgroup_state_change_and_new_unit_during_observation_deny(self):
+        with mock.patch.object(probe, "cgroup_state", return_value="empty"):
+            # guards() supplies its own cgroup observation; exercise the unit reader directly.
+            unit = next(iter(self.live))
+            with mock.patch.object(probe.subprocess, "run", side_effect=self.systemctl):
+                with self.assertRaises(ValueError):
+                    probe.historical_state(unit, self.history["units"][unit])
+        with mock.patch.object(probe, "instances", side_effect=[set(self.live), set(self.live) | {"foreign"}]):
+            with self.assertRaises(ValueError):
+                self.guards()
+
+    def test_both_main_phases_consume_same_history_before_configuration_or_copy(self):
+        clients = {"incus-runtime-client": "a" * 64, "incus_job_client.py": "a" * 64}
+        loader = types.ModuleType("incus_lease_issuer.run_factory")
+        loader.load_bootstrap = lambda *_: SimpleNamespace(value={"preparation": {"signing_public_key_hex": "b" * 64}})
+        def sealed(path, *_args, **_kwargs):
+            if path == "/etc/machine-id":
+                return b"a" * 32
+            return json.dumps({"schema": 2, "socket_path": probe.SOCKET, "signing_public_key_hex": "b" * 64}).encode()
+        for phase in ("before", "after"):
+            argv = ["probe", phase, "/sealed/bootstrap.json", "a" * 64, "runtime", json.dumps({"unit.py": "a" * 64}),
+                    json.dumps(clients), "{}", "b" * 64, "null", json.dumps(self.history)]
+            with self.subTest(phase=phase), mock.patch.object(probe.sys, "argv", argv), \
+                 mock.patch.object(probe.os, "geteuid", return_value=0), mock.patch.object(probe, "sealed", side_effect=sealed), \
+                 mock.patch.object(probe, "boot_id", return_value=self.history["source_boot_id"]), \
+                 mock.patch.object(probe.os.path, "lexists", return_value=False), \
+                 mock.patch.object(probe, "cgroup_state", return_value="absent"), \
+                 mock.patch.object(probe.subprocess, "run", side_effect=self.systemctl), \
+                 mock.patch.object(probe, "configurations", return_value={"schema": 1}) as configuration, \
+                 mock.patch.object(probe, "directory", return_value=None), \
+                 mock.patch.object(probe, "installed_files") as installed, \
+                 mock.patch.dict(sys.modules, {"incus_lease_issuer.run_factory": loader}):
+                self.assertEqual(probe.main(), 0)
+                configuration.assert_called_once()
+                self.assertEqual(installed.call_args.args[-1], phase == "after")
+                # Exact expected history is reused after install; a reset cannot become success.
+                self.live[next(iter(self.live))]["InvocationID"] = "f" * 32
+                with mock.patch("sys.stderr"):
+                    self.assertEqual(probe.main(), 1)
+                self.assertEqual(configuration.call_count, 1)
+                self.live = copy.deepcopy(self.history["units"])
 
 
 class RealAnsibleInstallationBoundary(unittest.TestCase):
@@ -278,6 +409,44 @@ class RootInstalledRuntimeTests(unittest.TestCase):
             file.write_bytes(raw);selected["mail_sha256"]=hashlib.sha256(raw).hexdigest()
             with self.assertRaises(ValueError):probe.operating_configuration(selected)
         self.assertEqual(list(binding.iterdir()),[]);self.assertEqual(list(spool.iterdir()),[])
+
+    def test_real_cgroup_files_deny_pids_descendants_symlinks_and_partial_state(self):
+        root = self.root / "cgroups"
+        root.mkdir(mode=0o700)
+        unit = "lit-incus-runtime-v2@0-1716702-995.service"
+        relative = "system.slice/" + probe.HISTORY_SLICE + "/" + unit
+        selected = root / relative
+        selected.mkdir(parents=True, mode=0o700)
+        for directory in [selected.parent, selected.parent.parent]:
+            directory.chmod(0o700)
+        procs, events = selected / "cgroup.procs", selected / "cgroup.events"
+        procs.write_bytes(b""); events.write_bytes(b"populated 0\nfrozen 0\n")
+        original_directory = probe.directory
+        def mapped(path, missing=False):
+            self.assertTrue(path.startswith("/sys/fs/cgroup"))
+            return original_directory(str(root) + path[len("/sys/fs/cgroup"):], missing=missing)
+        with mock.patch.object(probe, "directory", side_effect=mapped):
+            self.assertEqual(probe.cgroup_state(unit), "empty")
+            for process_bytes, event_bytes in [(b"42\n", b"populated 0\nfrozen 0\n"),
+                                               (b"", b"populated 1\nfrozen 0\n"),
+                                               (b"", b"populated 0\nfrozen 1\n"),
+                                               (b"", b"populated 0\npopulated 0\nfrozen 0\n")]:
+                procs.write_bytes(process_bytes); events.write_bytes(event_bytes)
+                with self.assertRaises(ValueError):
+                    probe.cgroup_state(unit)
+            procs.write_bytes(b""); events.write_bytes(b"populated 0\nfrozen 0\n")
+            alternate = self.root / "events"; alternate.write_bytes(events.read_bytes())
+            events.unlink(); events.symlink_to(alternate)
+            with self.assertRaises(OSError):
+                probe.cgroup_state(unit)
+            events.unlink()
+            with self.assertRaises(OSError):
+                probe.cgroup_state(unit)
+            procs.unlink(); selected.rmdir()
+            self.assertEqual(probe.cgroup_state(unit), "absent")
+            selected.symlink_to(selected.parent, target_is_directory=True)
+            with self.assertRaises(OSError):
+                probe.cgroup_state(unit)
 
     def test_fixed_operating_launchers_import_real_private_package_without_effects(self):
         private=self.root/"operating-private";private.mkdir(mode=0o700)
