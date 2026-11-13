@@ -531,7 +531,10 @@ remain unchanged.
 HTTP acquisition handles a fully consumed standard-library response without
 reusing its closed socket. Premature Content-Length EOF still fails closed;
 chunk framing, archive size/hash, redirect origins and credential scopes retain
-their existing checks and deadlines. Local tests exercise real HTTP framing and
+their existing checks and deadlines. Acquisition records only allowlisted fixed
+reasons before the public sanitizing wrapper; an exact standard-library
+IncompleteRead becomes a fixed framing category without inspecting its body.
+Foreign errors remain unclassified. Local tests exercise real HTTP framing and
 the complete private stage/configuration/readback path with provider/archive IO
 modeled. That full path makes 26 fresh collector calls and 12 native-validation
 calls, including all post-discovery materialization checks. The original

@@ -6,3 +6,6 @@ bugfixes:
   - >-
     github_runner - add a fixed fourth-history continuation that preserves all original
     failed native runs and authenticated no-work evidence without renewing authority.
+  - >-
+    github_runner - retain fixed acquisition failure diagnostics before sanitizing public
+    errors, without inspecting exception text, partial bodies or credentials.
