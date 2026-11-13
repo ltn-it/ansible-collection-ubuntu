@@ -86,6 +86,14 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.record()["reason"], "stale-observation")
         self.assertNotIn("synthetic-secret", str(self.log.call_args_list))
 
+    def test_fixed_third_history_reason_is_allowed_without_reflecting_neighbors(self):
+        for reason, expected in (("continuation-third-native-drift", "continuation-third-native-drift"),
+                                 ("continuation-third-native-drift synthetic-secret", "unclassified")):
+            with self.subTest(reason=reason), identity._diagnostic_request():
+                identity._diagnostic_failed("native-histories", identity.Denied(reason))
+            self.assertEqual(self.record()["reason"], expected)
+        self.assertNotIn(b"synthetic-secret", self.log.call_args.args[0])
+
     def test_first_inner_error_survives_wrapping_with_one_terminal_record(self):
         @identity._diagnostic_step("collector")
         def inner():
