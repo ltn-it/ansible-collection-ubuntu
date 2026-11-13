@@ -700,6 +700,16 @@ Known stopped custody retains the full storage reservation. Unknown cleanup or
 unavailable original process proof quarantines it and does not release running
 capacity.
 
+The operating observer returns retained custody only after the original watchdog's
+engine-cache prune has a verified effect and its original graph is independently
+empty, with unchanged captures and exit provenance. Missing or unfinished prune
+proof waits within the existing observation deadline (at most 120 seconds); unknown
+or inconsistent proof holds the chain. The observer performs no pruning or other
+cleanup. Contention while entering the original Root lock waits within that same
+observation deadline; verified graph evidence and the receipt share one active
+Root session. Other errors hold the chain. VM custody remains four hours, and
+the next cell still requires fresh pool and engine capacity admission.
+
 The watchdog visits bounded fair pages and retires bindings only after checking
 the original sealed configuration and closed Root ledger. It uses the producer's
 fixed bindings directory; an empty alternative directory is not supervision.
