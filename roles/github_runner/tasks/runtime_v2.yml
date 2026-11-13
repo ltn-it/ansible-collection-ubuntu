@@ -138,6 +138,7 @@
           - "{{ github_runner_runtime_v2_assets | items2dict(key_name='path', value_name='sha256') | to_json }}"
           - "{{ github_runner_runtime_v2_signing_public_key_hex }}"
           - "{{ github_runner_runtime_v2_operating_probe | to_json }}"
+          - "{{ github_runner_runtime_v2_terminal_history | to_json }}"
       changed_when: false
       check_mode: false
       no_log: true
@@ -254,6 +255,7 @@
           - "{{ github_runner_runtime_v2_assets | items2dict(key_name='path', value_name='sha256') | to_json }}"
           - "{{ github_runner_runtime_v2_signing_public_key_hex }}"
           - "{{ github_runner_runtime_v2_operating_probe | to_json }}"
+          - "{{ github_runner_runtime_v2_terminal_history | to_json }}"
       changed_when: false
       no_log: true
       when: not ansible_check_mode
