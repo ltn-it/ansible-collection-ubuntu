@@ -19,6 +19,7 @@ import threading
 from types import MappingProxyType
 from typing import Mapping
 
+from . import identity
 from .identity import Denied, decode_json, require
 from .worker import ExecutablePolicy
 
@@ -444,6 +445,7 @@ def _inventory(root_fd, root, *, hash_files, service_uid):
     require(set(runtime) == {"_diag"}, "installation-runtime-missing")
     return files, directories, links, stamps, startup, runtime
 
+@identity._diagnostic_step("installation")
 def verify_installation(policy):
     """Acquire current root-owned FS evidence. Never consume caller snapshots."""
     _root()

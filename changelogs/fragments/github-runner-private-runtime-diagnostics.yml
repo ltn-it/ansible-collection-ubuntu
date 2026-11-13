@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - retain bounded private runtime failure stages and allowlisted
+    reason codes without logging credentials or changing admission behavior.

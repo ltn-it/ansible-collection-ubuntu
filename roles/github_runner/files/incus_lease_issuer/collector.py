@@ -17,6 +17,7 @@ import re
 import stat
 from types import MappingProxyType
 
+from . import identity
 from .identity import Denied, require
 from . import installation, kernel, service, worker
 
@@ -446,6 +447,7 @@ def _closure(pid, snapshot, proof, policy, hosts, layout):
     return mapped
 
 
+@identity._diagnostic_step("collector")
 def collect_worker(connected_unix_socket, policy):
     """Root IO only; no caller PID/snapshot, bypass flag, daemon or grant API."""
     require(os.geteuid() == 0, "root-collector-required")
@@ -490,5 +492,6 @@ def collect_worker(connected_unix_socket, policy):
         require(final_peer == peer, "collector-peer-changed")
         return worker.verify_lineage(lineage, peer_pid=peer.pid, peer_uid=peer.uid, boot_id=boot,
                                      snapshots=first, confirmed_snapshots=second, confirmed_boot_id=final_boot)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        identity._diagnostic_failed("collector", error)
         raise Denied("collector-acquisition-denied") from None

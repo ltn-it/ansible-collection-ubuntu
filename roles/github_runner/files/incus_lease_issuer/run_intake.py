@@ -62,6 +62,7 @@ class SealedRunSnapshot:
     snapshot: RootRunSnapshot
 
 
+@identity._diagnostic_step("intake-discovery")
 def _native_request(selected, who, api_token, deadline, seconds):
     """Derive acquisition locators from the checked Root policy/native API."""
     native = selected.identity
@@ -117,6 +118,7 @@ def _native_request(selected, who, api_token, deadline, seconds):
     return request
 
 
+@identity._diagnostic_step("snapshot-acquisition")
 def acquire_run_snapshot(proof, connected_socket, selected, token, api_token, *,
                          artifact_fd, source_fd, controller_fd):
     """Approved opaque-ticket boundary; no public request metadata or paths.
@@ -156,7 +158,8 @@ def acquire_run_snapshot(proof, connected_socket, selected, token, api_token, *,
         require(again[0] == worker and again[1] == who and time.monotonic() < deadline,
                 "intake-native-drift")
         return snapshot
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("snapshot-acquisition", error)
         raise Denied("intake-snapshot-held") from None
 
 
@@ -435,6 +438,7 @@ def _sealed_state_unchanged(stage, expected_sha):
     require(current == sealed["archive_stamps"], "intake-sealed-final-drift")
 
 
+@identity._diagnostic_step("intake-stage")
 def stage_run_snapshot(proof, connected_socket, selected, token, api_token):
     """Fresh native proof -> exclusive per-run stage or read-only exact reuse.
 
@@ -502,7 +506,8 @@ def stage_run_snapshot(proof, connected_socket, selected, token, api_token):
         finally:
             os.close(check)
         return SealedRunSnapshot(ROOT + "/" + name, stage_identity[0], stage_identity[1], receipt_sha, snapshot)
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("intake-stage", error)
         raise Denied("intake-stage-held") from None
     finally:
         for fd in fds:

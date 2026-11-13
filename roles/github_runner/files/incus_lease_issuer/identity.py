@@ -9,15 +9,21 @@ be supplied as the run/jobs arguments of the pure verification helper.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 import hashlib
 import json
 import math
+import os
 import re
+import socket
 import ssl
 import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from dataclasses import replace
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -33,6 +39,140 @@ WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml\Z")
 
 class Denied(ValueError):
     """Safe reason code only; never include token, key or HTTP response data."""
+
+
+_DIAGNOSTIC_STAGES = frozenset({
+    "bootstrap", "bootstrap-policy", "bootstrap-selector", "bootstrap-authentication",
+    "bootstrap-initial-native", "bootstrap-configuration", "bootstrap-final-native",
+    "collector", "installation", "native-controls", "native-worker", "native-assignment",
+    "native-current", "native-histories", "intake-stage", "intake-discovery",
+    "snapshot-acquisition", "snapshot-readback", "observer", "observer-lookup",
+    "observer-native", "runtime-selected",
+})
+_DIAGNOSTIC_REASONS = frozenset({
+    "bootstrap-challenge-expired", "bootstrap-native-denied", "bootstrap-native-drift",
+    "bootstrap-native-expired", "bootstrap-policy-changed", "bootstrap-workflow-sha",
+    "bootstrap-native-job", "collector-acquisition-denied", "collector-maps-changed",
+    "collector-process-changed", "collector-peer-changed", "collector-trust-changed",
+    "process-root-tree-changed", "process-root-inventory-mismatch", "process-root-file-mismatch",
+    "process-root-directory-changed", "process-diagnostics-enabled", "process-privilege-state",
+    "process-apparmor-profile", "jit-backing-changed", "io-uring-backing-changed",
+    "installation-filesystem", "installation-file-hash", "installation-tree-changed",
+    "installation-manifest-changed", "installation-root-changed", "installation-acquisition-denied", "installation-entry-changed", "installation-directory-changed",
+    "installation-inventory-limit", "installation-hash-workers-not-joined",
+    "https-read-failed", "https-status", "https-body-limit", "token-time", "invalid-signature",
+    "issuer-or-audience", "stale-observation", "native-run-mismatch", "native-job-assignment",
+    "native-job-cell-name", "native-check-job-join", "incomplete-job-inventory",
+    "current-protected-main", "native-reusable-workflow", "native-repository-mismatch",
+    "native-actor", "continuation-original-native-drift", "continuation-prior-native-drift",
+    "continuation-exact-current-native-tuple", "continuation-original-or-unknown-lease",
+    "intake-current-main", "intake-controller-main", "intake-controller-publication",
+    "intake-artifact-inventory", "intake-artifact-unique", "intake-artifact-digest",
+    "intake-memory-artifact-size", "intake-auth-budget", "intake-stage-native-drift",
+    "intake-snapshot-held", "intake-stage-held", "run-configuration-held",
+    "run-config-lookup-unique", "run-config-observer", "run-configuration-lookup-held", "runtime-observer-original-lease",
+    "runtime-observer-original-invocation", "runtime-bootstrap-selector", "ledger-busy",
+})
+
+
+@dataclass(frozen=True)
+class _Diagnostic:
+    wall: float
+    cpu: float
+    owner_pid: int
+    counts: tuple[tuple[str, int, int], ...] = ()
+    stage: str | None = None
+    reason: str = "unclassified"
+
+
+_DIAGNOSTIC: ContextVar[_Diagnostic | None] = ContextVar("lit_root_runtime_diagnostic", default=None)
+
+
+def _diagnostic_failed(stage, error):
+    """Capture only a fixed code before a wrapper discards the original error.
+
+    No exception formatting, cause traversal or caller data is permitted. State
+    is immutable: copied contexts cannot mutate the originating request record.
+    This record is observability only, never identity or admission evidence.
+    """
+    current = _DIAGNOSTIC.get()
+    if current is None or current.stage is not None or type(stage) is not str or stage not in _DIAGNOSTIC_STAGES:
+        return
+    reason = "unclassified"
+    if type(error) is Denied:
+        args = error.args
+        if len(args) == 1 and type(args[0]) is str and args[0] in _DIAGNOSTIC_REASONS:
+            reason = args[0]
+    _DIAGNOSTIC.set(replace(current, stage=stage, reason=reason))
+
+
+def _diagnostic_count(stage, completed):
+    current = _DIAGNOSTIC.get()
+    if current is None:
+        return
+    counts = {name: (started, finished) for name, started, finished in current.counts}
+    started, finished = counts.get(stage, (0, 0))
+    counts[stage] = (min(1024, started + (not completed)), min(1024, finished + completed))
+    _DIAGNOSTIC.set(replace(current, counts=tuple((name, *values) for name, values in sorted(counts.items()))))
+
+
+def _diagnostic_step(stage):
+    if type(stage) is not str or stage not in _DIAGNOSTIC_STAGES:
+        raise ValueError("unknown-private-diagnostic-stage")
+    def decorate(function):
+        @wraps(function)
+        def call(*args, **kwargs):
+            if _DIAGNOSTIC.get() is None:
+                return function(*args, **kwargs)
+            _diagnostic_count(stage, False)
+            try:
+                result = function(*args, **kwargs)
+            except Exception as error:
+                _diagnostic_failed(stage, error)
+                raise
+            _diagnostic_count(stage, True)
+            return result
+        return call
+    return decorate
+
+
+@contextmanager
+def _diagnostic_request(*, reuse=False):
+    """One Root AUTHPRIV terminal record; no public framing or policy change.
+
+    The existing journal attaches the real PID/UID/unit. Consumers must verify
+    that provenance; the JSON is not an authentication or acceptance receipt.
+    No durable request data or cross-request cache is introduced.
+    """
+    if reuse and _DIAGNOSTIC.get() is not None:
+        yield
+        return
+    token = _DIAGNOSTIC.set(_Diagnostic(time.monotonic(), time.process_time(), os.getpid()))
+    try:
+        yield
+    finally:
+        current = _DIAGNOSTIC.get()
+        _DIAGNOSTIC.reset(token)
+        if current is not None and current.stage is not None and current.owner_pid == os.getpid() and os.geteuid() == 0:
+            try:
+                import syslog
+                elapsed = lambda start, now: min(86400000, max(0, int((now - start) * 1000)))
+                message = {"schema": 1, "component": "incus-runtime-v2", "stage": current.stage,
+                    "reason": current.reason, "wall_ms": elapsed(current.wall, time.monotonic()),
+                    "cpu_ms": elapsed(current.cpu, time.process_time()), "counts": current.counts}
+                # One nonblocking datagram to the existing local journal socket.
+                # syslog.syslog() may block on a full queue; diagnostics must not
+                # extend a request's native deadline or hold its cleanup open.
+                priority = syslog.LOG_AUTHPRIV | syslog.LOG_ERR
+                payload = ("<" + str(priority) + ">lit-incus-runtime-v2: "
+                           + json.dumps(message, separators=(",", ":"))).encode("ascii")
+                with socket.socket(socket.AF_UNIX,
+                                   socket.SOCK_DGRAM | socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK) as output:
+                    output.sendto(payload, "/dev/log")
+            except Exception:
+                # Diagnostic transport failure cannot convert a denial to success
+                # or replace the original public response/exception.
+                pass
 
 
 def require(value, reason):
@@ -331,6 +471,7 @@ class HTTPSReader:
         return raw
 
 
+@_diagnostic_step("native-assignment")
 def verify_github_assignment(token, policy, *, audience, peer_uid, access_token, reader=None, clock=time.time):
     """Server-side entry: no caller-provided run, job, runner or JWKS snapshots.
 

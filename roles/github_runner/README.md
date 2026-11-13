@@ -478,6 +478,23 @@ missing-input behavior only. The unit tests also exercise a freshly copied
 private package through the isolated launcher; neither is a native service or
 VM acceptance claim. No executable live activation command is provided here.
 
+Failed runtime connections emit at most one private diagnostic message through
+the existing `AUTHPRIV` syslog facility. Its fixed prefix is
+`lit-incus-runtime-v2`; it contains only an allowlisted stage/reason,
+bounded elapsed CPU/wall milliseconds and bounded internal call counts. Raw
+exceptions, request fields, selectors, paths, OIDC/API credentials, nonces and
+claims are never included. Successful requests emit no failure message. An
+empty connection from the local prerequisite check may be recorded as a
+selector denial; that check is not a remote-health or admission probe.
+
+Read these messages through the host's private system journal. Verify the real
+Root UID, boot, PID and `lit-incus-runtime-v2@*.service` unit provenance attached
+by the journal before interpreting a message. Its JSON is diagnostic metadata,
+not an identity, admission, workload or operating-acceptance receipt. The public
+failure frames and fail-closed behavior remain unchanged if logging fails. The
+single local journal datagram is nonblocking; no
+diagnostic operation grants a retry, renews a deadline or changes a lease.
+
 ### Disabled bootstrap and operating observer preparation
 
 `github_runner_runtime_v2_bootstrap: true` selects an existing sealed bootstrap

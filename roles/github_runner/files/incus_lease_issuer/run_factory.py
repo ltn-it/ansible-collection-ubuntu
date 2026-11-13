@@ -193,6 +193,7 @@ def derive_selection(bootstrap, selector, caller_sha_locator, *, purpose="execut
         template["lease_seconds"], template["job_timeout_seconds"])
 
 
+@identity._diagnostic_step("native-worker")
 def _worker(connected, bootstrap):
     admission._socket(connected)
     value = collector.collect_worker(connected, bootstrap.collector)
@@ -203,6 +204,7 @@ def _worker(connected, bootstrap):
     return value
 
 
+@identity._diagnostic_step("native-controls")
 def _controls(bootstrap):
     require(load_bootstrap(bootstrap.path, bootstrap.sha256) == bootstrap, "bootstrap-policy-changed")
     controls = {"bootstrap_sha256": bootstrap.sha256, "stamp": list(bootstrap.file_stamp),
@@ -249,6 +251,7 @@ def _continuation_receipt(value):
     return descriptor, receipt, counts, stamp
 
 
+@identity._diagnostic_step("native-histories")
 def _continuation_original_native(get, *, prior=False):
     origin = operating_cells.continuation_prior_origin() if prior else operating_cells.continuation_origin()
     prefix = "/actions/runs/" + str(origin["run_id"])
@@ -346,6 +349,7 @@ def _continuation_origin_absent(bootstrap, qualified):
                     and who["reusable_sha"] == successor["reusable_sha"], "continuation-original-or-unknown-lease")
 
 
+@identity._diagnostic_step("native-current")
 def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
     admission._secret(token); admission._secret(api_token)
     controls = _controls(selected.bootstrap)
@@ -399,6 +403,7 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
     return worker, who, controls, stamp
 
 
+@identity._diagnostic_step("bootstrap-initial-native")
 def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_token, *, purpose="execution"):
     _root()
     try:
@@ -420,10 +425,12 @@ def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_to
             connected.fileno(), os.getpid(), threading.get_ident(), time.monotonic() + remaining, started)
         with _GUARD: _PROOFS.add(proof)
         return proof
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("bootstrap-initial-native", error)
         raise Denied("bootstrap-native-denied") from None
 
 
+@identity._diagnostic_step("bootstrap-final-native")
 def require_bootstrap_native(proof, connected, selected, token, api_token):
     _root()
     try:
@@ -441,7 +448,8 @@ def require_bootstrap_native(proof, connected, selected, token, api_token):
         remaining = min(600, int(proof.expires_monotonic - time.monotonic()), who.valid_until - int(time.time()) - 31)
         require(remaining > 0, "bootstrap-native-expired")
         return worker, who, remaining
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("bootstrap-final-native", error)
         raise Denied("bootstrap-native-denied") from None
 
 
@@ -578,6 +586,7 @@ def _build(directory, selected, who, snapshot, created_at, deadline):
         for fd in fds: os.close(fd)
 
 
+@identity._diagnostic_step("bootstrap-configuration")
 def create_run_configuration(proof, connected, bootstrap, selector, token, api_token, sealed_snapshot=None):
     """One immutable original-job config. Unknown/partial directories stay held."""
     _root()
@@ -627,7 +636,8 @@ def create_run_configuration(proof, connected, bootstrap, selector, token, api_t
         require_bootstrap_native(proof, connected, selected, token, api_token)
         require(_read_complete(directory)[0] == result, "run-config-final-drift")
         return result
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("bootstrap-configuration", error)
         raise Denied("run-configuration-held") from None
     finally:
         if root is not None: os.close(root)
@@ -642,6 +652,7 @@ def find_existing_execution_configuration(bootstrap, selector, execution_proof):
     return _find_existing_configuration(bootstrap, selector, execution_proof, purpose="execution")
 
 
+@identity._diagnostic_step("observer-lookup")
 def _find_existing_configuration(bootstrap, selector, observer_proof, *, purpose):
     """Read-only original-execution locator; caller freshly revalidates proof.
 
@@ -683,7 +694,8 @@ def _find_existing_configuration(bootstrap, selector, observer_proof, *, purpose
                 and connected.fileno() == observer_proof.fd and _worker(connected, bootstrap) == observer_proof.worker,
                 "run-config-observer")
         return found[0]
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("observer-lookup", error)
         raise Denied("run-configuration-lookup-held") from None
     finally:
         if root is not None: os.close(root)
