@@ -8,19 +8,12 @@
   when: not (incus_enabled | bool)
 
 - name: Reconcile Incus root subordinate ID allocation
-  ansible.builtin.lineinfile:
-    path: "{{ item }}"
-    regexp: "^{{ incus_root_idmap_owner | regex_escape }}:"
-    line: >-
-      {{ incus_root_idmap_owner }}:{{ incus_root_idmap_start | int }}:{{ incus_root_idmap_count | int }}
-    owner: root
-    group: root
-    mode: "0644"
-    create: true
+  ansible.builtin.include_tasks: root_idmap.yml
   loop:
     - "{{ incus_root_subuid_path }}"
     - "{{ incus_root_subgid_path }}"
-  notify: Restart Incus after subordinate ID changes
+  loop_control:
+    loop_var: incus_idmap_path
   when: incus_manage_root_idmap | bool
 
 - name: Ensure Incus packages are installed

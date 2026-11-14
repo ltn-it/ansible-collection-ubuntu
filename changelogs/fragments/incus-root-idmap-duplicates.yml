@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    incus - atomically reconcile exactly one subordinate ID declaration for the managed owner,
+    preserving unrelated entries and removing earlier short duplicates that prevented isolated container allocation.
