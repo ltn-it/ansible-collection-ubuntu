@@ -5,7 +5,12 @@
     follow: false
     get_checksum: false
     get_mime: false
-  register: incus_idmap_source
+  loop:
+    - "{{ incus_root_subuid_path }}"
+    - "{{ incus_root_subgid_path }}"
+  loop_control:
+    loop_var: incus_idmap_path
+  register: incus_idmap_sources
 
 - name: Require a regular subordinate ID file
   ansible.builtin.assert:
@@ -17,16 +22,24 @@
             and incus_idmap_source.stat.nlink | default(0) == 1)
     fail_msg: "Subordinate ID files must be regular files with one link."
     quiet: true
+  loop: "{{ incus_idmap_sources.results }}"
+  loop_control:
+    loop_var: incus_idmap_source
+    label: "{{ incus_idmap_source.incus_idmap_path }}"
 
 - name: Read existing subordinate ID declarations
   ansible.builtin.slurp:
-    src: "{{ incus_idmap_path }}"
-  register: incus_idmap_read
+    src: "{{ incus_idmap_source.incus_idmap_path }}"
+  loop: "{{ incus_idmap_sources.results }}"
+  loop_control:
+    loop_var: incus_idmap_source
+    label: "{{ incus_idmap_source.incus_idmap_path }}"
+  register: incus_idmap_reads
   when: incus_idmap_source.stat.exists
 
 - name: Atomically retain one configured owner declaration and unrelated lines
   ansible.builtin.copy:
-    dest: "{{ incus_idmap_path }}"
+    dest: "{{ incus_idmap_declaration.incus_idmap_source.incus_idmap_path }}"
     content: >-
       {{ incus_idmap_remaining
          ~ (incus_idmap_newline
@@ -38,9 +51,13 @@
     mode: "0644"
   vars:
     incus_idmap_newline: "\n"
-    incus_idmap_previous: "{{ incus_idmap_read.content | default('') | b64decode }}"
+    incus_idmap_previous: "{{ incus_idmap_declaration.content | default('') | b64decode }}"
     incus_idmap_remaining: >-
       {{ incus_idmap_previous
          | regex_replace('(?m)^' ~ (incus_root_idmap_owner | regex_escape) ~ ':[^\n]*(?:\n|$)', '') }}
+  loop: "{{ incus_idmap_reads.results }}"
+  loop_control:
+    loop_var: incus_idmap_declaration
+    label: "{{ incus_idmap_declaration.incus_idmap_source.incus_idmap_path }}"
   register: incus_idmap_write
   notify: Restart Incus after subordinate ID changes

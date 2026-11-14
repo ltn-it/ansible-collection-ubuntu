@@ -14,10 +14,15 @@ class RootOwnershipContract(unittest.TestCase):
     def test_role_keeps_root_ownership_and_default_enabled(self):
         defaults = yaml.safe_load((ROOT / 'roles/incus/defaults/main.yml').read_text())
         self.assertIs(defaults['incus_manage_root_idmap'], True)
+        self.assertEqual(defaults['incus_root_idmap_restart_service'], 'incus.service')
         task = next(t for t in yaml.safe_load((ROOT / 'roles/incus/tasks/root_idmap.yml').read_text())
                     if 'ansible.builtin.copy' in t)
         self.assertEqual(('root', 'root', '0644'), tuple(task['ansible.builtin.copy'][k]
                                                        for k in ('owner', 'group', 'mode')))
+        handler = yaml.safe_load((ROOT / 'roles/incus/handlers/main.yml').read_text())[0]
+        self.assertEqual(handler['ansible.builtin.systemd_service']['name'],
+                         '{{ incus_root_idmap_restart_service }}')
+        self.assertNotIn('loop', handler)
 
 
 @unittest.skipUnless(os.geteuid() == 0, 'Root-owned ID-map task requires isolated Root EE')
@@ -51,7 +56,9 @@ class NativeRootTask(unittest.TestCase):
                 done = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(book)] + (['--check'] if check else []),
                                       env=env, capture_output=True, text=True, timeout=45)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-                return json.loads(report.read_text())['changed']
+                result = json.loads(report.read_text())
+                self.assertEqual(result['changed'], any(row['changed'] for row in result['results']))
+                return result['changed']
             self.assertTrue(invoke(check=True))
             self.assertEqual(before, [p.read_bytes() for p in paths])
             self.assertTrue(invoke())
@@ -60,6 +67,32 @@ class NativeRootTask(unittest.TestCase):
                                  'root-extra:300000:65536\nroot:1000000:10000000\n')
                 self.assertEqual((path.stat().st_uid, path.stat().st_gid, path.stat().st_mode & 0o777), (0, 0, 0o644))
             self.assertFalse(invoke())
+
+            # A change to subuid must be visible even if subgid is already correct.
+            paths[0].write_text('unrelated:200000:65536\nroot:1:2\nroot:3:4\n')
+            self.assertTrue(invoke())
+            rows = json.loads(report.read_text())['results']
+            self.assertEqual([row['changed'] for row in rows], [True, False])
+            self.assertFalse(invoke())
+
+            # A linked second input must prevent writing the otherwise changing first input.
+            outside_second = base / 'outside-second'
+            outside_second.write_text('foreign-second-marker\n')
+            for link in ('symbolic', 'hard'):
+                paths[0].write_text('root:1:2\nroot:3:4\n')
+                paths[1].unlink()
+                if link == 'symbolic':
+                    paths[1].symlink_to(outside_second)
+                else:
+                    os.link(outside_second, paths[1])
+                unchanged_uid = paths[0].read_bytes()
+                done = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(book)],
+                                      env=env, capture_output=True, text=True, timeout=45)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertEqual(paths[0].read_bytes(), unchanged_uid)
+                self.assertEqual(outside_second.read_text(), 'foreign-second-marker\n')
+            paths[1].unlink()
+            paths[1].write_text('root:1000000:10000000\n')
 
             # A foreign final line without a newline remains a separate record.
             for path in paths:

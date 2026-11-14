@@ -9,11 +9,6 @@
 
 - name: Reconcile Incus root subordinate ID allocation
   ansible.builtin.include_tasks: root_idmap.yml
-  loop:
-    - "{{ incus_root_subuid_path }}"
-    - "{{ incus_root_subgid_path }}"
-  loop_control:
-    loop_var: incus_idmap_path
   when: incus_manage_root_idmap | bool
 
 - name: Ensure Incus packages are installed
