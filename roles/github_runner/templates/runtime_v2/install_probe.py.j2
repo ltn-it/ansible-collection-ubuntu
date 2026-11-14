@@ -106,7 +106,9 @@ def private_metadata(path):
         os.close(parent)
 
 
-def state(unit):
+def state(unit, expected=None):
+    if expected is not None:
+        return historical_state(unit, expected)
     template = "lit-incus-runtime-v2@.service"
     query = "lit-incus-runtime-v2@installation-probe.service" if unit == template else unit
     fragment = template if query.startswith("lit-incus-runtime-v2@") and query.endswith(".service") else unit
@@ -125,20 +127,126 @@ def state(unit):
                 and values["FragmentPath"] == "/etc/systemd/system/"+fragment)
 
 
-def inactive():
+HISTORY_PROPERTIES = frozenset({"Id", "LoadState", "ActiveState", "SubState", "UnitFileState", "FragmentPath",
+    "DropInPaths", "InvocationID", "Result", "ExecMainCode", "ExecMainStatus", "MainPID", "ControlPID",
+    "ControlGroup", "Slice", "Job"})
+HISTORY_UNIT = re.compile(r"lit-incus-runtime-v2@[0-9]+-[0-9]+-[0-9]+\.service\Z")
+HISTORY_SLICE = "system-lit\\x2dincus\\x2druntime\\x2dv2.slice"
+
+
+def boot_id():
+    fd = os.open("/proc/sys/kernel/random/boot_id", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        require(os.fstat(fd).st_uid == 0)
+        return os.read(fd, 128).decode("ascii").strip()
+    finally:
+        os.close(fd)
+
+
+def terminal_history(value):
+    """Explicit Root-supplied nonsecret snapshot; never discover or adopt failed units."""
+    require(type(value) is dict)
+    if not value:
+        return {}
+    require(set(value) == {"schema", "source_machine_id", "source_boot_id", "units"}
+            and type(value["schema"]) is int and value["schema"] == 1
+            and type(value["source_machine_id"]) is str
+            and re.fullmatch(r"[0-9a-f]{32}", value["source_machine_id"])
+            and value["source_machine_id"] != "0" * 32
+            and type(value["source_boot_id"]) is str
+            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value["source_boot_id"])
+            and value["source_boot_id"] != "00000000-0000-0000-0000-000000000000"
+            and type(value["units"]) is dict and 1 <= len(value["units"]) <= 32)
+    require(value["source_machine_id"] == sealed("/etc/machine-id", private=False).decode("ascii").strip()
+            and value["source_boot_id"] == boot_id())
+    invocations = set()
+    for unit, row in value["units"].items():
+        require(type(unit) is str and len(unit) <= 255 and HISTORY_UNIT.fullmatch(unit)
+                and type(row) is dict and set(row) == HISTORY_PROPERTIES | {"cgroup_state"}
+                and all(type(item) is str and len(item) <= 4096 for item in row.values()))
+        require(row["Id"] == unit and row["LoadState"] == "loaded"
+                and row["ActiveState"] == row["SubState"] == "failed"
+                and row["UnitFileState"] in {"static", "disabled"}
+                and row["FragmentPath"] == "/etc/systemd/system/lit-incus-runtime-v2@.service"
+                and row["DropInPaths"] == row["Job"] == ""
+                and row["MainPID"] == row["ControlPID"] == "0"
+                and row["Result"] == "exit-code" and row["ExecMainCode"] == "1"
+                and re.fullmatch(r"[1-9][0-9]{0,2}", row["ExecMainStatus"]) and int(row["ExecMainStatus"]) <= 255
+                and re.fullmatch(r"[0-9a-f]{32}", row["InvocationID"]) and row["InvocationID"] != "0" * 32
+                and row["InvocationID"] not in invocations and row["Slice"] == HISTORY_SLICE
+                and row["cgroup_state"] in {"absent", "empty"})
+        group = "/system.slice/" + HISTORY_SLICE + "/" + unit
+        require(row["ControlGroup"] in {"", group}
+                and (row["cgroup_state"] != "absent" or row["ControlGroup"] == ""))
+        invocations.add(row["InvocationID"])
+    return value["units"]
+
+
+def cgroup_state(unit):
+    """Only the exact template-instance cgroup, including descendants; never a ledger."""
+    root = directory("/sys/fs/cgroup")
+    os.close(root)
+    fd = directory("/sys/fs/cgroup/system.slice/" + HISTORY_SLICE + "/" + unit, missing=True)
+    if fd is None:
+        return "absent"
+    try:
+        files = {}
+        for name in ("cgroup.procs", "cgroup.events"):
+            child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            try:
+                info = os.fstat(child)
+                require(stat.S_ISREG(info.st_mode) and info.st_uid == 0)
+                raw = os.read(child, 16385)
+                require(len(raw) <= 16384)
+                files[name] = raw.decode("ascii")
+            finally:
+                os.close(child)
+        events = pairs(line.split() for line in files["cgroup.events"].splitlines())
+        require(not files["cgroup.procs"].strip() and events == {"populated": "0", "frozen": "0"})
+        return "empty"
+    finally:
+        os.close(fd)
+
+
+def historical_state(unit, expected):
+    result = subprocess.run(["/usr/bin/systemctl", "show", "--no-pager", unit,
+        "--property=" + ",".join(sorted(HISTORY_PROPERTIES))],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=5, check=False)
+    require(result.returncode == 0 and len(result.stdout) <= 16384)
+    values = pairs(line.split("=", 1) for line in result.stdout.decode("utf-8").splitlines())
+    require(set(values) == HISTORY_PROPERTIES and values == {key: expected[key] for key in HISTORY_PROPERTIES}
+            and cgroup_state(unit) == expected["cgroup_state"])
+
+
+def instances():
+    result = subprocess.run(["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
+        "lit-incus-runtime-v2@*.service"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=5, check=False)
+    require(result.returncode == 0 and len(result.stdout) <= 16384)
+    units = []
+    for line in result.stdout.decode().splitlines():
+        unit = line.split()[0]
+        require(unit.startswith("lit-incus-runtime-v2@") and unit.endswith(".service") and len(unit) <= 255
+                and unit not in units)
+        units.append(unit)
+    return set(units)
+
+
+def inactive(history=None):
+    expected = terminal_history({} if history is None else history)
     require(not os.path.lexists(SOCKET))  # Foreign/stale socket is never removed/adopted.
-    for unit in ("lit-incus-runtime-v2.socket","lit-incus-runtime-v2@.service",
+    for unit in ("lit-incus-runtime-v2.socket", "lit-incus-runtime-v2@.service",
                  "lit-incus-operating-watchdog.service", "lit-incus-operating-watchdog.timer",
                  "lit-incus-operating-mail.service", "lit-incus-operating-mail.timer"):
         state(unit)
-    result = subprocess.run(["/usr/bin/systemctl","list-units","--all","--plain","--no-legend","--no-pager",
-        "lit-incus-runtime-v2@*.service"], stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
-        env={"PATH":"/usr/bin:/bin","LANG":"C"},timeout=5,check=False)
-    require(result.returncode == 0 and len(result.stdout) <= 16384)
-    for line in result.stdout.decode().splitlines():
-        unit = line.split()[0]
-        require(unit.startswith("lit-incus-runtime-v2@") and unit.endswith(".service") and len(unit) <= 255)
-        state(unit)
+    units = instances()
+    if expected:
+        require(units == set(expected))
+    for unit in units:
+        state(unit, expected.get(unit))
+    if expected:
+        require(instances() == units and terminal_history(history) == expected)
 
 
 def configurations(path, digest, group, public_pin=None):
@@ -283,14 +391,15 @@ def operating_configuration(value, complete=False):
 
 def main():
     try:
-        require(os.geteuid() == 0 and len(sys.argv) in {8,9,10})
+        require(os.geteuid() == 0 and len(sys.argv) in {8,9,10,11})
         phase,config_path,digest,group = sys.argv[1:5]
         require(phase in {"before","after"})
         module_pins,client_pins,desired = map(decode,sys.argv[5:8])
         require(module_pins and set(client_pins) == {"incus-runtime-client","incus_job_client.py"})
-        inactive()
+        history = decode(sys.argv[10]) if len(sys.argv) == 11 else {}
+        inactive(history)
         public_pin = sys.argv[8] if len(sys.argv) >= 9 else None
-        operating = decode(sys.argv[9]) if len(sys.argv) == 10 else None
+        operating = decode(sys.argv[9]) if len(sys.argv) >= 10 else None
         if operating is not None:
             operating_configuration(operating)
         config = configurations(config_path,digest,group,public_pin)

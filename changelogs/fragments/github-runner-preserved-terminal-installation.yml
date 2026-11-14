@@ -1,0 +1,6 @@
+---
+bugfixes:
+  - >-
+    github_runner - preserve explicitly bound terminal runtime-instance failures during disabled cold installation,
+    verifying original machine, boot, invocation, unit metadata and empty cgroups before and after copying.
+    Unknown, active, reset or changed instances still deny installation without resetting their history.
