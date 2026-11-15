@@ -17,6 +17,19 @@ See `defaults/main.yml` for the full interface. Key variables:
 - `incus_initialize` (bool, default: `true`): Run `incus admin init --minimal` when Incus is not initialized.
 - `incus_manage_root_idmap` (bool, default: `true`): Reconcile the root
   SubUID/SubGID allocation consumed by the Incus daemon before instance work.
+  Each file is atomically reconciled to exactly one declaration for
+  `incus_root_idmap_owner`; declarations and comments for other owners are
+  preserved. Both input paths are validated before either file is written.
+  This removes earlier short duplicate declarations that Incus may
+  otherwise select first. Symlinks and multiply linked files are rejected.
+  Actual changes notify the existing Incus restart handler; unchanged files
+  do not restart services, and check mode does not write either file.
+- `incus_root_idmap_restart_service` (string, default: `incus.service`): Daemon
+  service restarted after subordinate-ID changes when service management is
+  enabled. This targets the daemon instead of the startup/shutdown unit;
+  Incus documents that a normal SIGTERM daemon stop keeps instances running.
+  The API is temporarily unavailable during this restart. See
+  [daemon behavior](https://linuxcontainers.org/incus/docs/main/daemon-behavior/).
 - `incus_root_idmap_start` and `incus_root_idmap_count`: Inventory-overridable
   subordinate-ID range; the count must contain at least 10 million IDs.
 - `incus_root_subuid_path` and `incus_root_subgid_path`: Overrideable paths,

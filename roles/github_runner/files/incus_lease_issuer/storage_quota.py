@@ -23,6 +23,7 @@ from pathlib import PurePosixPath
 import re
 import stat
 import struct
+import time
 
 from . import engine_policy as engine, identity, installation, kernel, ledger
 from .identity import Denied, require
@@ -189,23 +190,34 @@ def _sysfs(number, relative, limit=8192):
 
 
 def _reservation(fd, size):
-    # At most4096 extents. Larger fragmented files fail closed, never guessed
-    # from free disk space or st_blocks alone. No FIEMAP_FLAG_SYNC/write effect.
-    count = 4096
+    # A full FIEMAP page need not describe the whole file. Stream fixed-size
+    # pages under one proof deadline; never request SYNC or allocate extents.
+    # https://docs.kernel.org/filesystems/fiemap.html
+    _number(size, maximum=MAX_BYTES)
+    count, end, final = 4096, 0, False
+    deadline = time.monotonic() + 5
     data = bytearray(32 + count * 56)
-    struct.pack_into("=QQIIII", data, 0, 0, size, 0, 0, count, 0)
-    fcntl.ioctl(fd, FS_IOC_FIEMAP, data, True)
-    start, length, flags, mapped, actual_count, reserved = struct.unpack_from("=QQIIII", data)
-    require((start, length, flags, actual_count, reserved) == (0, size, 0, count, 0) and 0 < mapped <= count,
-            "storage-quota-fiemap-schema")
-    end, final = 0, False
-    for index in range(mapped):
-        logical, physical, extent, r1, r2, extent_flags, r3, r4, r5 = struct.unpack_from("=QQQQQIIII", data, 32 + index * 56)
-        require(not final and logical == end and physical > 0 and extent > 0
-                and not any((r1, r2, r3, r4, r5)) and extent_flags & ~(1 | 0x800) == 0,
-                "storage-quota-unreserved-extent")
-        end += extent
-        final = bool(extent_flags & 1)
+    while end < size and not final:
+        require(time.monotonic() < deadline, "storage-quota-fiemap-budget")
+        cursor = end
+        data[:] = bytes(len(data))
+        struct.pack_into("=QQIIII", data, 0, cursor, size - cursor, 0, 0, count, 0)
+        fcntl.ioctl(fd, FS_IOC_FIEMAP, data, True)
+        require(time.monotonic() < deadline, "storage-quota-fiemap-budget")
+        start, length, flags, mapped, actual_count, reserved = struct.unpack_from("=QQIIII", data)
+        require((start, length, flags, actual_count, reserved) == (cursor, size - cursor, 0, count, 0)
+                and 0 < mapped <= count, "storage-quota-fiemap-schema")
+        for index in range(mapped):
+            require(time.monotonic() < deadline, "storage-quota-fiemap-budget")
+            logical, physical, extent, r1, r2, extent_flags, r3, r4, r5 = struct.unpack_from(
+                "=QQQQQIIII", data, 32 + index * 56)
+            require(not final and logical == end and physical > 0 and extent > 0
+                    and logical + extent < 2 ** 64 and physical + extent < 2 ** 64
+                    and not any((r1, r2, r3, r4, r5)) and extent_flags & ~(1 | 0x800) == 0,
+                    "storage-quota-unreserved-extent")
+            end += extent
+            final = bool(extent_flags & 1)
+        require(end > cursor, "storage-quota-unreserved-extent")
     require(end >= size and final, "storage-quota-sparse-or-incomplete-backing")
 
 

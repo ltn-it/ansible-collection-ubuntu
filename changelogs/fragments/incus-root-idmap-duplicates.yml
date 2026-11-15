@@ -1,0 +1,8 @@
+---
+bugfixes:
+  - >-
+    incus - atomically reconcile exactly one subordinate ID declaration for the managed owner,
+    preserving unrelated entries and removing earlier short duplicates that prevented isolated container allocation.
+  - >-
+    incus - validate both subordinate ID files before writing either, aggregate their change results,
+    and restart the configured daemon service instead of restarting startup/shutdown units after ID changes.

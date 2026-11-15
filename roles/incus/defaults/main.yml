@@ -19,6 +19,7 @@ incus_root_idmap_start: 1000000
 incus_root_idmap_count: 10000000
 incus_root_subuid_path: /etc/subuid
 incus_root_subgid_path: /etc/subgid
+incus_root_idmap_restart_service: incus.service
 
 incus_projects: []
 incus_profiles: []

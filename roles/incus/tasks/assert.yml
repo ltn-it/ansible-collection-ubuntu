@@ -42,6 +42,8 @@
       - incus_root_subgid_path is string
       - incus_root_subgid_path | trim | length > 0
       - incus_root_subgid_path is match('^/')
+      - incus_root_idmap_restart_service is string
+      - incus_root_idmap_restart_service | trim | length > 0
     fail_msg: "Incus root subordinate ID variables are invalid."
   changed_when: false
   when:

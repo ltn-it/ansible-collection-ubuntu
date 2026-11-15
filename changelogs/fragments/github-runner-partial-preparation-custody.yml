@@ -1,0 +1,13 @@
+---
+bugfixes:
+  - github_runner - reject cross-filesystem context publication before creator effects and retain verified
+    pre-engine failures through exact certificate withdrawal, native terminal custody and original-resource cleanup.
+    Accept only original issued custody proofs, retaining their identity and single-use guards.
+  - github_runner - preserve failed partial-preparation history with effects when qualifying one finite successor;
+    never reinterpret it as a no-work or successful attempt.
+    Bind execution actor identities while ignoring unrelated profile metadata.
+  - github_runner - revalidate each original ancestor and mount identity with bounded directory descriptors
+    during storage cleanup, preserve child-before-parent durability with depth writeback barriers and refuse
+    partial cleanup with live or unobservable process, mount or cgroup consumers under the original deadline.
+  - github_runner - inspect complete bounded backing-file extent mappings across pages instead of treating
+    a full first FIEMAP page as sparse storage; preserve allocation, quota and cleanup deadline checks.

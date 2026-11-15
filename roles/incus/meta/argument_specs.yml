@@ -52,6 +52,9 @@ argument_specs:
       incus_root_subgid_path:
         type: path
         default: /etc/subgid
+      incus_root_idmap_restart_service:
+        type: str
+        default: incus.service
       incus_projects:
         type: list
         elements: dict

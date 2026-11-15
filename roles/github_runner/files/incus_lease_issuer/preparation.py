@@ -20,7 +20,7 @@ import stat
 import time
 
 from . import (cell_contract, context_materializer, context_publisher, engine_policy,
-               identity, incus_admin, incus_mutation, installation, ledger, policy_registry, signed_context)
+               identity, incus_admin, incus_mutation, installation, ledger, policy_registry, signed_context, storage_quota)
 from .identity import Denied, require
 
 
@@ -317,6 +317,39 @@ def prepare(root_config_path, expected_config_sha256, registry, selector, store,
         raise PreparationDenied("preparation-denied") from None
 
 
+def _publication_preflight(config, prepared):
+    """Reject cross-filesystem publication before any creator intent.
+
+    The real publisher independently repeats its exact context/stage check after
+    materialization. This preflight neither makes a directory nor signs data.
+    """
+    from pathlib import PurePosixPath
+    descriptor = identity.decode_json(prepared.engine_descriptor_bytes)
+    context = PurePosixPath(descriptor["context_path"])
+    stage = PurePosixPath(config.publication_staging_parent)
+    require(stage != context and context not in stage.parents, "preparation-publication-overlap")
+    opened = []
+    try:
+        paths = (str(context.parent), str(stage))
+        for path in paths:
+            opened.append(engine_policy._directory(path, private=True))
+        before = [os.fstat(fd) for fd in opened]
+        mounts = [storage_quota._mount_id(fd) for fd in opened]
+        require(before[0].st_dev == before[1].st_dev and mounts[0] == mounts[1], "preparation-publication-filesystem")
+        for path, old, mount in zip(paths, before, mounts):
+            fd = engine_policy._directory(path, private=True)
+            try:
+                now = os.fstat(fd)
+                require((old.st_dev, old.st_ino) == (now.st_dev, now.st_ino)
+                        and storage_quota._mount_id(fd) == mount,
+                        "preparation-publication-parent-drift")
+            finally:
+                os.close(fd)
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
 def _prepare_locked(session, registry, selector, store, lease_id):
     from . import root_session
     config = root_session._require_session(session)
@@ -330,6 +363,7 @@ def _prepare_locked(session, registry, selector, store, lease_id):
         descriptor = identity.decode_json(prepared.engine_descriptor_bytes)
         require(descriptor["limits"]["timeout_seconds"] <= prepared.expires_at - int(time.time()),
                 "preparation-engine-start-budget")
+        _publication_preflight(config, prepared)
         # Validate the actual provisioned key before any remote/local effect.
         signer = signed_context.RootSigner(config.signing_key_path, config.signing_public_key)
         stage = engine_policy._directory(config.publication_staging_parent, private=True)
