@@ -119,15 +119,15 @@ def _reservations(details):
                 continue
             match = re.fullmatch(r"([A-Za-z0-9_.-]+):([0-9]+):([1-9][0-9]*)", line)
             require(match is not None, "engine-subid-schema")
-            rows.append((match[1], int(match[2]), int(match[3])))
+            start, length = int(match[2]), int(match[3])
+            require(start + length <= 2 ** 32 - 1, "engine-subid-schema")
+            rows.append((match[1], start, length))
         # A host may reserve a larger contiguous Root range for Incus. Only
         # the requested mapping window is authorized; never widen it here.
         covering = [index for index, (owner, start, length) in enumerate(rows)
                     if owner == "root" and start <= base and base + size <= start + length]
         require(len(covering) == 1 and not any(base <= identifier < base + size for identifier in accounts),
                 "engine-root-range-not-reserved")
-        _, reserved_base, reserved_size = rows[covering[0]]
-        require(reserved_base + reserved_size <= 2 ** 32 - 1, "engine-root-range-not-reserved")
         # Exclude exactly the selected row, not every equal-valued tuple.
         require(not any(max(base, start) < min(base + size, start + length)
                         for index, (_, start, length) in enumerate(rows) if index != covering[0]), "engine-subid-overlap")

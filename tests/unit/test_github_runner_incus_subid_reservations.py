@@ -74,8 +74,18 @@ class SubidReservationTests(unittest.TestCase):
     def test_covering_reservation_must_fit_host_id_domain(self):
         self.check_ranges(f'root:1000000:{2 ** 32 - 1 - 1000000}\n')
         for size in (2 ** 32 - 1000000, 2 ** 64):
-            with self.subTest(size=size), self.assertRaisesRegex(Denied, 'engine-root-range-not-reserved'):
+            with self.subTest(size=size), self.assertRaisesRegex(Denied, 'engine-subid-schema'):
                 self.check_ranges(f'root:1000000:{size}\n')
+
+    def test_nonoverlapping_out_of_domain_rows_in_either_file_are_denied(self):
+        good = 'root:1000000:1000000000\n'
+        for owner in ('root', 'other'):
+            for start, length in ((2 ** 32, 1), (2 ** 32 - 1, 1), (2000000000, 2 ** 64)):
+                bad = good + f'{owner}:{start}:{length}\n'
+                for uid_rows, gid_rows in ((bad, good), (good, bad)):
+                    with self.subTest(owner=owner, start=start, uid_rows=uid_rows), \
+                         self.assertRaisesRegex(Denied, 'engine-subid-schema'):
+                        self.check_ranges(uid_rows, gid_rows)
 
     def test_malformed_rows_remain_denied(self):
         for row in ('root:1000000:0', 'root:1000000:-1', 'root:1000000:65536:extra', ' root:1000000:65536'):
