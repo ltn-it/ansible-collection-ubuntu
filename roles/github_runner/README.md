@@ -784,6 +784,13 @@ cleanup alarm. Local delivery requires actual mailbox confirmation and never
 implies personal acknowledgement. A busy or unavailable supervisor generates a
 hold without bypassing its lock, inventing process exit, or granting cleanup.
 
+The requested engine UID/GID mapping window must lie inside exactly one Root
+reservation in each of `/etc/subuid` and `/etc/subgid`. A larger contiguous host
+reservation is accepted without expanding the requested mapping. Every other
+row overlapping that window, duplicate covering reservations, or a real host
+UID/GID inside the window denies admission. Adjacent reservations cannot be
+combined to satisfy a requested window.
+
 ### Private runtime engine image preparation
 
 Each fresh admitted lease owns a separate private Podman graphroot and runroot.
