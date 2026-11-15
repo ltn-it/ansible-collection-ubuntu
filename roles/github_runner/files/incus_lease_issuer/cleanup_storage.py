@@ -310,6 +310,16 @@ def _mark_unknown(store, owner, effect, operation):
         pass
 
 
+def _published_cleanup_after_failure(store, identifier, operation, target):
+    """A failed API return is not proof that its atomic publication failed."""
+    record = store.read(identifier)
+    candidates = [key for key, row in record['effects'].items()
+                  if row['operation'] == operation and row['target'] == target
+                  and (row['state'] in {'intent', 'unknown'} or 'cleanup_postcheck' in row)]
+    require(len(candidates) <= 1, 'cleanup-storage-publication-ambiguous')
+    return candidates[0] if candidates else None
+
+
 def _consumer_read(path, limit, end):
     """Proc seq files may return a short non-EOF chunk even for large reads."""
     _deadline(end)
@@ -685,6 +695,7 @@ def reconcile_postchecks(session, owner, store, config, cleanup):
 def release_engine(owner, store, config):
     """Release only the three directory inodes created by engine-prepare."""
     effect, opened = (None, [])
+    publication_attempted = False
     try:
         started = time.monotonic()
         record = _fresh(owner, store, config)
@@ -718,8 +729,9 @@ def release_engine(owner, store, config):
         with storage_quota.acquire_existing_evidence_quota(config.storage_quota_policy_path, config.storage_quota_policy_sha256, spool):
             _fresh(owner, store, config)
             _deadline(end)
-            effect = store.begin(owner.lease_id, 'engine-release', target)
-            guard = store.begin_cleanup_postcheck(owner.lease_id, effect, end, observation=_postcheck_observation(owner, [(path, fd, inventory) for path, _, fd, inventory in inventories], spool, end))
+            observation = _postcheck_observation(owner, [(path, fd, inventory) for path, _, fd, inventory in inventories], spool, end)
+            publication_attempted = True
+            effect, guard = store.begin_cleanup_with_postcheck(owner.lease_id, 'engine-release', target, end, observation=observation)
             for path, parent, fd, inventory in inventories:
                 _deadline(end)
                 named = os.stat(PurePosixPath(path).name, dir_fd=parent, follow_symlinks=False)
@@ -737,6 +749,11 @@ def release_engine(owner, store, config):
         store.complete_cleanup_postcheck(guard)
         return StorageReceipt(owner.lease_id, 'engine-release', evidence)
     except BaseException:
+        if effect is None and publication_attempted:
+            try:
+                effect = _published_cleanup_after_failure(store, owner.lease_id, 'engine-release', target)
+            except BaseException:
+                raise CleanupStorageUnknown('cleanup-storage-publication-unknown') from None
         if effect is not None:
             _mark_unknown(store, owner, effect, 'engine-release')
             raise CleanupStorageUnknown('cleanup-storage-unknown') from None
@@ -749,6 +766,7 @@ def release_engine(owner, store, config):
 def delete_context(owner, store, config):
     """Authenticate the original TLS context, then unlink that exact inventory."""
     effect, opened = (None, [])
+    publication_attempted = False
     try:
         started = time.monotonic()
         record = _fresh(owner, store, config)
@@ -786,14 +804,14 @@ def delete_context(owner, store, config):
         inventory = _inventory_tree(fd, end, min(maximum, 16))
         require({'/'.join(row[0]) for row in inventory[0]} == {'binding.json', 'config.yml', 'client.crt', 'client.key', 'servercerts', 'servercerts/quality.crt'}, 'cleanup-storage-context-inventory')
         _fresh(owner, store, config)
-        effect = store.begin(owner.lease_id, 'context-delete', target)
         descriptor_fd = os.open(descriptor, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             descriptor_inventory = ((), {(): _identity(os.fstat(descriptor_fd))}, storage_quota._mount_id(descriptor_fd))
             context_observation = _postcheck_observation(owner, [(context, fd, inventory), (descriptor, descriptor_fd, descriptor_inventory)], data['engine']['runroot'] + '.public-evidence', end)
         finally:
             os.close(descriptor_fd)
-        guard = store.begin_cleanup_postcheck(owner.lease_id, effect, end, observation=context_observation)
+        publication_attempted = True
+        effect, guard = store.begin_cleanup_with_postcheck(owner.lease_id, 'context-delete', target, end, observation=context_observation)
         _remove_tree(fd, inventory, end)
         require(_identity(os.stat(PurePosixPath(context).name, dir_fd=parent, follow_symlinks=False)) == _identity(os.fstat(fd)), 'cleanup-storage-context-replaced')
         os.rmdir(PurePosixPath(context).name, dir_fd=parent)
@@ -811,6 +829,11 @@ def delete_context(owner, store, config):
         store.complete_cleanup_postcheck(guard)
         return StorageReceipt(owner.lease_id, 'context-delete', evidence)
     except BaseException:
+        if effect is None and publication_attempted:
+            try:
+                effect = _published_cleanup_after_failure(store, owner.lease_id, 'context-delete', target)
+            except BaseException:
+                raise CleanupStorageUnknown('cleanup-storage-publication-unknown') from None
         if effect is not None:
             _mark_unknown(store, owner, effect, 'context-delete')
             raise CleanupStorageUnknown('cleanup-storage-unknown') from None

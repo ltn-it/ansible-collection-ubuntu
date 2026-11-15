@@ -50,7 +50,12 @@ class CleanupOrphanRecoveryTests(unittest.TestCase):
         child = os.fork()
         if child == 0:
             with self.io.open() as store:
-                with mock.patch.object(store,"_save",side_effect=lambda state:os._exit(73)):
+                original_save = store._save
+                def crash_final_publication(state):
+                    if "cleanup_postcheck" in state["leases"][lease]["effects"][effect]:
+                        os._exit(73)
+                    return original_save(state)
+                with mock.patch.object(store,"_save",side_effect=crash_final_publication):
                     store.begin_cleanup_postcheck(lease,effect,time.monotonic()+30,
                         observation=({"fixture":"actual crash before publication"},b"\0"*16))
             os._exit(74)
