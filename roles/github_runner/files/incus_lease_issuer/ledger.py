@@ -308,6 +308,7 @@ class Ledger:
         self.owner_uid, self.clock = owner_uid, clock
         self._cleanup_postchecks = {}
         path = Path(path)
+        self.path = path
         require(path.is_absolute() and ".." not in path.parts, "invalid-store-path")
         self.fd = -1
         fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -1680,6 +1681,195 @@ class Ledger:
             require(any(row["operation"] == "instance-destroy" and row["target"] == target and row["state"] == "verified"
                         for row in lease["effects"].values()), "cleanup-owned-instance-unconfirmed")
 
+    def _cleanup_observation_scope(self, end):
+        """Prove the named store/mount and the currently held transaction lock."""
+        from . import storage_quota
+        require(time.monotonic() < end and self.fd >= 0, "cleanup-observation-recovery-deadline")
+        self._private(os.fstat(self.fd), directory=True)
+        namespace = os.stat("/proc/self/ns/mnt")
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for part in self.path.parts[1:]:
+                require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
+                following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                os.close(fd); fd = following
+                info = os.fstat(fd)
+                require(info.st_uid == 0 and not info.st_mode & 0o022, "cleanup-observation-recovery-scope")
+            actual, named = os.fstat(self.fd), os.fstat(fd)
+            stamp = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid)
+            mount = storage_quota._mount_id(self.fd)
+            require(stamp(actual) == stamp(named) and storage_quota._mount_id(fd) == mount,
+                    "cleanup-observation-recovery-scope")
+            lock = self._open("lock", os.O_RDWR)
+            try:
+                require(storage_quota._mount_id(lock) == mount, "cleanup-observation-recovery-scope")
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise Denied("cleanup-observation-recovery-lock")
+            finally:
+                os.close(lock)
+            after = os.stat("/proc/self/ns/mnt")
+            require((namespace.st_dev, namespace.st_ino) == (after.st_dev, after.st_ino),
+                    "cleanup-observation-recovery-scope")
+            return stamp(actual) + (mount, namespace.st_dev, namespace.st_ino)
+        finally:
+            os.close(fd)
+
+    def _cleanup_observation_file(self, name, state, mount, end, *, expected=None, hash_body=False):
+        """Read only a typed private sidecar; never an arbitrary prefix leaf."""
+        from . import storage_quota
+        require(re.fullmatch(r"cleanup-observation-[0-9a-f]{32}\.bin", name),
+                "cleanup-observation-recovery-name")
+        fd = self._open(name, os.O_RDONLY)
+        stamp = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                              info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        try:
+            before = os.fstat(fd)
+            require(4 < before.st_size <= 16065604 and storage_quota._mount_id(fd) == mount,
+                    "cleanup-observation-recovery-file")
+            def exact(size):
+                raw = bytearray()
+                while len(raw) < size:
+                    require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
+                    part = os.read(fd, min(65536, size - len(raw)))
+                    require(part, "cleanup-observation-recovery-truncated")
+                    raw.extend(part)
+                return bytes(raw)
+            prefix = exact(4); length = struct.unpack(">I", prefix)[0]
+            require(0 < length <= 65536 and 4 + length <= before.st_size
+                    and (before.st_size - 4 - length) % 16 == 0, "cleanup-observation-recovery-header")
+            raw_header = exact(length); header = decode_json(raw_header)
+            require(type(header) is dict and set(header) == {
+                "schema", "nonce", "lease_id", "effect_id", "operation", "metadata"}
+                and type(header["schema"]) is int and header["schema"] == 1
+                and type(header["nonce"]) is str and ID.fullmatch(header["nonce"])
+                and name == "cleanup-observation-" + header["nonce"] + ".bin"
+                and type(header["lease_id"]) is str and ID.fullmatch(header["lease_id"])
+                and type(header["effect_id"]) is str and ID.fullmatch(header["effect_id"])
+                and type(header["metadata"]) is dict and canonical(header) == raw_header,
+                "cleanup-observation-recovery-header")
+            lease = state["leases"].get(header["lease_id"], {})
+            effect = lease.get("effects", {}).get(header["effect_id"], {})
+            require(header["operation"] in {"engine-release", "context-delete"}
+                    and effect.get("operation") == header["operation"], "cleanup-observation-recovery-owner")
+            total = 4 + length; sha = None
+            if hash_body:
+                hasher = hashlib.sha256(prefix + raw_header)
+                while total < before.st_size:
+                    block = exact(min(65536, before.st_size - total))
+                    total += len(block); hasher.update(block)
+                require(not os.read(fd, 1), "cleanup-observation-recovery-file")
+                sha = hasher.hexdigest()
+            if expected is not None:
+                identifier, effect_id, operation, ref = expected
+                require((header["lease_id"], header["effect_id"], header["operation"])
+                        == (identifier, effect_id, operation) and ref["nonce"] == header["nonce"]
+                        and ref["size"] == before.st_size and (not hash_body or ref["sha256"] == sha),
+                        "cleanup-observation-recovery-reference")
+            self._private(os.fstat(fd))
+            named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            require(stamp(before) == stamp(os.fstat(fd)) == stamp(named)
+                    and storage_quota._mount_id(fd) == mount, "cleanup-observation-recovery-drift")
+            return {"stamp": stamp(before), "header_sha256": hashlib.sha256(raw_header).hexdigest(),
+                    "sha256": sha, "size": before.st_size}
+        finally:
+            os.close(fd)
+
+    def _recover_cleanup_observation_orphans(self, state, end):
+        """Same locked durable state, bounded two-pass proof; no effect mutation."""
+        from . import storage_quota
+        scope = self._cleanup_observation_scope(end)
+        references, protected = {}, set()
+        for identifier, lease in state["leases"].items():
+            require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
+            for effect_id, effect in lease["effects"].items():
+                ref = effect.get("cleanup_observation")
+                if ref is not None:
+                    require(ref["name"] not in references, "cleanup-observation-recovery-reference")
+                    references[ref["name"]] = (identifier, effect_id, effect["operation"], ref)
+                for nonce in (effect.get("cleanup_postcheck"), effect.get("cleanup_postcheck_resolution", {}).get("nonce")):
+                    if nonce is not None:
+                        protected.add("cleanup-observation-" + nonce + ".bin")
+        names, count = [], 0
+        scan = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.fd)
+        try:
+            with os.scandir(scan) as entries:
+                for entry in entries:
+                    require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
+                    count += 1
+                    require(count <= 65536, "cleanup-observation-recovery-entry-bound")
+                    if entry.name.startswith("cleanup-observation-"):
+                        require(re.fullmatch(r"cleanup-observation-[0-9a-f]{32}\.bin", entry.name)
+                                and len(names) < 4096, "cleanup-observation-recovery-name-bound")
+                        names.append(entry.name)
+        finally:
+            os.close(scan)
+        orphans = sorted(set(names) - set(references) - protected)
+        if not orphans:
+            require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
+            return {"removed": [], "remaining_unreferenced": 0, "effects_modified": False}
+        # Validate every present reference FIRST. Missing closed/resolved files
+        # are the existing explicit post-close GC case, never active authority.
+        checked, bytes_to_hash = {}, 0
+        for name, expected in references.items():
+            require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
+            try:
+                os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                effect = state["leases"][expected[0]]["effects"][expected[1]]
+                require(state["leases"][expected[0]]["state"] == "closed"
+                        and "cleanup_postcheck_resolution" in effect, "cleanup-observation-recovery-reference")
+                continue
+            proof = self._cleanup_observation_file(name, state, scope[5], end, expected=expected)
+            checked[name] = proof; bytes_to_hash += proof["size"]
+        require(not (set(names) & protected - set(references)), "cleanup-observation-recovery-protected")
+        # Every orphan header must prove THIS durable lease/effect/operation,
+        # even when more files exist than can be reclaimed in this finite batch.
+        for name in orphans:
+            checked[name] = self._cleanup_observation_file(name, state, scope[5], end)
+        selected = []
+        for name in orphans:
+            if len(selected) == 16 or bytes_to_hash + checked[name]["size"] > 268435456:
+                break
+            selected.append(name); bytes_to_hash += checked[name]["size"]
+        require(selected and bytes_to_hash <= 268435456, "cleanup-observation-recovery-byte-bound")
+        for name in [*references, *selected]:
+            if name not in checked:
+                continue
+            proof = self._cleanup_observation_file(name, state, scope[5], end,
+                expected=references.get(name), hash_body=True)
+            require(proof["stamp"] == checked[name]["stamp"], "cleanup-observation-recovery-drift")
+            checked[name] = proof
+        require(canonical(self._load()) == canonical(state), "cleanup-observation-recovery-state-drift")
+        removed = []
+        for name in selected:
+            require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
+            named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            actual = (named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid,
+                      named.st_nlink, named.st_size, named.st_mtime_ns, named.st_ctime_ns)
+            require(actual == checked[name]["stamp"], "cleanup-observation-recovery-drift")
+            os.unlink(name, dir_fd=self.fd)
+            removed.append({"name": name, "size": checked[name]["size"], "sha256": checked[name]["sha256"]})
+        os.fsync(self.fd)
+        require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
+        return {"removed": removed, "remaining_unreferenced": len(orphans) - len(selected), "effects_modified": False}
+
+    def recover_cleanup_observation_orphans(self, *, deadline=None):
+        """Root-only pre-publication metadata recovery; never grant a retry."""
+        require(os.geteuid() == self.owner_uid == 0, "cleanup-observation-root-required")
+        now = time.monotonic()
+        require(type(now) in {int, float} and math.isfinite(now), "cleanup-observation-recovery-deadline")
+        end = now + 60 if deadline is None else deadline
+        if deadline is not None:
+            require(type(end) in {int, float} and math.isfinite(end) and 0 < end - now <= 60,
+                    "cleanup-observation-recovery-deadline")
+        with self._transaction() as state:
+            return self._recover_cleanup_observation_orphans(state, end)
+
+
     def begin_cleanup_postcheck(self, identifier, effect_id, deadline, *, observation=None):
         """Prearm durable HOLD before data deletion; only this process may finish it."""
         require(os.geteuid() == self.owner_uid == 0 and type(deadline) in {int, float}
@@ -1687,6 +1877,8 @@ class Ledger:
                 "cleanup-postcheck-budget")
         token = _CleanupPostcheck(secrets.token_hex(16))
         with self._transaction() as state:
+            recovered = self._recover_cleanup_observation_orphans(state, deadline)
+            require(recovered["remaining_unreferenced"] == 0, "cleanup-observation-orphan-recovery-required")
             lease = self._lease(state, identifier)
             effect = lease["effects"].get(effect_id)
             require(lease["state"] != "closed" and effect is not None and effect["state"] == "intent"

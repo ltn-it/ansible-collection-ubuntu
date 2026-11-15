@@ -12,3 +12,8 @@ bugfixes:
     exact resource/consumer absence; no deletion or authority clock is repeated.
     Hash-bound inode-only metadata remains private audit evidence through durable
     closure and permits only explicit, exact-owned post-close metadata collection.
+  - >-
+    Incus cleanup metadata - recover ownership-checked observation files left by
+    a crash before their Ledger reference was published, under the exclusive
+    Ledger lock and within bounded work; preserve every durable reference and
+    retain the original effect outcome without replaying resource deletion.
