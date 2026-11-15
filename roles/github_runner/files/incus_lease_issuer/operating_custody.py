@@ -762,7 +762,7 @@ def operating_ready_tick(config_path, config_sha256, registry, selector, store, 
             os.close(output)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _PartialRetentionProof:
     lease_id: str
     record_sha256: str

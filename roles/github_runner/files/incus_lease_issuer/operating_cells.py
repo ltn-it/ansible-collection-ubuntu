@@ -871,7 +871,7 @@ FIFTH_CELL = "ac1605abfe8d8f161725230142e62eded83f744f4fbbaae82669a9b95bc2424b"
 FIFTH_POLICY = "4cc42e8494f27cc758bf859482678e68acc1a7dcfb734a1c5ea79caa24d01d1b"
 FIFTH_TERMINAL = 1794675614
 FIFTH_RETAIN_UNTIL = 1794690014
-FIFTH_GRAPH = "55a8f3adb2c14ca014026626280ac4dbc3d4a17da1cf7467ac7ec31f31d86a95"
+FIFTH_GRAPH = "9c80a2ae3c4e5f30d0b43b5a351c6a11acf9519357e83783a7e8a0f381e7ba2d"
 FIFTH_CHECKS = (132512594125, 132512850572, 132519235539)
 FIFTH_JOB = 132512850572
 FIFTH_CHECK = 132512850572
@@ -897,8 +897,13 @@ def fifth_native_projection(run, inventory, checks):
     rows = [{k: row.get(k) for k in fields} for row in inventory["jobs"]]
     require(all(type(row["id"]) is int and row["id"] > 0 for row in rows)
             and len({row["id"] for row in rows}) == 24, "continuation-fifth-native-ids")
-    graph = {"run": {k: run.get(k) for k in ("id", "run_attempt", "head_sha", "event", "head_branch",
-             "workflow_id", "path", "status", "conclusion", "actor", "triggering_actor")},
+    actor = {"login": "litroc", "id": 76040632, "type": "User"}
+    require(all(type(run.get(field)) is dict and all(type(run[field].get(k)) is type(v)
+                and run[field][k] == v for k, v in actor.items())
+                for field in ("actor", "triggering_actor")), "continuation-fifth-actor")
+    graph = {"run": {**{k: run.get(k) for k in ("id", "run_attempt", "head_sha", "event", "head_branch",
+             "workflow_id", "path", "status", "conclusion")},
+             **{field: {k: run[field][k] for k in actor} for field in ("actor", "triggering_actor")}},
              "jobs": sorted(rows, key=lambda row: row["id"])}
     require(ledger.digest(graph) == FIFTH_GRAPH, "continuation-fifth-original-failed-graph")
     require(type(checks) is list and len(checks) == len(FIFTH_CHECKS), "continuation-fifth-native-checks")

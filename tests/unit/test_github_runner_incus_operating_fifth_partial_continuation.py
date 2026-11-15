@@ -70,6 +70,34 @@ class FifthPartialHistoryTests(unittest.TestCase):
             args=deepcopy(self.native);change(*args)
             with self.assertRaises(Denied):cells.fifth_native_projection(*args)
 
+    def test_actor_profile_changes_do_not_change_failed_execution_graph(self):
+        for field in ("actor", "triggering_actor"):
+            with self.subTest(field=field):
+                changed=deepcopy(self.native)
+                changed[0][field].update(avatar_url="https://example.invalid/changed-profile.png",
+                    html_url="https://example.invalid/profile", new_profile_field={"ignored":"presentation"})
+                changed[0][field].pop("gravatar_id",None)
+                self.assertEqual(cells.fifth_native_projection(*changed),self.value['native_fifth'])
+
+    def test_strict_actor_identities_and_complete_execution_evidence_remain_pinned(self):
+        for field in ("actor", "triggering_actor"):
+            for key,value in (("id",76040633),("id","76040632"),("login","litdeg"),("type","Bot")):
+                changed=deepcopy(self.native);changed[0][field][key]=value
+                with self.subTest(field=field,key=key,value=value),self.assertRaises(Denied):
+                    cells.fifth_native_projection(*changed)
+        changes=[lambda r,j,c:r.update(run_attempt=2),
+            lambda r,j,c:r.update(head_sha='e'*40),
+            lambda r,j,c:r['referenced_workflows'][0].update(sha='e'*40),
+            lambda r,j,c:j['jobs'][0].update(run_attempt=2),
+            lambda r,j,c:j['jobs'][0].update(runner_id=79),
+            lambda r,j,c:j['jobs'][0].update(started_at='2026-11-14T16:35:18Z'),
+            lambda r,j,c:j['jobs'][0].update(conclusion='failure'),
+            lambda r,j,c:c[0]['app'].update(id=1)]
+        for number,change in enumerate(changes):
+            changed=deepcopy(self.native);change(*changed)
+            with self.subTest(execution_change=number),self.assertRaises(Denied):
+                cells.fifth_native_projection(*changed)
+
     def test_closure_unknown_open_early_missing_catalogue_or_no_work_never_qualifies(self):
         for field,value in [('kind','no-work'),('closed_at',cells.FIFTH_RETAIN_UNTIL-1),('closed_at',True),
                             ('lease_id','f'*32),('record_sha256',None),('catalogues',{})]:
