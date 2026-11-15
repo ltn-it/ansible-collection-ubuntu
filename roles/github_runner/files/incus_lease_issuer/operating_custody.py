@@ -489,6 +489,35 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                     selector, _ = matches[0]
                     starts = [row for row in record["effects"].values() if row["operation"] == "engine-start"]
                     actual_exit = starts[0].get("engine_exit") if len(starts) == 1 else None
+                    if not starts:
+                        # A published cell can legitimately wait for its original
+                        # engine owner. Only the separately authenticated partial
+                        # creator prefix is eligible for pre-engine withdrawal.
+                        from . import cell_contract
+                        try:
+                            cell_contract.partial_preparation_owner(runtime._registry, selector, store, lease_id)
+                        except Exception:
+                            if ("native_terminal" in record
+                                    or store._now() >= min(record["expires_at"], record["authorizations"][-1]["valid_until"])
+                                    or any(row["state"] in {"intent", "unknown"} for row in record["effects"].values())):
+                                alarm("cleanup-unknown", lease_id, {"state": "unsupported-pre-engine-preparation-held"})
+                            continue
+                        try:
+                            finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)
+                            finalizer.withdraw_partial_preparation(runtime._registry, selector, store, lease_id)
+                            if "native_terminal" not in store.read(lease_id):
+                                store.bind_native_terminal(lease_id, observe_native_terminal(
+                                    runtime._registry, selector, store, lease_id))
+                            retained = retain_partial_preparation(runtime._registry, selector, store, lease_id)
+                            if store._now() < retained["retain_until"]:
+                                alarm("failed-cell-retained", lease_id, {"partial_preparation": retained})
+                            else:
+                                finalizer.finalize_partial_preparation(runtime._registry, selector, store, lease_id)
+                        except NativeJobPending:
+                            pass
+                        except Exception:
+                            alarm("cleanup-unknown", lease_id, {"state": "partial-preparation-held"})
+                        continue
                     if actual_exit is None:
                         if store._now() >= min(record["expires_at"], record["authorizations"][-1]["valid_until"]):
                             alarm("expired-supervisor-held", lease_id, {"state": "original-owner-exit-unavailable"})
@@ -731,3 +760,87 @@ def operating_ready_tick(config_path, config_sha256, registry, selector, store, 
             if control is not None:
                 os.close(control)
             os.close(output)
+
+
+@dataclass(frozen=True, eq=False)
+class _PartialRetentionProof:
+    lease_id: str
+    record_sha256: str
+    canonical: bytes
+    pid: int
+    thread: int
+    expires: float
+
+
+_PARTIAL_PROOFS = weakref.WeakSet()
+
+
+def _partial_custody_record(value, record, policy):
+    """A pre-engine failure is never normal stopped-VM custody or success."""
+    require(type(value) is dict and set(value) == {"schema", "kind", "terminal_at", "retain_until",
+            "creator_sha256", "certificate_revoke_sha256"} and type(value["schema"]) is int and value["schema"] == 1
+            and value["kind"] == "failed-partial-preparation" and "owned_instance" not in record
+            and "custody" not in record and "native_terminal" in record,
+            "partial-custody-shape")
+    require(not any(e["operation"] in {"engine-start", "context-publish", "fence-create"}
+                    for e in record["effects"].values()), "partial-custody-entered")
+    creators = {k: ledger.digest(e) for k, e in record["effects"].items()
+                if e["operation"] in ledger.PROVISIONING}
+    revoke = [e for e in record["effects"].values() if e["operation"] == "certificate-revoke"]
+    require(value["creator_sha256"] == ledger.digest(creators)
+            and value["certificate_revoke_sha256"] == ledger.digest(revoke)
+            and all(e["state"] == "verified" for e in revoke)
+            and (not any(e["operation"] == "certificate-create" for e in record["effects"].values()) or len(revoke) == 1)
+            and type(value["terminal_at"]) is int and type(value["retain_until"]) is int
+            and value["terminal_at"] == record["native_terminal"]["completed_at"]
+            and value["retain_until"] == value["terminal_at"] + policy["retention_seconds"],
+            "partial-custody-binding")
+    return value
+
+
+def require_partial_retained_proof(proof, lease_id, record, policy):
+    require(type(proof) is _PartialRetentionProof, "partial-custody-proof")
+    with _TERMINAL_GUARD:
+        require(proof in _PARTIAL_PROOFS, "partial-custody-proof")
+        _PARTIAL_PROOFS.remove(proof)
+    require(proof.lease_id == lease_id and proof.record_sha256 == ledger.digest(record)
+            and proof.pid == os.getpid() and proof.thread == threading.get_ident()
+            and time.monotonic() < proof.expires, "partial-custody-proof-drift")
+    return _partial_custody_record(identity.decode_json(proof.canonical), record, policy)
+
+
+def retain_partial_preparation(registry, selector, store, lease_id):
+    """Bind only original terminal policy after separate safety withdrawal."""
+    from . import cell_contract
+    owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
+    record = store.read(lease_id)
+    require("native_terminal" in record and not any(e["state"] != "verified" for e in record["effects"].values()),
+            "partial-custody-terminal-or-unknown")
+    if "partial_preparation_custody" in record:
+        return _partial_custody_record(record["partial_preparation_custody"], record,
+                                       store.read_policy(record["policy_sha256"]))
+    policy = store.read_policy(record["policy_sha256"])
+    creators = {k: ledger.digest(e) for k, e in record["effects"].items() if e["operation"] in ledger.PROVISIONING}
+    revoke = [e for e in record["effects"].values() if e["operation"] == "certificate-revoke"]
+    value = {"schema": 1, "kind": "failed-partial-preparation",
+        "terminal_at": record["native_terminal"]["completed_at"],
+        "retain_until": record["native_terminal"]["completed_at"] + policy["retention_seconds"],
+        "creator_sha256": ledger.digest(creators), "certificate_revoke_sha256": ledger.digest(revoke)}
+    _partial_custody_record(value, record, policy)
+    require(cell_contract.partial_preparation_owner(registry, selector, store, lease_id) == owner,
+            "partial-custody-owner-drift")
+    proof = _PartialRetentionProof(lease_id, ledger.digest(record), ledger.canonical(value), os.getpid(),
+                                   threading.get_ident(), time.monotonic() + 5)
+    with _TERMINAL_GUARD:
+        _PARTIAL_PROOFS.add(proof)
+    return store.bind_partial_preparation_custody(lease_id, proof)
+
+
+def require_partial_cleanup_allowed(store, lease_id):
+    record = store.read(lease_id)
+    store.require_cleanup_postchecks(lease_id)
+    require(not any(e["state"] != "verified" for e in record["effects"].values()), "partial-cleanup-unresolved")
+    value = _partial_custody_record(record.get("partial_preparation_custody"), record,
+                                    store.read_policy(record["policy_sha256"]))
+    require(store._now() >= value["retain_until"], "partial-retention-not-elapsed")
+    return value

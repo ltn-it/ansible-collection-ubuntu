@@ -1558,6 +1558,61 @@ must be qualified before any Heavy acceptance is claimed. Claim availability
 reference: https://docs.github.com/en/actions/reference/security/oidc .
 
 
+### Failed preparation before engine entry
+
+The configured publication staging parent must be on the same actual filesystem
+as each selected context parent. Use a protected, private context parent as the
+staging parent when appropriate; the publisher creates its own exclusive child.
+Preparation checks real device/inode stability before the first creator intent.
+The publisher independently repeats its exact check after materialization. No
+cross-filesystem copy fallback or path-based filesystem inference is provided.
+
+A separate `PartialPreparationOwner` covers only a verified original creator
+prefix before context publication, fencing or engine entry. It is not a prepared
+cell, stopped VM or engine cleanup owner. Unknown creators, published/fenced cells,
+engine-start entries and observed VM ownership remain held under their respective
+existing contracts. Exact original certificate withdrawal is independent of the
+native terminal/retention and storage-inventory gates; it never retries a prior
+revoke or adopts an unconfirmed pre-publication certificate rotation. The independent watchdog can discover this partial case without an
+`engine_exit` receipt.
+
+For an eligible failure, the archived policy retains private data from the actual
+original native job completion. A separate opaque partial-retention proof records
+that boundary; it neither invents VM custody nor releases running capacity.
+After retention, exact original inode/context evidence, native ownership and scope
+absence permit only the journaled engine/context/project/network cleanup chain.
+Before either partial storage deletion intent, a bounded process/cgroup/namespace
+scan proves no live reference to the exact original paths or pinned device/inode
+identities, including hardlink descriptors and mappings. Mount checks translate
+protected paths into filesystem-relative roots and reject bind aliases. Complete
+bounded proc reads are required; incomplete visibility holds. Only this Root observer's explicitly opened directory descriptors are
+exempt after identity checks; its other descriptors and mappings are checked too.
+The scan shares the original operation deadline with inventory and deletion.
+Storage traversal checks every ancestor and mount identity. At each depth,
+filesystem writeback completes before directory removal so children become
+durable before their parents disappear; the final root/parent fsync remains.
+Unsupported writeback, unknown mounts or late barriers hold without extending
+the deadline. Backing-file reservation is checked through bounded FIEMAP pages
+with complete contiguous physical coverage, allowed allocation flags and a final
+extent marker. The proof has one fixed wall-time bound across all pages; it does
+not synchronize, allocate space or increase the byte/inode quota or cleanup limit.
+A published, unexpired cell waiting for its original engine owner
+remains a normal wait; unsupported expired or authenticated terminal states alarm.
+
+The original lease closes only after every actual creator is paired. Any unknown
+write or failed native/readback/storage guard remains held, without deadline or
+entry-budget reset. Full engine/VM supervision and finalization remain distinct.
+
+The finite fifth continuation records the genuine failed native graph and the
+original partial preparation **with effects**. Its Root-sealed qualification
+preserves the four historical no-work qualifications unchanged, then adds actual
+closed-store, native-absence and retired-catalogue proofs. Historical empty counts
+are not a claim that the current global catalogues are empty. Every entry boundary
+revalidates the original closed store and exact retired entries; unknown entries
+are denied. The successor requires a separate store and a genuine new Main native
+tuple. Package/unit evidence alone is not operating acceptance.
+
+
 ### Physical runtime host package preparation (unpublished)
 
 `playbooks/github_runner_runtime_host.yml` reuses `lit.ubuntu.podman` for one

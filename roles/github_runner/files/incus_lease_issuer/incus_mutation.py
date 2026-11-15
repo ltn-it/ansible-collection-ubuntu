@@ -829,3 +829,100 @@ class RootIncusCleanup(RootIncusMutator):
         self._scope()
         require(self.certificates_absent(), "mutation-certificate-still-present")
         return super().bridge_delete()
+
+
+class RootPartialPreparationCleanup(RootIncusMutator):
+    """Only original pre-engine withdrawal/parent deletion; no start/VM API.
+
+    A partial owner is never accepted by RootIncusCleanup or any live factory.
+    Every mutation here is backed by the existing exact Ledger cleanup intent.
+    """
+    def __init__(self, client, owned, store):
+        from . import cell_contract, ledger
+        admin._root()
+        require(type(owned) is cell_contract.PartialPreparationOwner and type(store) is ledger.Ledger
+                and store.owner_uid == 0 and type(client) is admin.RootIncusAdmin,
+                "partial-mutation-root-inputs")
+        require(cell_contract.partial_preparation_owner(owned.registry, owned.selector, store, owned.lease_id) == owned,
+                "partial-mutation-owner-drift")
+        value = owned.incus
+        owner = Ownership(**value["ownership"])
+        project = ProjectSpec(value["project"], value["network"], value["pool"], ProjectLimits(**value["project_limits"]), owner)
+        bridge = BridgeSpec(value["network"], value["ipv4_address"], value["dns_domain"], owner)
+        _project(project)
+        _bridge(bridge)
+        require(client._target.project == project.project and client._target.network == bridge.network
+                and client._target.network_project == "default" and client._target.pool == project.pool,
+                "partial-mutation-target")
+        self._client, self._project, self._bridge = client, project, bridge
+        self._certificate, self._attempts, self._operations = None, set(), {}
+        self._owner, self._store = owned, store
+        self._fingerprint = (owned.creator_targets["certificate-create"].removeprefix("certificate:")
+                             if "certificate-create" in owned.creators else None)
+        require(client._target.certificate_fingerprints == (() if self._fingerprint is None else (self._fingerprint,)),
+                "partial-mutation-certificate-target")
+        self._scope()
+
+    def _scope(self):
+        from . import cell_contract, ledger
+        require(cell_contract.partial_preparation_owner(self._owner.registry, self._owner.selector,
+                    self._store, self._owner.lease_id) == self._owner, "partial-mutation-owner-drift")
+        record = self._store.read(self._owner.lease_id)
+        if "certificate-create" in self._owner.creators:
+            creator = record["effects"][self._owner.creators["certificate-create"]["id"]]
+            scope = creator.get("certificate_scope")
+            ledger._certificate_scope(scope, self._owner.lease_id, creator, list(record["effects"].values()))
+            return scope
+        return {"name": "lit-lease-" + self._owner.lease_id,
+                "projects": [self._project.project]}
+
+    def _mutate(self, operation, target, method, path, body=None, *, etag=None):
+        self._scope()
+        expected = {"image-delete": self._owner.creator_targets.get("image-copy"),
+                    "certificate-revoke": self._owner.creator_targets.get("certificate-create"),
+                    "project-delete": self._owner.creator_targets.get("project-create"),
+                    "network-delete": self._owner.creator_targets.get("network-create")}
+        require(operation in expected and expected[operation] == target and method == "DELETE"
+                and body is None and etag is None, "partial-mutation-delete-only")
+        effects = self._store.read(self._owner.lease_id)["effects"].values()
+        require(sum(e["operation"] == operation and e["target"] == target and e["state"] == "intent"
+                    for e in effects) == 1, "partial-mutation-original-intent")
+        return super()._mutate(operation, target, method, path)
+
+    def certificate_inventory(self):
+        snapshot = RootIncusCleanup.certificate_inventory(self)
+        # A pre-publication client never received renewal authority. Unlike a
+        # live engine cleanup, do not adopt a rotated certificate by scope.
+        require(not snapshot.fingerprints or snapshot.fingerprints == (self._fingerprint,),
+                "partial-certificate-rotation-held")
+        return snapshot
+
+    certificates_absent = RootIncusCleanup.certificates_absent
+    certificate_delete = RootIncusCleanup.certificate_delete
+    quiet_project = RootIncusCleanup.quiet_project
+    wait_quiet = RootIncusCleanup.wait_quiet
+
+    def readback(self, kind):
+        require(kind in {"project", "bridge", "profile", "certificate", "image"}, "partial-mutation-kind")
+        self._scope()
+        if kind == "certificate":
+            snapshot = self.certificate_inventory()
+            return {"state": "required_fields_match" if snapshot.fingerprints else "absent_observed",
+                    "metadata_sha256": snapshot.inventory_sha256}
+        return super().readback(kind)
+
+    def image_delete(self):
+        require("image-copy" in self._owner.creators and self.certificates_absent(),
+                "partial-mutation-image-or-certificate-held")
+        self.quiet_project()
+        require(self.readback("project")["state"] == "required_fields_match", "partial-mutation-image-project-held")
+        return super().image_delete()
+
+    def project_delete(self):
+        self.quiet_project()
+        require(self.certificates_absent(), "partial-mutation-certificate-live")
+        return super().project_delete()
+
+    def bridge_delete(self):
+        require(self.certificates_absent(), "partial-mutation-certificate-live")
+        return super().bridge_delete()

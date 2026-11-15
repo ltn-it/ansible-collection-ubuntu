@@ -15,7 +15,6 @@ import hashlib
 import ipaddress
 import json
 import math
-import struct
 import os
 from pathlib import Path
 import re
@@ -23,6 +22,7 @@ import secrets
 import stat
 import time
 import threading
+import struct
 
 from .identity import Denied, Identity, decode_json, require
 
@@ -534,6 +534,9 @@ class Ledger:
                 invocation = (who.run_id, who.check_run_id)
                 require(invocation not in used_invocations, "ledger-corrupt")
                 used_invocations.add(invocation)
+                if "partial_preparation_custody" in lease:
+                    from . import operating_custody
+                    operating_custody._partial_custody_record(lease["partial_preparation_custody"], lease, policy)
                 if "custody" in lease:
                     from . import operating_custody
                     operating_custody._custody_record(lease["custody"], lease, policy)
@@ -1106,6 +1109,18 @@ class Ledger:
                     "custody-retained-reentry")
             value = operating_custody.require_retained_proof(proof, identifier, lease, state["policies"][lease["policy_sha256"]])
             lease.update(state="retained", custody=value)
+            return copy.deepcopy(value)
+
+    def bind_partial_preparation_custody(self, identifier, proof):
+        """Original failure retention only; never free active capacity or mint VM custody."""
+        from . import operating_custody
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            require(lease["state"] in {"prepared", "cancelled"}
+                    and "partial_preparation_custody" not in lease, "partial-custody-reentry")
+            value = operating_custody.require_partial_retained_proof(
+                proof, identifier, lease, state["policies"][lease["policy_sha256"]])
+            lease["partial_preparation_custody"] = value
             return copy.deepcopy(value)
 
     def lease_ids(self):
@@ -2229,12 +2244,10 @@ class Ledger:
         state = self._load()
         self._accepted_cleanup_effects(identifier, self._lease(state, identifier), state["generation"])
 
-
     def require_cleanup_complete(self, identifier):
         state = self._load()
         effects = self._accepted_cleanup_effects(identifier, self._lease(state, identifier), state["generation"])
         self._cleanup_complete(list(effects.values()))
-
 
     @staticmethod
     def _cleanup_complete(effects):

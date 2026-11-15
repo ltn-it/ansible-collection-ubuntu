@@ -309,6 +309,13 @@ class RuntimeRPC:
                   if type(owner) is engine_executor.engine_supervision.OwnedRun
                   and owner.lease_id == lease_id and owner.store is store
                   and owner.owner_pid == os.getpid() and not owner.closed]
+        if not any(e["operation"] == "engine-start" for e in store.read(lease_id)["effects"].values()):
+            from . import finalization
+            # No original engine exists. Exact certificate withdrawal does not
+            # wait on native terminal or data-cleanup eligibility.
+            finalization.RootFinalizer(self._config.path, self._config.sha256).withdraw_partial_preparation(
+                self._registry, selector, store, lease_id)
+            return
         try:
             if owners:
                 # Exact original ownership; one journaled local stop then the

@@ -251,6 +251,170 @@ def _continuation_receipt(value):
     return descriptor, receipt, counts, stamp
 
 
+def _continuation_fifth_native(get):
+    run = get("/actions/runs/" + str(operating_cells.FIFTH_RUN))
+    path = "/actions/runs/" + str(operating_cells.FIFTH_RUN) + "/attempts/1/jobs?per_page=100&page=1"
+    inventory = get(path)
+    checks = [get("/check-runs/" + str(identifier)) for identifier in operating_cells.FIFTH_CHECKS]
+    result = operating_cells.fifth_native_projection(run, inventory, checks)
+    require(get(path) == inventory, "continuation-fifth-native-inventory-drift")
+    return result
+
+
+def _fifth_retired_entry(directory):
+    # The two fixed Root-owned catalogue domains contain public intake/config
+    # bytes, never ephemeral TLS contexts, signer keys or the separate Ledger.
+    # Existing inventory protects every original inode/file; output is only its
+    # aggregate digest. Unknown roots or supplied paths are never accepted.
+    require(directory.parent in {Path(ROOT), Path(run_intake.ROOT)}, "continuation-fifth-catalogue-domain")
+    require(not os.path.lexists(directory / "publish-intent.json")
+            and not os.path.lexists(directory / "published.json"), "continuation-fifth-unexpected-publication")
+    inventory = sealing._inventory(directory)
+    seal = directory / "sealed-inventory.json"
+    if os.path.lexists(seal):
+        proof, _, stamp = installation._file(str(seal), MAX_POLICY, private=True, keep=False)
+        inventory["sealed-inventory.json"] = {"sha256": proof.sha256, "stamp": list(stamp)}
+    return ledger.digest(inventory)
+
+
+def _fifth_closed_projection(successor_ledger_path, original_configuration):
+    """Fresh original product readbacks; a JSON closed flag alone is no proof."""
+    from . import incus_admin, incus_mutation, cleanup_storage
+    original = engine._keys(original_configuration, {"directory", "manifest_sha256"})
+    directory = Path(original["directory"])
+    require(directory.parent == Path(ROOT) and re.fullmatch("[0-9a-f]{64}", directory.name),
+            "continuation-fifth-original-configuration-domain")
+    configuration, _ = _read_complete(directory)
+    require(configuration.manifest_sha256 == original["manifest_sha256"], "continuation-fifth-original-manifest")
+    origin = read_configuration_origin(configuration)
+    require(origin["source_sha"] == operating_cells.FIFTH_MAIN and origin["run_id"] == operating_cells.FIFTH_RUN
+            and origin["run_attempt"] == 1 and origin["job_id"] == operating_cells.FIFTH_JOB
+            and origin["check_run_id"] == operating_cells.FIFTH_CHECK, "continuation-fifth-original-configuration")
+    registry = policy_registry.load_registry(configuration.registry_path, configuration.registry_sha256)
+    selected = registry.select(origin["selector"])
+    require(selected.ledger_path != successor_ledger_path, "continuation-fifth-separate-store-required")
+    if os.path.lexists(successor_ledger_path):
+        old_fd = installation._open_directory(selected.ledger_path)
+        try:
+            new_fd = installation._open_directory(successor_ledger_path)
+            try:
+                old, new = os.fstat(old_fd), os.fstat(new_fd)
+                require((old.st_dev, old.st_ino) != (new.st_dev, new.st_ino),
+                        "continuation-fifth-aliased-original-store")
+            finally:
+                os.close(new_fd)
+        finally:
+            os.close(old_fd)
+    with ledger.Ledger(selected.ledger_path, clock=time.time) as store:
+        require(store.lease_ids() == (operating_cells.FIFTH_LEASE,), "continuation-fifth-original-store-scope")
+        record = store.read(operating_cells.FIFTH_LEASE)
+        require(record["state"] == "closed"
+                and record["cell_sha256"] == operating_cells.FIFTH_CELL
+                and record["policy_sha256"] == operating_cells.FIFTH_POLICY
+                and record["identity"]["caller_sha"] == operating_cells.FIFTH_MAIN
+                and record["identity"]["run_id"] == operating_cells.FIFTH_RUN
+                and record["identity"]["job_id"] == operating_cells.FIFTH_JOB
+                and record["identity"]["check_run_id"] == operating_cells.FIFTH_CHECK
+                and record["identity"]["runner_id"] == operating_cells.FIFTH_RUNNER and record["worker"]["uid"] == operating_cells.FIFTH_UID
+                and record["identity"]["reusable_sha"] == operating_cells.FOUR_HISTORY_REUSABLE
+                and operating_cells.FIFTH_RETAIN_UNTIL <= record["closed_at"] <= int(time.time()),
+                "continuation-fifth-original-not-verified-closed")
+        ledger.Ledger._cleanup_complete(list(record["effects"].values()))
+        owner = cell_contract.partial_preparation_owner(registry, origin["selector"], store,
+                                                       operating_cells.FIFTH_LEASE)
+        require(set(owner.creators) == {"network-create", "project-create", "profile-configure", "context-create",
+                                       "certificate-create", "engine-prepare"}, "continuation-fifth-exact-six-creators")
+        value = owner.incus
+        fingerprint = owner.creator_targets["certificate-create"].removeprefix("certificate:")
+        # The original platform socket is a sealed source property, not any
+        # successor/caller endpoint. No current authorization is renewed here.
+        config, _, _ = preparation._config(configuration.preparation_config_path,
+                                            configuration.preparation_config_sha256)
+        client = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
+            value["project"], value["network"], "default", value["pool"], (fingerprint,)))
+        cleanup = incus_mutation.RootPartialPreparationCleanup(client, owner, store)
+        snapshot = cleanup.certificate_inventory()
+        require(not snapshot.fingerprints and cleanup.certificates_absent(),
+                "continuation-fifth-native-certificate-returned")
+        absent = {kind: cleanup.readback(kind) for kind in ("project", "bridge")}
+        require(all(row["state"] == "absent_observed" for row in absent.values()),
+                "continuation-fifth-native-resource-returned")
+        # Later independent successor credentials are legitimate. Authenticate
+        # the complete original scope, but seal only its continuing absence,
+        # not the changing inventory of unrelated/current successor scopes.
+        absent["certificate"] = {"state": "absent_observed", "scope_sha256": snapshot.scope_sha256,
+                                 "original_fingerprint": snapshot.original_fingerprint}
+        descriptor = identity.decode_json(owner.engine_descriptor_bytes)
+        cleanup_storage._absent((descriptor["engine"]["storage_root"], descriptor["engine"]["runroot"],
+            descriptor["output_path"], descriptor["context_path"], owner.engine_descriptor_path))
+        require(store.read_policy(record["policy_sha256"])["retention_seconds"] == 14400
+                and store.read(owner.lease_id) == record, "continuation-fifth-retirement-drift")
+        return {"record_sha256": ledger.digest(record), "closed_at": record["closed_at"],
+                "native_absence_sha256": ledger.digest(absent)}
+
+
+def _fifth_catalogue_snapshot(directory, *, intake):
+    root = installation._open_directory(directory)
+    try:
+        names = run_intake._entries(root)
+        require(0 < len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names),
+                "continuation-fifth-retired-catalogue")
+        rows = {}
+        for name in names:
+            child = os.open(name, installation.DIR_FLAGS, dir_fd=root)
+            try:
+                value = run_intake._read_at(child, "intent.json")[0]
+                if intake:
+                    source = value["binding"]["source"]
+                    controller = value["binding"]["controller"]
+                    who = value["original_job"]
+                    require(source["repository"] == SOURCE and source["commit_sha"] == operating_cells.FIFTH_MAIN
+                            and controller["repository"] == VALIDATION
+                            and controller["commit_sha"] == operating_cells.FOUR_HISTORY_REUSABLE,
+                            "continuation-fifth-retired-source")
+                else:
+                    configuration, _ = _read_complete(Path(directory) / name)
+                    who = read_configuration_origin(configuration)
+                    require(who["source_sha"] == operating_cells.FIFTH_MAIN
+                            and who["reusable_sha"] == operating_cells.FOUR_HISTORY_REUSABLE,
+                            "continuation-fifth-retired-configuration")
+                require(who["run_id"] == operating_cells.FIFTH_RUN and who["job_id"] == operating_cells.FIFTH_JOB
+                        and who["check_run_id"] == operating_cells.FIFTH_JOB, "continuation-fifth-retired-invocation")
+                rows[name] = _fifth_retired_entry(Path(directory) / name)
+            finally:
+                os.close(child)
+        require(run_intake._entries(root) == names, "continuation-fifth-retired-catalogue-drift")
+        return rows
+    finally:
+        os.close(root)
+
+
+def collect_partial_preparation_retirement(successor_ledger_path, original_configuration):
+    """Root-only actual closed resource/catalogue readback, never a write or retry."""
+    _root()
+    engine._path(successor_ledger_path)
+    before = _fifth_closed_projection(successor_ledger_path, original_configuration)
+    catalogues = {"native_intake_catalogue": _fifth_catalogue_snapshot(run_intake.ROOT, intake=True),
+        "native_run_configuration_catalogue": _fifth_catalogue_snapshot(ROOT, intake=False)}
+    require(_fifth_closed_projection(successor_ledger_path, original_configuration) == before, "continuation-fifth-closed-drift")
+    value = {"schema": 1, "kind": "original-fifth-partial-preparation-verified-closed",
+             "lease_id": operating_cells.FIFTH_LEASE, "retain_until": operating_cells.FIFTH_RETAIN_UNTIL,
+             **before, "catalogues": catalogues, "original_configuration": original_configuration}
+    operating_cells._validate_partial_retirement(value)
+    return value
+
+
+def _revalidate_fifth_retirement(retirement, successor_ledger_path):
+    operating_cells._validate_partial_retirement(retirement)
+    current = _fifth_closed_projection(successor_ledger_path, retirement["original_configuration"])
+    require(current == {key: retirement[key] for key in ("record_sha256", "closed_at", "native_absence_sha256")},
+            "continuation-fifth-retirement-drift")
+    # The complete parent catalogue reader separately proves all retired entries
+    # unchanged and classifies every additional entry as this exact successor.
+    # Recollecting the producer's original-only catalogue here would reject the
+    # first legitimate new configuration and break its own later revalidation.
+
+
 @identity._diagnostic_step("native-histories")
 def _continuation_original_native(get, *, prior=False):
     origin = operating_cells.continuation_prior_origin() if prior else operating_cells.continuation_origin()
@@ -314,7 +478,7 @@ def _continuation_fourth_native(get):
     return operating_cells.fourth_native_projection(run, {"total_count": total, "jobs": rows}, checks, commit)
 
 
-def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, templates, *, intake):
+def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, templates, *, intake, retired=None):
     """Only exact successor metadata can follow the original empty catalogue."""
     root = installation._open_directory(directory)
     try:
@@ -325,7 +489,13 @@ def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, temp
         require(len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names),
                 "continuation-catalogue-unknown")
         successor = descriptor["successor"]
+        require(retired is None or type(retired) is dict and set(retired) <= names,
+                "continuation-fifth-retired-entry-missing")
         for name in names:
+            if retired is not None and name in retired:
+                require(_fifth_retired_entry(Path(directory) / name) == retired[name],
+                        "continuation-fifth-retired-entry-drift")
+                continue
             child = os.open(name, installation.DIR_FLAGS, dir_fd=root)
             try:
                 run_intake._directory_identity(child)
@@ -377,11 +547,16 @@ def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, temp
 
 def _continuation_origin_absent(bootstrap, qualified):
     """Product API reads only; call outside any nested Ledger transaction."""
-    descriptor, _, counts, _ = qualified
+    descriptor, receipt, counts, _ = qualified
+    retired = receipt["retirement"]["catalogues"] if descriptor["schema"] == 5 else None
+    if retired is not None:
+        _revalidate_fifth_retirement(receipt["retirement"], bootstrap.value["ledger_path"])
     _continuation_catalogue(run_intake.ROOT, counts["native_intake_catalogue"], descriptor, bootstrap.sha256,
-                            bootstrap.value["cells"], intake=True)
+                            bootstrap.value["cells"], intake=True,
+                            retired=retired["native_intake_catalogue"] if retired is not None else None)
     _continuation_catalogue(ROOT, counts["native_run_configuration_catalogue"], descriptor, bootstrap.sha256,
-                            bootstrap.value["cells"], intake=False)
+                            bootstrap.value["cells"], intake=False,
+                            retired=retired["native_run_configuration_catalogue"] if retired is not None else None)
     successor = descriptor["successor"]
     with ledger.Ledger(bootstrap.value["ledger_path"], clock=time.time) as store:
         for identifier in store.lease_ids():
@@ -428,19 +603,22 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
         # opaque native proof. Current authorization and original absence are
         # still freshly checked on every revalidation; no shared cache exists.
         if check_origin:
-            three = receipt["previous_qualification"] if descriptor["schema"] == 4 else receipt
-            previous = three["previous_qualification"] if descriptor["schema"] in {3, 4} else three
-            legacy = previous["legacy_qualification"] if descriptor["schema"] in {2, 3, 4} else previous
+            four = receipt["previous_qualification"] if descriptor["schema"] == 5 else receipt
+            three = four["previous_qualification"] if descriptor["schema"] in {4, 5} else four
+            previous = three["previous_qualification"] if descriptor["schema"] in {3, 4, 5} else three
+            legacy = previous["legacy_qualification"] if descriptor["schema"] in {2, 3, 4, 5} else previous
             require(_continuation_original_native(get) == legacy["native_origin"], "continuation-original-native-drift")
-            if descriptor["schema"] in {2, 3, 4}:
+            if descriptor["schema"] in {2, 3, 4, 5}:
                 require(_continuation_original_native(get, prior=True) == previous["native_prior"],
                         "continuation-prior-native-drift")
-            if descriptor["schema"] in {3, 4}:
+            if descriptor["schema"] in {3, 4, 5}:
                 require(_continuation_third_native(get) == three["native_third"], "continuation-third-native-drift")
-            if descriptor["schema"] == 4:
-                require(_continuation_fourth_native(get) == receipt["native_fourth"], "continuation-fourth-native-drift")
+            if descriptor["schema"] in {4, 5}:
+                require(_continuation_fourth_native(get) == four["native_fourth"], "continuation-fourth-native-drift")
+            if descriptor["schema"] == 5:
+                require(_continuation_fifth_native(get) == receipt["native_fifth"], "continuation-fifth-native-drift")
         _continuation_origin_absent(selected.bootstrap, qualified)
-        if descriptor["schema"] in {3, 4} or identity.decode_json(selected.template_bytes)["kind"] == "operating":
+        if descriptor["schema"] in {3, 4, 5} or identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
                                                          who.caller_sha, who.run_id, who.reusable_sha)
     elif identity.decode_json(selected.template_bytes)["kind"] == "operating":

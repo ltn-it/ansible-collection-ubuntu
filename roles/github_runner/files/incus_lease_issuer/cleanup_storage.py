@@ -40,8 +40,30 @@ class StorageReceipt:
 
 
 def _fresh(owner, store, config):
-    require(os.geteuid() == 0 and type(owner) is cell_contract.OwnedCellForCleanup and (type(store) is ledger.Ledger) and (store.owner_uid == 0) and (type(config) is preparation.RootConfiguration), 'cleanup-storage-root-inputs')
-    require(preparation._config(config.path, config.sha256)[0] == config and owner.registry.path == config.registry_path and (owner.registry.sha256 == config.registry_sha256) and (cell_contract.owned_cell_for_cleanup(owner.registry, owner.selector, store, owner.lease_id) == owner), 'cleanup-storage-owner-drift')
+    if type(owner) is cell_contract.PartialPreparationOwner:
+        from . import operating_custody
+        require(os.geteuid() == 0 and type(store) is ledger.Ledger and store.owner_uid == 0
+                and type(config) is preparation.RootConfiguration, "partial-storage-root-inputs")
+        require(preparation._config(config.path, config.sha256)[0] == config
+                and (owner.registry.path, owner.registry.sha256) == (config.registry_path, config.registry_sha256)
+                and cell_contract.partial_preparation_owner(owner.registry, owner.selector, store, owner.lease_id) == owner,
+                "partial-storage-owner-drift")
+        # During our own one cleanup intent, policy remains checked against the
+        # same immutable retention value; unknown effects are always denied by
+        # the partial-owner factory, no intent is re-sent by _effect.
+        record = store.read(owner.lease_id)
+        retained = operating_custody._partial_custody_record(record.get("partial_preparation_custody"), record,
+                                                            store.read_policy(record["policy_sha256"]))
+        require(store._now() >= retained["retain_until"], "partial-storage-retention")
+        return record
+    require(os.geteuid() == 0 and type(owner) is cell_contract.OwnedCellForCleanup
+            and type(store) is ledger.Ledger and store.owner_uid == 0
+            and type(config) is preparation.RootConfiguration, "cleanup-storage-root-inputs")
+    require(preparation._config(config.path, config.sha256)[0] == config
+            and owner.registry.path == config.registry_path
+            and owner.registry.sha256 == config.registry_sha256
+            and cell_contract.owned_cell_for_cleanup(owner.registry, owner.selector, store, owner.lease_id) == owner,
+            "cleanup-storage-owner-drift")
     return store.read(owner.lease_id)
 
 
@@ -532,7 +554,14 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
     _deadline(end)
 
 
-
+def _partial_no_consumers(owner, opened, end, inventories):
+    require(type(owner) is cell_contract.PartialPreparationOwner, "partial-consumers-owner")
+    data = identity.decode_json(owner.engine_descriptor_bytes)
+    identities = {value[:2] for _, _, inventory in inventories for value in inventory[1].values()}
+    pinned = [(path, inventory[1][()][0], inventory[2]) for path, _, inventory in inventories]
+    rows = _consumer_mount_rows(_consumer_read(Path("/proc/self/mountinfo"), 4 * 1024**2, end), end)
+    _no_consumers(data, owner.engine_descriptor_path, owner.lease_id, opened, end,
+                  identities, _consumer_mount_targets(rows, pinned))
 
 
 def _postcheck_observation(owner, inventories, spool, end):
@@ -596,158 +625,191 @@ def _consume_reconciliation(proof, store, identifier, effect_id):
 def reconcile_postchecks(session, owner, store, config, cleanup):
     """GET-only original-scope resolution, never a repeated delete or timing PASS."""
     from . import root_session, kernel
-    require(root_session._require_session(session) == config, 'cleanup-reconciliation-session')
+    require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
     record = _fresh(owner, store, config)
     from . import operating_custody
-    operating_custody.require_cleanup_allowed(store, owner.lease_id)
-    require(not any((e['state'] in {'intent', 'unknown'} for e in record['effects'].values())), 'cleanup-reconciliation-uncertain')
-    for effect_id, effect in record['effects'].items():
-        if 'cleanup_postcheck' not in effect:
+    if type(owner) is not cell_contract.PartialPreparationOwner:
+        operating_custody.require_cleanup_allowed(store, owner.lease_id)
+    require(not any(e["state"] in {"intent", "unknown"} for e in record["effects"].values()),
+            "cleanup-reconciliation-uncertain")
+    for effect_id, effect in record["effects"].items():
+        if "cleanup_postcheck" not in effect:
             continue
         try:
             store.require_cleanup_postchecks(owner.lease_id)
-            return
+            return  # The original process already has the complete live witnesses.
         except Denied:
             pass
         end = time.monotonic() + config.operation_wait_seconds
-        require(effect['state'] == 'verified', 'cleanup-reconciliation-uncertain')
+        require(effect["state"] == "verified", "cleanup-reconciliation-uncertain")
         value = store.read_cleanup_observation(owner.lease_id, effect_id, deadline=end)
-        require(value is not None, 'cleanup-reconciliation-metadata-required')
+        require(value is not None, "cleanup-reconciliation-metadata-required")
         metadata, pairs = value
-        require(set(metadata) == {'schema', 'paths', 'parents', 'targets', 'descriptor_sha256', 'spool', 'deadline_monotonic', 'boot_id', 'cgroup_root'} and metadata['schema'] == 1 and (type(metadata['schema']) is int) and (metadata['descriptor_sha256'] == owner.engine_descriptor_sha256) and (metadata['boot_id'] == kernel.read_boot_id()), 'cleanup-reconciliation-metadata')
+        require(set(metadata) == {"schema", "paths", "parents", "targets", "descriptor_sha256", "spool",
+                                  "deadline_monotonic", "boot_id", "cgroup_root"}
+                and metadata["schema"] == 1 and type(metadata["schema"]) is int
+                and metadata["descriptor_sha256"] == owner.engine_descriptor_sha256
+                and metadata["boot_id"] == kernel.read_boot_id(), "cleanup-reconciliation-metadata")
         data = identity.decode_json(owner.engine_descriptor_bytes)
-        expected = [data['engine']['storage_root'], data['engine']['runroot'], data['output_path']] if effect['operation'] == 'engine-release' else [data['context_path'], owner.engine_descriptor_path]
-        require(metadata['paths'] == expected and len(metadata['parents']) == len(expected), 'cleanup-reconciliation-paths')
-        spool = data['engine']['runroot'] + '.public-evidence'
-        require(metadata['spool'] == spool, 'cleanup-reconciliation-spool')
-        identities = set(struct.iter_unpack('>QQ', pairs))
-        require(len(identities) * 16 == len(pairs), 'cleanup-reconciliation-duplicate-inode')
+        expected = ([data["engine"]["storage_root"], data["engine"]["runroot"], data["output_path"]]
+                    if effect["operation"] == "engine-release" else [data["context_path"], owner.engine_descriptor_path])
+        require(metadata["paths"] == expected and len(metadata["parents"]) == len(expected),
+                "cleanup-reconciliation-paths")
+        spool = (str(PurePosixPath(data["engine"]["runroot"]).parent)
+                 if type(owner) is cell_contract.PartialPreparationOwner else data["engine"]["runroot"] + ".public-evidence")
+        require(metadata["spool"] == spool, "cleanup-reconciliation-spool")
+        identities = set(struct.iter_unpack(">QQ", pairs))
+        require(len(identities) * 16 == len(pairs), "cleanup-reconciliation-duplicate-inode")
         opened = []
         try:
             pinned = []
-            for path, parent in zip(expected, metadata['parents']):
-                require(set(parent) == {'path', 'identity', 'mount_id'} and parent['path'] == str(PurePosixPath(path).parent), 'cleanup-reconciliation-parent')
-                fd = engine._directory(parent['path'], private=True)
-                opened.append(fd)
+            for path, parent in zip(expected, metadata["parents"]):
+                require(set(parent) == {"path", "identity", "mount_id"}
+                        and parent["path"] == str(PurePosixPath(path).parent), "cleanup-reconciliation-parent")
+                fd = engine._directory(parent["path"], private=True); opened.append(fd)
                 info = os.fstat(fd)
-                require(list(_identity(info)) == parent['identity'] and storage_quota._mount_id(fd) == parent['mount_id'], 'cleanup-reconciliation-parent')
-                pinned.append((path, info.st_dev, parent['mount_id']))
-            rows = _consumer_mount_rows(_consumer_read(Path('/proc/self/mountinfo'), 4 * 1024 ** 2, end), end)
+                require(list(_identity(info)) == parent["identity"]
+                        and storage_quota._mount_id(fd) == parent["mount_id"], "cleanup-reconciliation-parent")
+                pinned.append((path, info.st_dev, parent["mount_id"]))
+            rows = _consumer_mount_rows(_consumer_read(Path("/proc/self/mountinfo"), 4 * 1024**2, end), end)
             targets = _consumer_mount_targets(rows, pinned)
-            require([list(row) for row in targets] == metadata['targets'], 'cleanup-reconciliation-mount')
+            require([list(row) for row in targets] == metadata["targets"], "cleanup-reconciliation-mount")
             _absent(expected)
-            start = next((e for e in record['effects'].values() if e['operation'] == 'engine-start'), None)
+            start = next((e for e in record["effects"].values() if e["operation"] == "engine-start"), None)
             process = None
             if start is not None:
-                ledger._validate_engine_exit(start['engine_exit'], start)
-                process = start['engine_process']
-                require(process['boot_id'] == kernel.read_boot_id(), 'cleanup-reconciliation-engine-boot')
-            group = engine._directory('/sys/fs/cgroup', private=False)
+                ledger._validate_engine_exit(start["engine_exit"], start)
+                process = start["engine_process"]
+                require(process["boot_id"] == kernel.read_boot_id(), "cleanup-reconciliation-engine-boot")
+            group = engine._directory("/sys/fs/cgroup", private=False)
             try:
-                require([*_identity(os.fstat(group)), storage_quota._mount_id(group)] == metadata['cgroup_root'] and engine_executor._fs_type(group) == engine_executor.CGROUP2_MAGIC, 'cleanup-reconciliation-cgroup-root')
+                require([*_identity(os.fstat(group)), storage_quota._mount_id(group)] == metadata["cgroup_root"]
+                        and engine_executor._fs_type(group) == engine_executor.CGROUP2_MAGIC,
+                        "cleanup-reconciliation-cgroup-root")
                 if start is not None:
-                    relative = 'lit.slice/lit-lease.slice/lit-lease-' + owner.lease_id + '.slice'
+                    relative = "lit.slice/lit-lease.slice/lit-lease-" + owner.lease_id + ".slice"
                     try:
                         child = os.open(relative, installation.DIR_FLAGS, dir_fd=group)
                     except FileNotFoundError:
                         child = None
                     if child is not None:
                         try:
-                            info = os.fstat(child)
-                            capture = start['engine_capture']
-                            require((info.st_dev, info.st_ino) == (capture['cgroup_device'], capture['cgroup_inode']), 'cleanup-reconciliation-cgroup-replaced')
-                            events = dict((line.split() for line in kernel.bounded_file(child, 'cgroup.events', 4096).splitlines()))
-                            require(events.get(b'populated') == b'0' and (not kernel.bounded_file(child, 'cgroup.procs', 65536).strip()), 'cleanup-reconciliation-live-owner')
+                            info = os.fstat(child); capture = start["engine_capture"]
+                            require((info.st_dev, info.st_ino) == (capture["cgroup_device"], capture["cgroup_inode"]),
+                                    "cleanup-reconciliation-cgroup-replaced")
+                            events = dict(line.split() for line in kernel.bounded_file(child, "cgroup.events", 4096).splitlines())
+                            require(events.get(b"populated") == b"0" and not kernel.bounded_file(child, "cgroup.procs", 65536).strip(),
+                                    "cleanup-reconciliation-live-owner")
                         finally:
                             os.close(child)
             finally:
                 os.close(group)
-            _no_consumers(data, owner.engine_descriptor_path, owner.lease_id, opened, end, identities, targets, process)
-            with storage_quota.acquire_existing_evidence_quota(config.storage_quota_policy_path, config.storage_quota_policy_sha256, metadata['spool']):
-                require(cleanup.certificates_absent(), 'cleanup-reconciliation-certificate-live')
+            _no_consumers(data, owner.engine_descriptor_path, owner.lease_id, opened, end,
+                          identities, targets, process)
+            with storage_quota.acquire_existing_evidence_quota(config.storage_quota_policy_path,
+                    config.storage_quota_policy_sha256, metadata["spool"]):
+                require(cleanup.certificates_absent(), "cleanup-reconciliation-certificate-live")
                 project = cleanup.readback("project")
                 quiet = cleanup.quiet_project() if project["state"] != "absent_observed" else None
                 _absent(expected)
                 _fresh(owner, store, config)
-                for fd, parent in zip(opened, metadata['parents']):
-                    require(list(_identity(os.fstat(fd))) == parent['identity'] and storage_quota._mount_id(fd) == parent['mount_id'], 'cleanup-reconciliation-parent')
-                    current = engine._directory(parent['path'], private=True)
+                for fd, parent in zip(opened, metadata["parents"]):
+                    require(list(_identity(os.fstat(fd))) == parent["identity"]
+                            and storage_quota._mount_id(fd) == parent["mount_id"], "cleanup-reconciliation-parent")
+                    current = engine._directory(parent["path"], private=True)
                     try:
-                        require(_identity(os.fstat(current)) == _identity(os.fstat(fd)) and storage_quota._mount_id(current) == parent['mount_id'], 'cleanup-reconciliation-parent')
+                        require(_identity(os.fstat(current)) == _identity(os.fstat(fd))
+                                and storage_quota._mount_id(current) == parent["mount_id"], "cleanup-reconciliation-parent")
                     finally:
                         os.close(current)
-            for fd in reversed(opened):
-                os.close(fd)
+            for fd in reversed(opened): os.close(fd)
             opened.clear()
             state = store._load()
-            require(state['leases'][owner.lease_id] == record, 'cleanup-reconciliation-record-drift')
-            payload = {'generation': state['generation'], 'effect_sha256': ledger.digest(effect), 'deadline': end, 'observation_sha256': ledger.digest({'sidecar': effect['cleanup_observation'], 'paths_absent': expected, 'native_scope': {'project': project, 'quiet': quiet, 'certificate_scope_absent': True}, 'quota': 'verified'})}
+            require(state["leases"][owner.lease_id] == record, "cleanup-reconciliation-record-drift")
+            payload = {"generation": state["generation"], "effect_sha256": ledger.digest(effect),
+                "deadline": end, "observation_sha256": ledger.digest({"sidecar": effect["cleanup_observation"],
+                "paths_absent": expected, "native_scope": {"project": project, "quiet": quiet,
+                    "certificate_scope_absent": True}, "quota": "verified"})}
             _deadline(end)
-            proof = _CleanupReconciliation(store, session, owner.lease_id, effect_id, payload, os.getpid(), threading.current_thread())
-            with _RECONCILIATION_LOCK:
-                _RECONCILIATIONS.add(proof)
+            proof = _CleanupReconciliation(store, session, owner.lease_id, effect_id, payload,
+                                           os.getpid(), threading.current_thread())
+            with _RECONCILIATION_LOCK: _RECONCILIATIONS.add(proof)
             store.resolve_cleanup_postcheck(owner.lease_id, effect_id, proof)
         finally:
-            for fd in reversed(opened):
-                os.close(fd)
+            for fd in reversed(opened): os.close(fd)
 
 
 def release_engine(owner, store, config):
     """Release only the three directory inodes created by engine-prepare."""
-    effect, opened = (None, [])
+    effect, opened = None, []
     publication_attempted = False
     try:
         started = time.monotonic()
         record = _fresh(owner, store, config)
         store.require_cleanup_postchecks(owner.lease_id)
         data = identity.decode_json(owner.engine_descriptor_bytes)
-        paths = (data['engine']['storage_root'], data['engine']['runroot'], data['output_path'])
-        target = 'engine:' + owner.lease_id
-        previous = _effect(record, 'engine-release', target)
+        paths = (data["engine"]["storage_root"], data["engine"]["runroot"], data["output_path"])
+        target = "engine:" + owner.lease_id
+        previous = _effect(record, "engine-release", target)
         if previous is not None:
             _absent(paths)
-            return StorageReceipt(owner.lease_id, 'engine-release', previous[1]['evidence_sha256'])
-        _drain_engine(owner, store, config)
+            return StorageReceipt(owner.lease_id, "engine-release", previous[1]["evidence_sha256"])
+        if type(owner) is not cell_contract.PartialPreparationOwner:
+            _drain_engine(owner, store, config)
         maximum, seconds = _cleanup_limits(config)
         end = started + seconds
         _deadline(end)
-        directories, inventories, used = ([], [], 0)
+        directories, inventories, used = [], [], 0
         for path in paths:
             parent = engine._directory(str(PurePosixPath(path).parent), private=True)
             opened.append(parent)
             fd = engine._directory(path, private=True)
             opened.append(fd)
             info = os.fstat(fd)
-            directories.append({'path': path, 'device': info.st_dev, 'inode': info.st_ino})
+            directories.append({"path": path, "device": info.st_dev, "inode": info.st_ino})
             inventory = _inventory_tree(fd, end, maximum - used)
             used += len(inventory[0])
             inventories.append((path, parent, fd, inventory))
-        creator = record['effects'][owner.creators['engine-prepare']['id']]
-        require(creator['evidence_sha256'] == ledger.digest({'prepared': owner.prepared_sha256, 'directories': directories}), 'cleanup-storage-original-inodes')
-        spool = data['engine']['runroot'] + '.public-evidence'
-        require(all((spool != path and (not spool.startswith(path + '/')) for path in paths)), 'cleanup-storage-spool-inside-raw')
-        with storage_quota.acquire_existing_evidence_quota(config.storage_quota_policy_path, config.storage_quota_policy_sha256, spool):
+        creator = record["effects"][owner.creators["engine-prepare"]["id"]]
+        require(creator["evidence_sha256"] == ledger.digest({"prepared": owner.prepared_sha256,
+                    "directories": directories}), "cleanup-storage-original-inodes")
+        # The public sibling stays bounded by the original Root quota even
+        # after the raw graph/runroot/output have all been removed.
+        spool = (str(PurePosixPath(data["engine"]["runroot"]).parent)
+                 if type(owner) is cell_contract.PartialPreparationOwner else
+                 data["engine"]["runroot"] + ".public-evidence")
+        require(all(spool != path and not spool.startswith(path + "/") for path in paths),
+                "cleanup-storage-spool-inside-raw")
+        with storage_quota.acquire_existing_evidence_quota(
+                config.storage_quota_policy_path, config.storage_quota_policy_sha256, spool):
             _fresh(owner, store, config)
             _deadline(end)
-            observation = _postcheck_observation(owner, [(path, fd, inventory) for path, _, fd, inventory in inventories], spool, end)
+            if type(owner) is cell_contract.PartialPreparationOwner:
+                _partial_no_consumers(owner, opened, end,
+                    [(path, fd, inventory) for path, _, fd, inventory in inventories])
+                _deadline(end)
+            observation = _postcheck_observation(owner, [(path, fd, inventory)
+                    for path, _, fd, inventory in inventories], spool, end)
             publication_attempted = True
             effect, guard = store.begin_cleanup_with_postcheck(owner.lease_id, 'engine-release', target, end, observation=observation)
             for path, parent, fd, inventory in inventories:
                 _deadline(end)
                 named = os.stat(PurePosixPath(path).name, dir_fd=parent, follow_symlinks=False)
-                require(_identity(named) == _identity(os.fstat(fd)), 'cleanup-storage-root-replaced')
+                require(_identity(named) == _identity(os.fstat(fd)), "cleanup-storage-root-replaced")
                 _remove_tree(fd, inventory, end)
                 os.rmdir(PurePosixPath(path).name, dir_fd=parent)
                 os.fsync(parent)
             _absent(paths)
-            evidence = ledger.digest({'lease_id': owner.lease_id, 'operation': 'engine-release', 'directories': directories, 'removed_entries': used})
+            evidence = ledger.digest({"lease_id": owner.lease_id, "operation": "engine-release",
+                                      "directories": directories, "removed_entries": used})
+        # Quota-exit readback precedes the success receipt, within the SAME end.
         _deadline(end)
-        store.record(owner.lease_id, effect, 'verified', evidence_sha256=evidence)
+        store.record(owner.lease_id, effect, "verified", evidence_sha256=evidence)
         for fd in reversed(opened):
             os.close(fd)
         opened.clear()
         store.complete_cleanup_postcheck(guard)
-        return StorageReceipt(owner.lease_id, 'engine-release', evidence)
+        return StorageReceipt(owner.lease_id, "engine-release", evidence)
     except BaseException:
         if effect is None and publication_attempted:
             try:
@@ -755,9 +817,9 @@ def release_engine(owner, store, config):
             except BaseException:
                 raise CleanupStorageUnknown('cleanup-storage-publication-unknown') from None
         if effect is not None:
-            _mark_unknown(store, owner, effect, 'engine-release')
-            raise CleanupStorageUnknown('cleanup-storage-unknown') from None
-        raise Denied('cleanup-storage-denied') from None
+            _mark_unknown(store, owner, effect, "engine-release")
+            raise CleanupStorageUnknown("cleanup-storage-unknown") from None
+        raise Denied("cleanup-storage-denied") from None
     finally:
         for fd in reversed(opened):
             os.close(fd)
@@ -765,33 +827,49 @@ def release_engine(owner, store, config):
 
 def delete_context(owner, store, config):
     """Authenticate the original TLS context, then unlink that exact inventory."""
-    effect, opened = (None, [])
+    effect, opened = None, []
     publication_attempted = False
     try:
         started = time.monotonic()
         record = _fresh(owner, store, config)
         store.require_cleanup_postchecks(owner.lease_id)
         data = identity.decode_json(owner.engine_descriptor_bytes)
-        context, descriptor = (data['context_path'], owner.engine_descriptor_path)
-        target = 'context:' + owner.cell_sha256
-        previous = _effect(record, 'context-delete', target)
+        context, descriptor = data["context_path"], owner.engine_descriptor_path
+        target = "context:" + owner.cell_sha256
+        previous = _effect(record, "context-delete", target)
         if previous is not None:
             _absent((context, descriptor))
-            return StorageReceipt(owner.lease_id, 'context-delete', previous[1]['evidence_sha256'])
-        require(_effect(record, 'engine-release', 'engine:' + owner.lease_id) is not None and _effect(record, 'certificate-revoke', owner.creator_targets['certificate-create']) is not None, 'cleanup-storage-parents-live')
-        raw, binding_proof = signed_context._sealed(context + '/binding.json', 32768)
+            return StorageReceipt(owner.lease_id, "context-delete", previous[1]["evidence_sha256"])
+        require((type(owner) is cell_contract.PartialPreparationOwner and "engine-prepare" not in owner.creators
+                 or _effect(record, "engine-release", "engine:" + owner.lease_id) is not None)
+                and (type(owner) is cell_contract.PartialPreparationOwner and "certificate-create" not in owner.creators
+                 or _effect(record, "certificate-revoke", owner.creator_targets["certificate-create"]) is not None),
+                "cleanup-storage-parents-live")
+        raw, binding_proof = signed_context._sealed(context + "/binding.json", 32768)
         binding = identity.decode_json(raw)
-        receipt = preparation.PreparationReceipt(owner.lease_id, owner.cell_sha256, owner.engine_policy_sha256, binding_proof.sha256, owner.expires_at)
-        engine_executor._authenticate(config, owner.registry, owner.selector, store, owner.lease_id, receipt)
-        files = signed_context._files(context, binding, binding['admission'])
-        unsigned = {key: value for key, value in binding.items() if key != 'admission'}
-        files['binding.json'] = hashlib.sha256(ledger.canonical(unsigned)).hexdigest()
-        cert_raw, _ = signed_context._sealed(context + '/client.crt')
-        fingerprint = hashlib.sha256(x509.load_pem_x509_certificate(cert_raw).public_bytes(serialization.Encoding.DER)).hexdigest()
-        creator = record['effects'][owner.creators['context-create']['id']]
-        require('certificate:' + fingerprint == owner.creator_targets['certificate-create'] and creator['evidence_sha256'] == ledger.digest({'prepared': owner.prepared_sha256, 'files': files, 'descriptor': owner.engine_descriptor_sha256, 'certificate': fingerprint}), 'cleanup-storage-original-context')
+        if type(owner) is cell_contract.PartialPreparationOwner:
+            require("admission" not in binding, "partial-context-published")
+            files = signed_context._files(context, binding, None)
+            files["binding.json"] = hashlib.sha256(ledger.canonical(binding)).hexdigest()
+        else:
+            receipt = preparation.PreparationReceipt(owner.lease_id, owner.cell_sha256, owner.engine_policy_sha256,
+                                                     binding_proof.sha256, owner.expires_at)
+            engine_executor._authenticate(config, owner.registry, owner.selector, store, owner.lease_id, receipt)
+            files = signed_context._files(context, binding, binding["admission"])
+            unsigned = {key: value for key, value in binding.items() if key != "admission"}
+            files["binding.json"] = hashlib.sha256(ledger.canonical(unsigned)).hexdigest()
+        cert_raw, _ = signed_context._sealed(context + "/client.crt")
+        fingerprint = hashlib.sha256(x509.load_pem_x509_certificate(cert_raw).public_bytes(
+            serialization.Encoding.DER)).hexdigest()
+        creator = record["effects"][owner.creators["context-create"]["id"]]
+        require((type(owner) is cell_contract.PartialPreparationOwner and "certificate-create" not in owner.creators
+                 or "certificate:" + fingerprint == owner.creator_targets["certificate-create"])
+                and creator["evidence_sha256"] == ledger.digest({"prepared": owner.prepared_sha256,
+                    "files": files, "descriptor": owner.engine_descriptor_sha256, "certificate": fingerprint}),
+                "cleanup-storage-original-context")
         proof, descriptor_raw, _ = installation._file(descriptor, engine.MAX_DESCRIPTOR, private=True, keep=True)
-        require(proof.sha256 == owner.engine_descriptor_sha256 and descriptor_raw == owner.engine_descriptor_bytes, 'cleanup-storage-original-descriptor')
+        require(proof.sha256 == owner.engine_descriptor_sha256
+                and descriptor_raw == owner.engine_descriptor_bytes, "cleanup-storage-original-descriptor")
         parent = engine._directory(str(PurePosixPath(context).parent), private=True)
         opened.append(parent)
         fd = engine._directory(context, private=True)
@@ -802,32 +880,51 @@ def delete_context(owner, store, config):
         end = started + seconds
         _deadline(end)
         inventory = _inventory_tree(fd, end, min(maximum, 16))
-        require({'/'.join(row[0]) for row in inventory[0]} == {'binding.json', 'config.yml', 'client.crt', 'client.key', 'servercerts', 'servercerts/quality.crt'}, 'cleanup-storage-context-inventory')
+        require({"/".join(row[0]) for row in inventory[0]} == {
+            "binding.json", "config.yml", "client.crt", "client.key", "servercerts", "servercerts/quality.crt"},
+            "cleanup-storage-context-inventory")
         _fresh(owner, store, config)
+        if type(owner) is cell_contract.PartialPreparationOwner:
+            descriptor_fd = os.open(descriptor, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+            opened.append(descriptor_fd)
+            descriptor_info = os.fstat(descriptor_fd)
+            require((descriptor_info.st_dev, descriptor_info.st_ino) == (proof.device, proof.inode),
+                    "cleanup-storage-descriptor-replaced")
+            descriptor_mount = storage_quota._mount_id(descriptor_fd)
+            os.close(opened.pop())
+            _partial_no_consumers(owner, opened, end,
+                [(context, fd, inventory), (descriptor, descriptor_parent,
+                  ((), {(): _identity(descriptor_info)}, descriptor_mount))])
+            _deadline(end)
         descriptor_fd = os.open(descriptor, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             descriptor_inventory = ((), {(): _identity(os.fstat(descriptor_fd))}, storage_quota._mount_id(descriptor_fd))
-            context_observation = _postcheck_observation(owner, [(context, fd, inventory), (descriptor, descriptor_fd, descriptor_inventory)], data['engine']['runroot'] + '.public-evidence', end)
+            context_observation = _postcheck_observation(owner,
+                [(context, fd, inventory), (descriptor, descriptor_fd, descriptor_inventory)],
+                (str(PurePosixPath(data["engine"]["runroot"]).parent)
+                 if type(owner) is cell_contract.PartialPreparationOwner else data["engine"]["runroot"] + ".public-evidence"), end)
         finally:
             os.close(descriptor_fd)
         publication_attempted = True
         effect, guard = store.begin_cleanup_with_postcheck(owner.lease_id, 'context-delete', target, end, observation=context_observation)
         _remove_tree(fd, inventory, end)
-        require(_identity(os.stat(PurePosixPath(context).name, dir_fd=parent, follow_symlinks=False)) == _identity(os.fstat(fd)), 'cleanup-storage-context-replaced')
+        require(_identity(os.stat(PurePosixPath(context).name, dir_fd=parent, follow_symlinks=False))
+                == _identity(os.fstat(fd)), "cleanup-storage-context-replaced")
         os.rmdir(PurePosixPath(context).name, dir_fd=parent)
         os.fsync(parent)
         observed = os.stat(PurePosixPath(descriptor).name, dir_fd=descriptor_parent, follow_symlinks=False)
-        require((observed.st_dev, observed.st_ino) == (proof.device, proof.inode), 'cleanup-storage-descriptor-replaced')
+        require((observed.st_dev, observed.st_ino) == (proof.device, proof.inode), "cleanup-storage-descriptor-replaced")
         os.unlink(PurePosixPath(descriptor).name, dir_fd=descriptor_parent)
         os.fsync(descriptor_parent)
         _absent((context, descriptor))
-        evidence = ledger.digest({'lease_id': owner.lease_id, 'operation': 'context-delete', 'creator_sha256': owner.creator_digests['context-create']})
-        store.record(owner.lease_id, effect, 'verified', evidence_sha256=evidence)
+        evidence = ledger.digest({"lease_id": owner.lease_id, "operation": "context-delete",
+                                  "creator_sha256": owner.creator_digests["context-create"]})
+        store.record(owner.lease_id, effect, "verified", evidence_sha256=evidence)
         for fd in reversed(opened):
             os.close(fd)
         opened.clear()
         store.complete_cleanup_postcheck(guard)
-        return StorageReceipt(owner.lease_id, 'context-delete', evidence)
+        return StorageReceipt(owner.lease_id, "context-delete", evidence)
     except BaseException:
         if effect is None and publication_attempted:
             try:
@@ -835,9 +932,9 @@ def delete_context(owner, store, config):
             except BaseException:
                 raise CleanupStorageUnknown('cleanup-storage-publication-unknown') from None
         if effect is not None:
-            _mark_unknown(store, owner, effect, 'context-delete')
-            raise CleanupStorageUnknown('cleanup-storage-unknown') from None
-        raise Denied('cleanup-storage-denied') from None
+            _mark_unknown(store, owner, effect, "context-delete")
+            raise CleanupStorageUnknown("cleanup-storage-unknown") from None
+        raise Denied("cleanup-storage-denied") from None
     finally:
         for fd in reversed(opened):
             os.close(fd)

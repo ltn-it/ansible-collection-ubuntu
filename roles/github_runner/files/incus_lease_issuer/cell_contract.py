@@ -557,3 +557,148 @@ def _owned_cell(registry, selector, store, lease_id, *, live):
     return owner_type(registry, selector, lease_id, selected.cell_sha256, selected.deadline,
         identity.policy_digest(native), descriptor_path, raw, hashlib.sha256(raw).hexdigest(), manifest_sha,
         incus_bytes, creator_bytes, hashlib.sha256(canonical).hexdigest(), canonical, ledger.digest(binding))
+
+
+@dataclass(frozen=True)
+class PartialPreparationOwner:
+    """Original verified pre-engine creators; never a VM/engine/grant owner.
+
+    No authorization renewal, engine start, signing or materialization accepts
+    this type. Paths/targets remain derivable after raw runtime files are gone.
+    """
+    registry: policy_registry.Registry
+    selector: str
+    lease_id: str
+    cell_sha256: str
+    expires_at: int
+    identity_policy_sha256: str
+    engine_descriptor_path: str
+    engine_descriptor_bytes: bytes
+    engine_descriptor_sha256: str
+    incus_bytes: bytes
+    creator_bytes: bytes
+    prepared_sha256: str
+    canonical_bytes: bytes
+    sha256: str
+
+    @property
+    def creator_digests(self):
+        return {key: value["sha256"] for key, value in self.creators.items()}
+
+    @property
+    def creator_targets(self):
+        return {key: value["target"] for key, value in self.creators.items()}
+
+    @property
+    def incus(self):
+        return identity.decode_json(self.incus_bytes)
+
+    @property
+    def creators(self):
+        return identity.decode_json(self.creator_bytes)
+
+
+
+def partial_preparation_owner(registry, selector, store, lease_id):
+    """Revalidate fixed Root semantics and original native creator receipts.
+
+    No current JWT/authorization or surviving context/runroot is required. A
+    partial/unknown create remains a hold, not an adopted cleanup target. This
+    factory supplies only locators; every cleanup transport must independently
+    reacquire native ownership and journal its own once-only effect.
+    """
+    require(os.geteuid() == 0, "cell-root-required")
+    require(type(registry) is policy_registry.Registry and type(registry.policies) is MappingProxyType
+            and policy_registry.load_registry(registry.path, registry.sha256) == registry, "cell-root-registry")
+    selected = registry.select(selector)
+    admission._validate_policy(selected)
+    _store(selected, store)
+    require(type(lease_id) is str and ledger.ID.fullmatch(lease_id), "cell-lease-id")
+    record = store.read(lease_id)
+    who, worker = record["identity"], record["worker"]
+    native = selected.identity
+    require(record["state"] in {"prepared", "cancelled", "retained", "closed"}
+            and record["cell_sha256"] == selected.cell_sha256
+            and record["policy_sha256"] == selected.custody_policy_sha256
+            and record["expires_at"] == selected.deadline
+            and who["policy_sha256"] == identity.policy_digest(native)
+            and who["caller_sha"] == native.caller_sha and who["reusable_sha"] == native.reusable_sha
+            and who["runner_id"] == native.runner_id == worker["runner_id"]
+            and who["service_uid"] == native.service_uid == worker["uid"], "cell-cleanup-binding")
+    value, proof, stamp = _sealed(selected.cell_config_path, selected.cell_sha256)
+    _cell_fields(value)
+    require(type(value["schema"]) is int and value["schema"] == 1, "cell-schema")
+    candidate = engine._keys(value["candidate"], {"repository", "source_sha", "artifact", "archive_sha256"})
+    controller = engine._keys(value["controller"], {"repository", "source_sha", "archive_sha256", "files"})
+    _repo(candidate["repository"])
+    _commit(candidate["source_sha"])
+    require(controller["repository"] == native.reusable_repository, "cell-controller-repository")
+    _commit(controller["source_sha"])
+    env = _environment(value, native, who)
+    descriptor = _descriptor(value["engine"], env, native, lease_id, record["expires_at"], record["created_at"])
+    require(descriptor["archives"]["candidate"]["sha256"] == engine._hash(candidate["archive_sha256"])
+            and descriptor["archives"]["controller"]["sha256"] == engine._hash(controller["archive_sha256"])
+            and type(controller["files"]) is dict and set(controller["files"]) == engine.controller_files(env)
+            and descriptor["trees"]["controller"]["files"] == controller["files"]
+            and descriptor["trees"]["controller"]["directories"] == [], "cell-cleanup-source-binding")
+    incus = _incus(value["incus"], env, lease_id, selected.cell_sha256)
+    expected = {"network-create": "network:default:" + incus["network"],
+        "project-create": "project:" + incus["project"],
+        "profile-configure": "profile:" + incus["project"] + ":default",
+        "context-create": "context:" + selected.cell_sha256,
+        "engine-prepare": "engine:" + lease_id}
+    order = ("network-create", "project-create", "profile-configure")
+    if env.get("QUALITY_INPUT_PROFILE") == "operating":
+        from . import operating_cells
+        expected["image-copy"] = "image:" + incus["project"] + ":" + operating_cells.IMAGE
+        order += ("image-copy",)
+    order += ("context-create", "certificate-create", "engine-prepare")
+    creators = {}
+    allowed_cleanup = {"certificate-revoke", "engine-release", "context-delete", "image-delete", "project-delete", "network-delete"}
+    require("owned_instance" not in record and "custody" not in record,
+            "partial-preparation-not-VM-owner")
+    for identifier, effect in record["effects"].items():
+        operation = effect["operation"]
+        require(operation in set(order) | allowed_cleanup
+                and effect["state"] in ({"intent", "verified"} if operation in allowed_cleanup else {"verified"}),
+                "partial-preparation-unknown-or-entered")
+        if operation in allowed_cleanup:
+            continue
+        require(operation not in creators, "partial-preparation-duplicate-creator")
+        if operation == "certificate-create":
+            require(effect["target"].startswith("certificate:")
+                    and ledger.HEX.fullmatch(effect["target"].removeprefix("certificate:")),
+                    "partial-preparation-certificate-target")
+            ledger._certificate_scope(effect.get("certificate_scope"), lease_id, effect,
+                                      list(record["effects"].values()))
+        else:
+            require(effect["target"] == expected[operation], "partial-preparation-creator-target")
+        creators[operation] = {"id": identifier, "target": effect["target"], "sha256": ledger.digest(effect)}
+    require(set(creators) == set(order[:len(creators)]), "partial-preparation-not-verified-prefix")
+    paired = {"image-delete": "image-copy", "certificate-revoke": "certificate-create", "engine-release": "engine-prepare",
+              "context-delete": "context-create", "project-delete": "project-create", "network-delete": "network-create"}
+    for effect in record["effects"].values():
+        if effect["operation"] in paired:
+            creator = creators.get(paired[effect["operation"]])
+            require(creator is not None and effect["target"] == creator["target"],
+                    "partial-preparation-cleanup-target")
+
+    # This type does not invent engine policy/exit/VM metadata. The original
+    # descriptor and prepared digest suffice for creator-authenticated cleanup.
+    again, after, after_stamp = _sealed(selected.cell_config_path, selected.cell_sha256)
+    require(again == value and after == proof and after_stamp == stamp and store.read(lease_id) == record
+            and policy_registry.load_registry(registry.path, registry.sha256) == registry, "cell-cleanup-provenance-drift")
+    raw = engine._canonical(descriptor)
+    creator_bytes, incus_bytes = engine._canonical(creators), engine._canonical(incus)
+    descriptor_path = value["engine"]["paths"]["descriptor"] + "/" + lease_id + ".json"
+    binding = {"lease_id": lease_id, "cell_sha256": selected.cell_sha256,
+               "identity_policy_sha256": identity.policy_digest(native), "descriptor": hashlib.sha256(raw).hexdigest(),
+               "incus": incus, "creators": creators}
+    original = {"schema": 1, "lease_id": lease_id, "cell_sha256": selected.cell_sha256,
+        "identity_policy_sha256": identity.policy_digest(native), "identity": record["identity"],
+        "expires_at": record["expires_at"], "candidate": candidate, "controller": controller,
+        "engine_descriptor_path": descriptor_path, "engine_descriptor_sha256": hashlib.sha256(raw).hexdigest(), "incus": incus}
+    canonical = engine._canonical(original)
+    return PartialPreparationOwner(registry, selector, lease_id, selected.cell_sha256, selected.deadline,
+        identity.policy_digest(native), descriptor_path, raw, hashlib.sha256(raw).hexdigest(),
+        incus_bytes, creator_bytes, hashlib.sha256(canonical).hexdigest(), canonical, ledger.digest(binding))
