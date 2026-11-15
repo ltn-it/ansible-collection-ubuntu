@@ -250,3 +250,69 @@ class AtomicCleanupMetadataTests(unittest.TestCase):
                 self.assertEqual(second["remaining_unreferenced"], 0)
                 self.assertEqual(store.read(lease), before)
             self.io.doCleanups(); self.io.setUp(parent=self.fixture.parent)
+
+    def staged(self, store, lease):
+        import secrets
+        token = ledger._CleanupPostcheck(secrets.token_hex(16))
+        with store._transaction() as state:
+            ref = store._stage_cleanup_observation(state, lease, secrets.token_hex(16),
+                "engine-release", token, ({"fixture": "proof before scoped GC"}, b"\0" * 16),
+                time.monotonic() + 30, existing=None)
+        return ref["name"]
+
+    def test_active_or_invalid_collection_scope_does_not_consume_staging(self):
+        for requested in ("active", "invalid", "missing"):
+            with self.subTest(requested=requested), self.io.open() as store:
+                lease, _ = self.prepare(store)
+                name = self.staged(store, lease)
+                before = store._load()
+                scope = lease if requested == "active" else "invalid" if requested == "invalid" else "f" * 32
+                with self.assertRaises(Denied): store.collect_closed_cleanup_observations(scope)
+                self.assertTrue((self.io.path / name).exists())
+                self.assertEqual(store._load(), before)
+            self.io.doCleanups(); self.io.setUp(parent=self.fixture.parent)
+
+    def test_corrupt_reference_is_proved_before_any_reserved_staging_deletion(self):
+        for kind in ("header", "body"):
+            with self.subTest(kind=kind), self.io.open() as store:
+                lease, target = self.prepare(store)
+                effect, _ = self.call(store, lease, target)
+                ref = store.read(lease)["effects"][effect]["cleanup_observation"]
+                path = self.io.path / ref["name"]
+                raw = path.read_bytes()
+                damaged = b"\0" * 4 + raw[4:] if kind == "header" else raw[:-1] + b"x"
+                path.write_bytes(damaged)
+                staged = self.staged(store, lease)
+                before = store._load()
+                with self.assertRaises(Denied): store.recover_cleanup_observation_orphans()
+                self.assertTrue((self.io.path / staged).exists())
+                self.assertEqual(path.read_bytes(), damaged)
+                self.assertEqual(store._load(), before)
+            self.io.doCleanups(); self.io.setUp(parent=self.fixture.parent)
+
+    def test_closed_lease_scoped_collection_leaves_other_lease_staging_untouched(self):
+        import secrets
+        import test_github_runner_incus_ledger as fixtures
+        with self.io.open() as store:
+            closed, target = self.prepare(store)
+            effect = store.begin(closed, "engine-release", target)
+            store.record(closed, effect, "verified", evidence_sha256=fixtures.EVIDENCE)
+            # Normal modeled native cleanup of all creator targets, no sidecar.
+            targets = {row["operation"]: row["target"] for row in store.read(closed)["effects"].values()}
+            self.fixture.remaining(store, closed, targets)
+            own_staged = self.staged(store, closed)
+            with mock.patch.object(store, "collect_closed_cleanup_observations", side_effect=Denied("fixture-held-metadata")):
+                self.assertEqual(store.close(closed)["state"], "closed")
+            other, *_ = self.io.prepare(store, identity_changes={"token_id_sha256":secrets.token_hex(32),
+                "run_id":1001, "check_run_id":1001})
+            staged = self.staged(store, other)
+            staged_bytes = (self.io.path / staged).read_bytes()
+            before = store._load()
+            result = store.collect_closed_cleanup_observations(closed)
+            self.assertEqual([row["name"] for row in result["removed"]], [own_staged])
+            self.assertFalse((self.io.path / own_staged).exists())
+            self.assertEqual((self.io.path / staged).read_bytes(), staged_bytes)
+            after = store._load()
+            self.assertEqual(after["leases"], before["leases"])
+            remaining = {nonce: row for nonce, row in before["cleanup_staging"].items() if row["lease_id"] == other}
+            self.assertEqual(after["cleanup_staging"], remaining)

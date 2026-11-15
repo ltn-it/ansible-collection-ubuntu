@@ -64,7 +64,8 @@ class AtomicCleanupCallerTests(unittest.TestCase):
 
     def exercise(self, method, failure):
         fixture = full.RootFullCoreFinalizationTests()
-        fixture.setUpClass(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUpClass(); fixture.setUp()
         marker = fixture.io.root / ("atomic-caller-" + method + "-" + failure + ".json")
         original = getattr(storage, method)
         hit = {"called": False}
@@ -219,3 +220,28 @@ class AtomicCleanupCallerTests(unittest.TestCase):
     def test_first_actual_unlink_failure_retains_original_guard_and_denies_reentry(self):
         for method in ("release_engine", "delete_context"):
             with self.subTest(method=method): self.exercise(method, "unlink-started")
+
+    def test_delegated_failed_or_skipped_setup_runs_registered_real_cleanup(self):
+        real_setup = full.RootFullCoreFinalizationTests.setUp
+        original_binary = ledger.ENGINE_EXECUTABLE
+        for failure in (unittest.SkipTest, RuntimeError):
+            with self.subTest(failure=failure.__name__):
+                observed = {}
+                def stopped_setup(instance):
+                    real_setup(instance)
+                    observed["binary"] = Path(instance.cpp.binary)
+                    observed["root"] = instance.io.root
+                    instance.addCleanup(observed.__setitem__, "cleanup_ran", True)
+                    raise failure("fixture-setup-interrupted")
+                class Probe(AtomicCleanupCallerTests):
+                    def runTest(inner):
+                        inner.exercise("release_engine", "observation")
+                result = unittest.TestResult()
+                with mock.patch.object(full.RootFullCoreFinalizationTests, "setUp", stopped_setup):
+                    Probe("runTest").run(result)
+                self.assertEqual(len(result.skipped), int(failure is unittest.SkipTest))
+                self.assertEqual(len(result.errors), int(failure is RuntimeError))
+                self.assertTrue(observed.get("cleanup_ran"))
+                self.assertFalse(observed["binary"].exists())
+                self.assertFalse(observed["root"].exists())
+                self.assertEqual(ledger.ENGINE_EXECUTABLE, original_binary)

@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import test_github_runner_incus_ledger as fixtures
+import test_github_runner_incus_cleanup_depth_syncfs as depth
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux fixture only")
@@ -80,6 +81,34 @@ class FixtureParentTests(unittest.TestCase):
             with self.assertRaises(unittest.SkipTest):
                 fixture.setUp(parent=foreign)
             allocation.assert_not_called()
+
+    def test_depth_fixture_unsafe_parents_skip_before_actual_allocation(self):
+        safe = self.root / "depth-safe"
+        safe.mkdir(mode=0o700)
+        link = self.root / "depth-alias"
+        link.symlink_to(safe, target_is_directory=True)
+        writable = self.root / "depth-writable"
+        writable.mkdir(mode=0o700); writable.chmod(0o777)
+        child = writable / "private-child"
+        child.mkdir(mode=0o700)
+        foreign = self.root / "depth-foreign"
+        foreign.mkdir(mode=0o700)
+        os.chown(foreign, 65534, -1)
+        self.addCleanup(os.chown, foreign, 0, -1)
+        public = self.root / "depth-public"
+        public.mkdir(mode=0o755); public.chmod(0o755)
+        actual_path = Path
+        for parent in (self.root / "missing", link, child, foreign, public):
+            with self.subTest(parent=parent.name):
+                fixture = depth.GuardedTraversalTests("test_real_statx_matches_pinned_fd_metadata_and_mount")
+                self.addCleanup(fixture.doCleanups)
+                def selected(value):
+                    return parent if value == "/run/proof" else actual_path(value)
+                with mock.patch.object(depth, "Path", side_effect=selected), \
+                     mock.patch.object(depth.tempfile, "TemporaryDirectory") as allocation:
+                    with self.assertRaises(unittest.SkipTest):
+                        fixture.setUp()
+                    allocation.assert_not_called()
 
 
 if __name__ == "__main__":

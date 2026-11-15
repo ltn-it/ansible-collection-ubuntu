@@ -1,12 +1,13 @@
 import ctypes
 import os
-import stat
 from pathlib import Path
 import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
+
+import test_github_runner_incus_ledger as fixtures
 
 FILES = Path(__file__).resolve().parents[2] / 'roles/github_runner/files'
 sys.path.insert(0,str(FILES))
@@ -17,9 +18,7 @@ from incus_lease_issuer.identity import Denied
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root Linux EE only")
 class GuardedTraversalTests(unittest.TestCase):
     def setUp(self):
-        base = Path("/run/proof")
-        if not base.is_dir() or base.stat().st_uid != 0 or stat.S_IMODE(base.stat().st_mode) != 0o700:
-            self.skipTest("requires private Root0700 /run/proof")
+        base = fixtures.validated_fixture_parent(Path("/run/proof"), private=True)
         self.temp = tempfile.TemporaryDirectory(dir=base)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'owned'; self.root.mkdir(mode=0o700)

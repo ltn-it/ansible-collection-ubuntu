@@ -1785,8 +1785,16 @@ class Ledger:
     def _recover_cleanup_observation_orphans(self, state, end, *, closed_identifier=None):
         """Same locked durable state, bounded two-pass proof; no effect mutation."""
         from . import storage_quota
-        staged_removed = self._recover_cleanup_staging(state, end)
-        scope = self._cleanup_observation_scope(end)
+        collecting = closed_identifier is not None
+        if collecting:
+            require(type(closed_identifier) is str and (closed_identifier == "*" or ID.fullmatch(closed_identifier)),
+                    "invalid-lease-id")
+            if closed_identifier != "*":
+                require(self._lease(state, closed_identifier)["state"] == "closed",
+                        "cleanup-observation-still-needed")
+        staging = self._recover_cleanup_staging(state, end, closed_identifier=closed_identifier)
+        scope = staging["scope"]
+        staged = staging["selected"]
         references, protected = {}, set()
         for identifier, lease in state["leases"].items():
             require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
@@ -1812,14 +1820,8 @@ class Ledger:
                         names.append(entry.name)
         finally:
             os.close(scan)
-        orphans = sorted(set(names) - set(references) - protected)
-        collecting = closed_identifier is not None
+        orphans = sorted(set(names) - set(references) - protected - staging["reserved_finals"])
         if collecting:
-            require(type(closed_identifier) is str and (closed_identifier == "*" or ID.fullmatch(closed_identifier)),
-                    "invalid-lease-id")
-            if closed_identifier != "*":
-                require(self._lease(state, closed_identifier)["state"] == "closed",
-                        "cleanup-observation-still-needed")
             candidates = sorted(name for name, expected in references.items() if name in names
                 and (closed_identifier == "*" or expected[0] == closed_identifier)
                 and state["leases"][expected[0]]["state"] == "closed"
@@ -1827,12 +1829,9 @@ class Ledger:
                 and "cleanup_postcheck_resolution" in state["leases"][expected[0]]["effects"][expected[1]])
         else:
             candidates = orphans
-        if not candidates:
-            require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
-            return {"removed": staged_removed, "remaining_unreferenced": 0, "effects_modified": False}
         # Validate every present reference FIRST. Missing closed/resolved files
         # are the existing explicit post-close GC case, never active authority.
-        checked, bytes_to_hash = {}, sum(row["size"] for row in staged_removed)
+        checked, bytes_to_hash = {}, staging["bytes"]
         for name, expected in references.items():
             require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
             try:
@@ -1844,7 +1843,7 @@ class Ledger:
                 continue
             proof = self._cleanup_observation_file(name, state, scope[5], end, expected=expected)
             checked[name] = proof
-            if not collecting: bytes_to_hash += proof["size"]
+            if not collecting and (candidates or staging["nonces"]): bytes_to_hash += proof["size"]
         require(not (set(names) & protected - set(references)), "cleanup-observation-recovery-protected")
         # Every orphan header must prove THIS durable lease/effect/operation,
         # even when more files exist than can be reclaimed in this finite batch.
@@ -1852,14 +1851,13 @@ class Ledger:
             checked[name] = self._cleanup_observation_file(name, state, scope[5], end)
         selected = []
         for name in candidates:
-            if len(staged_removed) + len(selected) == 16 or bytes_to_hash + checked[name]["size"] > 268435456:
+            if len(staged) + len(selected) == 16 or bytes_to_hash + checked[name]["size"] > 268435456:
                 break
             selected.append(name); bytes_to_hash += checked[name]["size"]
-        if len(staged_removed) == 16:
-            require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
-            return {"removed": staged_removed, "remaining_unreferenced": len(candidates), "effects_modified": False}
-        require(selected and bytes_to_hash <= 268435456, "cleanup-observation-recovery-byte-bound")
-        for name in (selected if collecting else [*references, *selected]):
+        require(bytes_to_hash <= 268435456 and (selected or staged or staging["nonces"] or not candidates),
+                "cleanup-observation-recovery-byte-bound")
+        verify = selected if collecting else ([*references, *selected] if candidates or staging["nonces"] else [])
+        for name in verify:
             if name not in checked:
                 continue
             proof = self._cleanup_observation_file(name, state, scope[5], end,
@@ -1867,18 +1865,28 @@ class Ledger:
             require(proof["stamp"] == checked[name]["stamp"], "cleanup-observation-recovery-drift")
             checked[name] = proof
         require(canonical(self._load()) == canonical(state), "cleanup-observation-recovery-state-drift")
+        removals = [(name, stamp, None) for name, stamp in staged] + [
+            (name, checked[name]["stamp"], checked[name]["sha256"]) for name in selected]
         removed = []
-        for name in selected:
+        for name, stamp, sha in removals:
             require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
             named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
             actual = (named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid,
                       named.st_nlink, named.st_size, named.st_mtime_ns, named.st_ctime_ns)
-            require(actual == checked[name]["stamp"], "cleanup-observation-recovery-drift")
+            require(actual == stamp, "cleanup-observation-recovery-drift")
             os.unlink(name, dir_fd=self.fd)
-            removed.append({"name": name, "size": checked[name]["size"], "sha256": checked[name]["sha256"]})
-        os.fsync(self.fd)
+            removed.append({"name": name, "size": stamp[6], "sha256": sha})
+        if removed:
+            os.fsync(self.fd)
         require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
-        return {"removed": staged_removed + removed, "remaining_unreferenced": len(candidates) - len(selected), "effects_modified": False}
+        if staging["nonces"]:
+            for nonce in staging["nonces"]:
+                del state["cleanup_staging"][nonce]
+            if not state["cleanup_staging"]:
+                del state["cleanup_staging"]
+            self._save(state)
+            require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
+        return {"removed": removed, "remaining_unreferenced": len(candidates) - len(selected), "effects_modified": False}
 
     def collect_closed_cleanup_observations(self, identifier=None, *, deadline=None):
         """Bounded closed-metadata maintenance; durable references/audit never change.
@@ -1936,8 +1944,8 @@ class Ledger:
                      and "cleanup_postcheck" not in effect and "cleanup_observation" not in effect),
                     "ledger-corrupt")
 
-    def _recover_cleanup_staging(self, state, end):
-        """Only durable exact-name reservations own incomplete metadata files."""
+    def _recover_cleanup_staging(self, state, end, *, closed_identifier=None):
+        """Proof-only staging inventory; no mutation precedes full batch proof."""
         from . import storage_quota
         self._validate_cleanup_staging(state)
         scope = self._cleanup_observation_scope(end)
@@ -1973,7 +1981,7 @@ class Ledger:
                         x.st_nlink, x.st_size, x.st_mtime_ns, x.st_ctime_ns)
                     require(stamp(before) == stamp(os.fstat(fd)) == stamp(os.stat(name,
                         dir_fd=self.fd, follow_symlinks=False)), "cleanup-staging-drift")
-                    checked.append((name, stamp(before)))
+                    checked.append((name, stamp(before), nonce))
                 finally:
                     os.close(fd)
         # Refuse unreserved staging names, including malformed empty files.
@@ -1984,25 +1992,19 @@ class Ledger:
                     require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
                     require(count <= 65536, "cleanup-observation-recovery-entry-bound")
                     if entry.name.startswith("cleanup-staging-"):
-                        require(entry.name in {name for name, _ in checked}, "cleanup-staging-unreserved")
+                        require(entry.name in {name for name, _, _ in checked}, "cleanup-staging-unreserved")
         finally:
             os.close(scan)
         require(canonical(self._load()) == canonical(state), "cleanup-staging-state-drift")
-        for name, stamp in checked:
-            require(self._cleanup_observation_scope(end) == scope, "cleanup-staging-store")
-            current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
-            require(stamp == (current.st_dev, current.st_ino, current.st_mode, current.st_uid,
-                current.st_gid, current.st_nlink, current.st_size, current.st_mtime_ns,
-                current.st_ctime_ns), "cleanup-staging-drift")
-            os.unlink(name, dir_fd=self.fd)
-        if checked:
-            os.fsync(self.fd)
-        require(self._cleanup_observation_scope(end) == scope, "cleanup-staging-store")
-        if "cleanup_staging" in state:
-            state.pop("cleanup_staging")
-            self._save(state)
-            require(time.monotonic() < end, "cleanup-observation-recovery-deadline")
-        return [{"name": name, "size": stamp[6], "sha256": None} for name, stamp in checked]
+        eligible = {nonce for nonce, row in state.get("cleanup_staging", {}).items()
+            if closed_identifier is None or (closed_identifier == "*"
+                and state["leases"][row["lease_id"]]["state"] == "closed")
+            or row["lease_id"] == closed_identifier}
+        return {"scope": scope, "files": checked, "nonces": eligible,
+            "selected": [(name, stamp) for name, stamp, nonce in checked if nonce in eligible],
+            "reserved_finals": {"cleanup-observation-" + nonce + ".bin"
+                for nonce in state.get("cleanup_staging", {})},
+            "bytes": sum(stamp[6] for _, stamp, _ in checked)}
 
     def _stage_cleanup_observation(self, state, identifier, effect_id, operation, token,
                                    observation, deadline, *, existing):

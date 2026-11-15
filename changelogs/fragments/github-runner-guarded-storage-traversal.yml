@@ -22,6 +22,8 @@ bugfixes:
     after durable closure, retaining their Ledger bindings and audit records.
     Historical collection stays bounded per call, so retained history can be
     drained safely before the next cleanup without raising existing limits.
+    Prove the complete collection scope and metadata inventory before mutation;
+    lease-specific collection preserves other leases' staged files and records.
   - >-
     Incus cleanup publication - finish metadata preparation before atomically
     recording the one-shot cleanup intent and its guard. Recover incomplete
