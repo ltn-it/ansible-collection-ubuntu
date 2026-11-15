@@ -170,12 +170,35 @@ class RootCapacityTests(unittest.TestCase):
         # Loop/block/FIEMAP/ext4/mount namespace OWNER and vfs are models.
         # Root files, separate real tmpfs devices, policy FD identities and
         # actual native Unix protocol remain real. Never native quota acceptance.
+        from incus_lease_issuer import cleanup_storage
+        actual_relative = cleanup_storage._relative_metadata
+        def relative_metadata(parent, name):
+            identity, native_mount = actual_relative(parent, name)
+            selected = which(parent)
+            return identity, selected.value["mount"]["mount_id"] if selected else native_mount
         qs = (self.quota, self.pool_quota)
         actual_type, actual_open = storage_quota._fs_type, storage_quota._open_file
         actual_vfs = os.fstatvfs
+        actual_proc = storage_quota._read_proc
+        actual_consumer_rows = cleanup_storage._consumer_mount_rows
         def which(fd):
             dev = os.fstat(fd).st_dev
             return next((q for q in qs if q.mount.stat().st_dev == dev), None)
+        def mount_id(fd):
+            selected = which(fd)
+            if selected:
+                return selected.value["mount"]["mount_id"]
+            import re
+            raw = actual_proc("/proc/self/fdinfo/" + str(fd), 8192)
+            matches = re.findall(rb"(?m)^mnt_id:\s*([1-9][0-9]{0,19})$", raw)
+            self.assertEqual(len(matches), 1)
+            return int(matches[0])
+        def consumer_rows(raw, end=None):
+            # The same fake loop mount IDs must apply to both native metadata
+            # surfaces. Unrelated actual mounts (notably cgroup2) remain real.
+            rows = actual_consumer_rows(raw, end)
+            return [(next((q.value["mount"]["mount_id"] for q in qs if q.mount.stat().st_dev == dev), mid),
+                     dev, root, point) for mid, dev, root, point in rows]
         def fs_type(fd):
             return storage_quota.EXT4 if any((os.fstat(fd).st_dev, os.fstat(fd).st_ino)
                 == (q.mount.stat().st_dev, q.mount.stat().st_ino) for q in qs) else actual_type(fd)
@@ -190,7 +213,9 @@ class RootCapacityTests(unittest.TestCase):
              mock.patch.object(storage_quota, "_namespace", side_effect=self.quota.observed_namespace), \
              mock.patch.object(storage_quota, "_open_file", side_effect=opened), \
              mock.patch.object(storage_quota, "_loop", side_effect=loop), \
-             mock.patch.object(storage_quota, "_mount_id", side_effect=lambda fd: which(fd).value["mount"]["mount_id"]), \
+             mock.patch.object(storage_quota, "_mount_id", side_effect=mount_id), \
+             mock.patch.object(cleanup_storage, "_relative_metadata", side_effect=relative_metadata), \
+             mock.patch.object(cleanup_storage, "_consumer_mount_rows", side_effect=consumer_rows), \
              mock.patch.object(storage_quota, "_read_proc", side_effect=lambda _p, _l: b"".join(q.rows for q in qs)), \
              mock.patch.object(os, "fstatvfs", side_effect=lambda fd: which(fd).vfs if which(fd) else actual_vfs(fd)):
             yield

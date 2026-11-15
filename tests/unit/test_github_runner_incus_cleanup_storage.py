@@ -114,7 +114,7 @@ class RootDeletionPrimitiveTests(unittest.TestCase):
                 self.inventory()
         self.assertEqual(leaf.read_bytes(), b"owned")
 
-    def test_149119_actual_entries_use_one_durable_barrier_per_directory(self):
+    def test_149119_actual_entries_use_depth_barrier_and_final_root_fsync(self):
         """Real tmpfs deletion/count regression, NOT native Source timing."""
         directories, files = 128, 149119 - 128
         for index in range(directories):
@@ -127,63 +127,68 @@ class RootDeletionPrimitiveTests(unittest.TestCase):
         end = time.monotonic() + 60
         inventory = cleanup._inventory_tree(self.fd, end, 149119)
         self.assertEqual(len(inventory[0]), 149119)
-        actual_fsync, barriers = os.fsync, {}
+        actual_fsync, actual_syncfs = os.fsync, cleanup._SYNCFS
+        barriers, final = [], []
         def barrier(fd):
-            inode = os.fstat(fd).st_ino
-            barriers[inode] = barriers.get(inode, 0) + 1
-            actual_fsync(fd)
-        with mock.patch.object(cleanup.os, "fsync", new=barrier):
-            cleanup._remove_tree(self.fd, inventory, end)
-        self.assertEqual(os.listdir(self.fd), [])
-        self.assertEqual(len(barriers), directories + 1)
-        self.assertEqual(sum(barriers.values()), directories + 1)
+            self.assertEqual(os.fstat(fd).st_ino,os.fstat(self.fd).st_ino)
+            barriers.append(True)
+            return actual_syncfs(fd)
+        def final_barrier(fd):
+            self.assertEqual(os.listdir(fd),[])
+            final.append(True);actual_fsync(fd)
+        with mock.patch.object(cleanup,'_SYNCFS',side_effect=barrier), \
+             mock.patch.object(cleanup.os,'fsync',side_effect=final_barrier):
+            cleanup._remove_tree(self.fd,inventory,end)
+        self.assertEqual(os.listdir(self.fd),[])
+        self.assertEqual(barriers,[True]);self.assertEqual(final,[True])
 
-    def test_each_empty_child_is_durable_before_rmdir_and_root_barrier_is_last(self):
-        paths = [self.tree / "a", self.tree / "a/nested", self.tree / "b"]
+    def test_child_removals_durable_before_parent_rmdir_and_root_barrier_last(self):
+        paths=[self.tree/'a',self.tree/'a/nested',self.tree/'b']
         for path in paths:
-            path.mkdir(mode=0o700)
-            (path / "file").write_bytes(b"owned")
-        (self.tree / "file").write_bytes(b"owned")
-        names = {path.stat().st_ino: path.relative_to(self.tree).parts for path in [self.tree, *paths]}
-        events, actual_fsync, actual_rmdir = [], os.fsync, os.rmdir
+            path.mkdir(mode=0o700);(path/'file').write_bytes(b'owned')
+        (self.tree/'file').write_bytes(b'owned')
+        children={str(path):{str(x)for x in path.iterdir()}for path in paths}
+        deleted,durable,events=set(),set(),[]
+        actual_unlink,actual_rmdir,actual_fsync=os.unlink,os.rmdir,os.fsync
+        def located(name,fd):return str(Path(os.readlink('/proc/self/fd/'+str(fd)))/name)
+        def unlink(name,*,dir_fd):
+            value=located(name,dir_fd);actual_unlink(name,dir_fd=dir_fd);deleted.add(value)
         def barrier(fd):
-            self.assertEqual(os.listdir(fd), [])
-            events.append(("fsync", names[os.fstat(fd).st_ino]))
-            actual_fsync(fd)
-        def remove(name, *, dir_fd):
-            events.append(("rmdir", names[os.fstat(dir_fd).st_ino] + (name,)))
-            actual_rmdir(name, dir_fd=dir_fd)
-        inventory = self.inventory()
-        with mock.patch.object(cleanup.os, "fsync", new=barrier), \
-             mock.patch.object(cleanup.os, "rmdir", new=remove):
-            self.remove(inventory)
-        for path in (path.relative_to(self.tree).parts for path in paths):
-            self.assertLess(events.index(("fsync", path)), events.index(("rmdir", path)))
-            self.assertLess(events.index(("rmdir", path)), events.index(("fsync", path[:-1])))
-        self.assertEqual(events[-1], ("fsync", ()))
-        self.assertEqual(len([event for event in events if event[0] == "fsync"]), 4)
+            durable.update(deleted);events.append('syncfs');return 0
+        def remove(name,*,dir_fd):
+            value=located(name,dir_fd);self.assertTrue(children[value]<=durable)
+            actual_rmdir(name,dir_fd=dir_fd);deleted.add(value);events.append('rmdir')
+        def final(fd):
+            self.assertEqual(os.listdir(fd),[]);events.append('root-fsync');actual_fsync(fd)
+        with mock.patch.object(cleanup,'_SYNCFS',side_effect=barrier), \
+             mock.patch.object(cleanup.os,'unlink',side_effect=unlink), \
+             mock.patch.object(cleanup.os,'rmdir',side_effect=remove), \
+             mock.patch.object(cleanup.os,'fsync',side_effect=final):
+            self.remove(self.inventory())
+        self.assertEqual(events[-1],'root-fsync');self.assertEqual(events.count('syncfs'),2)
 
     def test_deadline_after_child_barrier_denies_before_rmdir(self):
         child = self.tree / "child"; child.mkdir(mode=0o700)
         (child / "file").write_bytes(b"owned")
         inventory = self.inventory()
-        now, actual_fsync = [1.0], os.fsync
+        now, actual_syncfs = [1.0], cleanup._SYNCFS
         def barrier(fd):
-            actual_fsync(fd)
+            result=actual_syncfs(fd)
             now[0] = 3.0
-        with mock.patch.object(cleanup.os, "fsync", new=barrier), \
+            return result
+        with mock.patch.object(cleanup, "_SYNCFS", new=barrier), \
              mock.patch.object(cleanup.time, "monotonic", new=lambda: now[0]):
             with self.assertRaisesRegex(Denied, "cleanup-storage-budget"):
                 cleanup._remove_tree(self.fd, inventory, 2.0)
         self.assertTrue(child.is_dir())
         self.assertEqual(list(child.iterdir()), [])
 
-    def test_fsync_failure_never_reports_completed_deletion(self):
+    def test_depth_writeback_failure_denies_before_parent_removal(self):
         child = self.tree / "child"; child.mkdir(mode=0o700)
         (child / "file").write_bytes(b"owned")
         inventory = self.inventory()
-        with mock.patch.object(cleanup.os, "fsync", side_effect=OSError("modeled storage failure")):
-            with self.assertRaises(OSError): self.remove(inventory)
+        with mock.patch.object(cleanup, "_SYNCFS", return_value=-1):
+            with self.assertRaisesRegex(Denied,'cleanup-storage-syncfs-denied'): self.remove(inventory)
         self.assertTrue(child.is_dir())
         self.assertEqual(list(child.iterdir()), [])
 
@@ -199,6 +204,75 @@ class RootDeletionPrimitiveTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "directory-replaced"):
                 self.remove(inventory)
         self.assertEqual(leaf.read_bytes(), b"owned")
+
+    def test_real_relative_statx_identity_and_mount_match_pinned_fd(self):
+        (self.tree / "directory").mkdir(mode=0o700)
+        identity, mount = cleanup._relative_metadata(self.fd, "directory")
+        child = os.open(self.tree / "directory", installation.DIR_FLAGS)
+        try:
+            self.assertEqual(identity, cleanup._identity(os.fstat(child)))
+            self.assertEqual(mount, cleanup.storage_quota._mount_id(child))
+        finally:
+            os.close(child)
+
+    def test_cached_same_inode_overmount_is_denied_before_use_and_all_fds_close(self):
+        # Model the otherwise privileged bind-overmount boundary only. Real
+        # native MNT_ID support is exercised separately; this is no mount grant.
+        (self.tree / "directory").mkdir(mode=0o700)
+        (self.tree / "directory/file").touch()
+        inventory = self.inventory()
+        cache = cleanup._PinnedAncestry(self.fd, inventory[1], inventory[2])
+        cache.directory(("directory",), time.monotonic() + 10)
+        real = cleanup._relative_metadata
+        def overmount(parent, name):
+            identity, mount = real(parent, name)
+            return identity, mount + 1 if name == "directory" else mount
+        before = len(os.listdir("/proc/self/fd"))
+        try:
+            with mock.patch.object(cleanup, "_relative_metadata", side_effect=overmount):
+                with self.assertRaises(Denied):cache.directory(("directory",), time.monotonic() + 10)
+        finally:
+            cache.close()
+        self.assertEqual(cache.fds, [])
+        self.assertLess(len(os.listdir("/proc/self/fd")), before)
+        self.assertTrue((self.tree / "directory/file").exists())
+
+    def test_statx_unavailable_missing_mount_mask_unknown_arch_and_native_error_fail_closed(self):
+        import ctypes
+        (self.tree / "file").touch()
+        def no_mount_mask(fd, name, flags, mask, pointer):
+            value = ctypes.cast(pointer, ctypes.POINTER(cleanup._Statx)).contents
+            value.mask, value.mount_id = 0x7ff, 1
+            return 0
+        for replacement in (None, lambda *args: -1, no_mount_mask):
+            with mock.patch.object(cleanup, "_STATX", replacement):
+                with self.assertRaises(Denied):cleanup._relative_metadata(self.fd, "file")
+        with mock.patch.object(cleanup.platform, "machine", return_value="unknown"):
+            with self.assertRaises(Denied):cleanup._relative_metadata(self.fd, "file")
+
+    def test_depth256_uses_at_most257_fds_then_closes_and_depth257_denies(self):
+        current = self.tree
+        for _ in range(256):current = current / "a";current.mkdir(mode=0o700)
+        inventory = cleanup._inventory_tree(self.fd, time.monotonic() + 10, 1000)
+        before = len(os.listdir("/proc/self/fd"))
+        cache = cleanup._PinnedAncestry(self.fd, inventory[1], inventory[2])
+        try:
+            cache.directory(("a",) * 256, time.monotonic() + 10)
+            self.assertEqual(len(cache.fds), 257)
+            with self.assertRaises(Denied):cache.directory(("a",) * 257, time.monotonic() + 10)
+        finally:
+            cache.close()
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_unlink_failure_propagates_and_closes_all_cached_descriptors(self):
+        (self.tree / "directory").mkdir(mode=0o700)
+        (self.tree / "directory/file").touch()
+        inventory = self.inventory()
+        before = len(os.listdir("/proc/self/fd"))
+        with mock.patch.object(cleanup.os, "unlink", side_effect=OSError("synthetic-owned-unlink-failure")):
+            with self.assertRaises(OSError):self.remove(inventory)
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        self.assertTrue((self.tree / "directory/file").exists())
 
 
 if __name__ == "__main__":

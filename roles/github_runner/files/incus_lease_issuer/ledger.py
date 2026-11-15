@@ -15,12 +15,14 @@ import hashlib
 import ipaddress
 import json
 import math
+import struct
 import os
 from pathlib import Path
 import re
 import secrets
 import stat
 import time
+import threading
 
 from .identity import Denied, Identity, decode_json, require
 
@@ -279,6 +281,11 @@ class Worker:
             r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", self.boot_id), "invalid-worker")
 
 
+@dataclass(frozen=True, eq=False)
+class _CleanupPostcheck:
+    nonce: str
+
+
 class Ledger:
     """Open a pre-provisioned private store; never create an operating store.
 
@@ -299,6 +306,7 @@ class Ledger:
     def _setup(self, path, owner_uid, clock):
         require(type(owner_uid) is int and owner_uid >= 0, "invalid-store-owner")
         self.owner_uid, self.clock = owner_uid, clock
+        self._cleanup_postchecks = {}
         path = Path(path)
         require(path.is_absolute() and ".." not in path.parts, "invalid-store-path")
         self.fd = -1
@@ -483,6 +491,7 @@ class Ledger:
             native_operations, engine_processes, engine_containers, fence_namespaces = set(), set(), set(), set()
             capture_streams, capture_cgroups = set(), set()
             certificate_revocations = set()
+            cleanup_postchecks = set()
             fence_host_interfaces = set()
             for key, lease in state["leases"].items():
                 require(ID.fullmatch(key) and lease["state"] in {"prepared", "cancelled", "retained", "closed"}, "ledger-corrupt")
@@ -556,6 +565,39 @@ class Ledger:
                     require(ID.fullmatch(effect_key) and effect["operation"] in OPERATIONS
                             and effect["state"] in {"intent", "unknown", "verified", "not_applied", "failed"}
                             and _target_valid(effect["operation"], effect["target"]), "ledger-corrupt")
+                    if "cleanup_observation" in effect:
+                        ref = effect["cleanup_observation"]
+                        require(effect["operation"] in {"engine-release", "context-delete"}
+                                and ("cleanup_postcheck" in effect or "cleanup_postcheck_resolution" in effect)
+                                and type(ref) is dict and set(ref) == {"name", "nonce", "sha256", "size"}
+                                and type(ref["nonce"]) is str and ID.fullmatch(ref["nonce"])
+                                and ref["name"] == "cleanup-observation-" + ref["nonce"] + ".bin"
+                                and type(ref["size"]) is int and 4 < ref["size"] <= 16065604
+                                and HEX.fullmatch(ref["sha256"]), "ledger-corrupt")
+                    if "cleanup_postcheck_resolution" in effect:
+                        result = effect["cleanup_postcheck_resolution"]
+                        require("cleanup_postcheck" not in effect and effect["state"] == "verified"
+                                and type(result) is dict and result.get("kind") in
+                                {"original-in-budget", "fresh-root-readback"}
+                                and type(result.get("nonce")) is str and ID.fullmatch(result["nonce"])
+                                and ("cleanup_observation" not in effect or result["nonce"] == effect["cleanup_observation"]["nonce"]),
+                                "ledger-corrupt")
+                        if result["kind"] == "original-in-budget":
+                            require(set(result) == {"kind", "nonce", "receipt_sha256"}
+                                    and HEX.fullmatch(result["receipt_sha256"]), "ledger-corrupt")
+                        else:
+                            require(set(result) == {"kind", "nonce", "original_receipt_sha256",
+                                    "observation_sha256", "original_budget_success"}
+                                    and result["original_budget_success"] is False
+                                    and HEX.fullmatch(result["original_receipt_sha256"])
+                                    and HEX.fullmatch(result["observation_sha256"]), "ledger-corrupt")
+                    if "cleanup_postcheck" in effect:
+                        guard = effect["cleanup_postcheck"]
+                        require(effect["operation"] in {"engine-release", "context-delete"}
+                                and type(guard) is str and ID.fullmatch(guard)
+                                and guard not in cleanup_postchecks and lease["state"] != "closed", "ledger-corrupt")
+                        require("cleanup_observation" not in effect or effect["cleanup_observation"]["nonce"] == guard, "ledger-corrupt")
+                        cleanup_postchecks.add(guard)
                     pair = (effect["operation"], effect["target"])
                     require(pair not in effect_targets, "ledger-corrupt")
                     effect_targets.add(pair)
@@ -1638,8 +1680,166 @@ class Ledger:
             require(any(row["operation"] == "instance-destroy" and row["target"] == target and row["state"] == "verified"
                         for row in lease["effects"].values()), "cleanup-owned-instance-unconfirmed")
 
+    def begin_cleanup_postcheck(self, identifier, effect_id, deadline, *, observation=None):
+        """Prearm durable HOLD before data deletion; only this process may finish it."""
+        require(os.geteuid() == self.owner_uid == 0 and type(deadline) in {int, float}
+                and math.isfinite(deadline) and 0 < deadline - time.monotonic() <= 60,
+                "cleanup-postcheck-budget")
+        token = _CleanupPostcheck(secrets.token_hex(16))
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            effect = lease["effects"].get(effect_id)
+            require(lease["state"] != "closed" and effect is not None and effect["state"] == "intent"
+                    and effect["operation"] in {"engine-release", "context-delete"}
+                    and "cleanup_postcheck" not in effect, "cleanup-postcheck-effect")
+            if observation is not None:
+                header, pairs = observation
+                require(type(header) is dict and type(pairs) is bytes and len(pairs) % 16 == 0
+                        and len(pairs) <= 16000064, "cleanup-observation-bound")
+                head = canonical({"schema": 1, "nonce": token.nonce, "lease_id": identifier,
+                    "effect_id": effect_id, "operation": effect["operation"], "metadata": header})
+                require(len(head) <= 65536, "cleanup-observation-bound")
+                raw = struct.pack(">I", len(head)) + head + pairs
+                available = os.fstatvfs(self.fd)
+                require(available.f_bavail * available.f_frsize >= len(raw), "cleanup-observation-space")
+                name = "cleanup-observation-" + token.nonce + ".bin"
+                fd = self._open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+                os.fsync(self.fd)
+                effect["cleanup_observation"] = {"name": name, "nonce": token.nonce,
+                    "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
+            effect["cleanup_postcheck"] = token.nonce
+        info = os.fstat(self.fd)
+        self._cleanup_postchecks[token.nonce] = [token, identifier, effect_id, deadline,
+            os.getpid(), threading.current_thread(), None, (self.fd, info.st_dev, info.st_ino)]
+        return token
+
+    def complete_cleanup_postcheck(self, token):
+        """Fresh receipt read and deadline check, then NO-IO completion witness."""
+        require(type(token) is _CleanupPostcheck, "cleanup-postcheck-token")
+        item = self._cleanup_postchecks.get(token.nonce)
+        require(item is not None and item[0] is token and item[4] == os.getpid()
+                and item[5] is threading.current_thread() and item[6] is None, "cleanup-postcheck-owner")
+        info = os.fstat(self.fd)
+        require((self.fd, info.st_dev, info.st_ino) == item[7], "cleanup-postcheck-store")
+        state = self._load()
+        effect = self._lease(state, item[1])["effects"][item[2]]
+        require(effect.get("cleanup_postcheck") == token.nonce and effect["state"] == "verified",
+                "cleanup-postcheck-receipt")
+        self.read_cleanup_observation(item[1], item[2], deadline=item[3])
+        witnessed = (digest(effect), state["generation"])
+        require(time.monotonic() < item[3], "cleanup-postcheck-deadline")
+        item[6] = witnessed  # No filesystem action follows the final deadline check.
+
+    def _accepted_cleanup_effects(self, identifier, lease, generation):
+        effects = copy.deepcopy(lease["effects"])
+        for effect_id, effect in effects.items():
+            nonce = effect.get("cleanup_postcheck")
+            if nonce is None:
+                continue
+            item = self._cleanup_postchecks.get(nonce)
+            info = os.fstat(self.fd)
+            require(os.geteuid() == self.owner_uid == 0 and item is not None
+                    and (self.fd, info.st_dev, info.st_ino) == item[7]
+                    and item[1] == identifier and item[2] == effect_id
+                    and item[4] == os.getpid() and item[5] is threading.current_thread()
+                    and item[6] is not None and item[6][0] == digest(effect)
+                    and generation >= item[6][1] and effect["state"] == "verified",
+                    "cleanup-postcheck-held")
+            self.read_cleanup_observation(identifier, effect_id)
+            effect["cleanup_postcheck_resolution"] = (item[8] if len(item) > 8 else {
+                "kind": "original-in-budget", "nonce": nonce, "receipt_sha256": item[6][0]})
+            del effect["cleanup_postcheck"]
+        return effects
+
+    def read_cleanup_observation(self, identifier, effect_id, *, deadline=None):
+        effect = self._lease(self._load(), identifier)["effects"][effect_id]
+        ref = effect.get("cleanup_observation")
+        if ref is None:
+            return None
+        require(type(ref) is dict and set(ref) == {"name", "nonce", "sha256", "size"}
+                and type(ref["nonce"]) is str and ID.fullmatch(ref["nonce"])
+                and ref["name"] == "cleanup-observation-" + ref["nonce"] + ".bin"
+                and type(ref["size"]) is int and 4 < ref["size"] <= 16065604
+                and HEX.fullmatch(ref["sha256"]), "cleanup-observation-reference")
+        fd = self._open(ref["name"], os.O_RDONLY)
+        try:
+            original = os.fstat(fd); chunks = bytearray()
+            require(original.st_size == ref["size"], "cleanup-observation-size")
+            while len(chunks) <= ref["size"]:
+                require(deadline is None or time.monotonic() < deadline, "cleanup-postcheck-deadline")
+                part = os.read(fd, min(65536, ref["size"] + 1 - len(chunks)))
+                if not part: break
+                chunks.extend(part)
+            self._private(os.fstat(fd))
+            require(len(chunks) == ref["size"] and hashlib.sha256(chunks).hexdigest() == ref["sha256"],
+                    "cleanup-observation-drift")
+        finally:
+            os.close(fd)
+        length = struct.unpack_from(">I", chunks)[0]
+        require(0 < length <= 65536 and 4 + length <= len(chunks), "cleanup-observation-header")
+        header = decode_json(bytes(chunks[4:4 + length]))
+        require(set(header) == {"schema", "nonce", "lease_id", "effect_id", "operation", "metadata"}
+                and type(header["schema"]) is int and header["schema"] == 1
+                and header["nonce"] == ref["nonce"] and header["lease_id"] == identifier
+                and header["effect_id"] == effect_id and header["operation"] == effect["operation"],
+                "cleanup-observation-binding")
+        pairs = bytes(chunks[4 + length:])
+        require(len(pairs) % 16 == 0, "cleanup-observation-pairs")
+        return header["metadata"], pairs
+
+    def resolve_cleanup_postcheck(self, identifier, effect_id, proof):
+        """Fresh Root observations grant only an in-memory closure witness."""
+        from . import cleanup_storage
+        observed = cleanup_storage._consume_reconciliation(proof, self, identifier, effect_id)
+        state = self._load(); effect = self._lease(state, identifier)["effects"][effect_id]
+        require(state["generation"] == observed["generation"] and digest(effect) == observed["effect_sha256"],
+                "cleanup-reconciliation-drift")
+        nonce = effect["cleanup_postcheck"]; token = _CleanupPostcheck(nonce); info = os.fstat(self.fd)
+        require(time.monotonic() < observed["deadline"], "cleanup-postcheck-deadline")
+        self._cleanup_postchecks[nonce] = [token, identifier, effect_id, observed["deadline"],
+            os.getpid(), threading.current_thread(), (digest(effect), state["generation"]),
+            (self.fd, info.st_dev, info.st_ino), {"kind": "fresh-root-readback", "nonce": nonce,
+                "original_receipt_sha256": observed["effect_sha256"],
+                "observation_sha256": observed["observation_sha256"], "original_budget_success": False}]
+
+    def gc_cleanup_observation(self, identifier, effect_id):
+        """Explicit owned metadata GC only AFTER durable closed state; idempotent."""
+        require(os.geteuid() == self.owner_uid == 0, "cleanup-observation-root-required")
+        with self._transaction() as state:
+            record = self._lease(state, identifier); effect = record["effects"][effect_id]
+            require(record["state"] == "closed" and "cleanup_postcheck" not in effect
+                    and "cleanup_postcheck_resolution" in effect, "cleanup-observation-still-needed")
+            ref = effect.get("cleanup_observation")
+            if ref is None: return {"state": "no-sidecar"}
+            try:
+                before = os.stat(ref["name"], dir_fd=self.fd, follow_symlinks=False)
+                self.read_cleanup_observation(identifier, effect_id)
+            except (Denied, FileNotFoundError):
+                try: os.stat(ref["name"], dir_fd=self.fd, follow_symlinks=False)
+                except FileNotFoundError: return {"state": "already-absent"}
+                raise
+            after = os.stat(ref["name"], dir_fd=self.fd, follow_symlinks=False)
+            self._private(after)
+            require((before.st_dev, before.st_ino) == (after.st_dev, after.st_ino), "cleanup-observation-drift")
+            os.unlink(ref["name"], dir_fd=self.fd); os.fsync(self.fd)
+            return {"state": "owned-metadata-removed", "sha256": ref["sha256"]}
+
+    def require_cleanup_postchecks(self, identifier):
+        state = self._load()
+        self._accepted_cleanup_effects(identifier, self._lease(state, identifier), state["generation"])
+
+
+    def require_cleanup_complete(self, identifier):
+        state = self._load()
+        effects = self._accepted_cleanup_effects(identifier, self._lease(state, identifier), state["generation"])
+        self._cleanup_complete(list(effects.values()))
+
+
     @staticmethod
     def _cleanup_complete(effects):
+        require(not any("cleanup_postcheck" in e for e in effects), "cleanup-postcheck-held")
         require(not any(e["state"] in {"intent", "unknown"} for e in effects), "effect-unresolved")
         for effect in effects:
             if effect["operation"] in CREATES and effect["state"] == "verified":
@@ -1652,6 +1852,8 @@ class Ledger:
         with self._transaction() as state:
             lease = self._lease(state, identifier)
             require(lease["state"] != "closed", "lease-closed")
-            self._cleanup_complete(list(lease["effects"].values()))
+            effects = self._accepted_cleanup_effects(identifier, lease, state["generation"])
+            self._cleanup_complete(list(effects.values()))
             self._owned_instance_deleted(lease)
+            lease["effects"] = effects
             lease.update(state="closed", closed_at=self._now())

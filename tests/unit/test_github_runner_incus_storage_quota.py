@@ -171,6 +171,15 @@ class RootStorageQuotaTests(unittest.TestCase):
         # Native loop/block/sysfs/FIEMAP/ext4/vfs/mountinfo and namespaceOWNER
         # acceptance are modeled. Namespace dev/inode/type/ioctl and Root
         # paths/files/lifetime are real; this is NOT Root native qualification.
+        from incus_lease_issuer import cleanup_storage
+        actual_relative = cleanup_storage._relative_metadata
+        def relative_metadata(parent, name):
+            # Keep real inode/type/UID/GID observations. This fixture already
+            # models the native mount realm as900; the new relative statx guard
+            # must observe that same modeled realm, not an inconsistent second
+            # kernel. The product never substitutes a modeled mount ID.
+            identity, _ = actual_relative(parent, name)
+            return identity, 900
         actual_type, actual_open = quota._fs_type, quota._open_file
         mounted = self.mount.stat()
         def filesystem(fd):
@@ -188,6 +197,7 @@ class RootStorageQuotaTests(unittest.TestCase):
              mock.patch.object(quota, "_open_file", side_effect=open_file), \
              mock.patch.object(quota, "_loop", side_effect=loop), \
              mock.patch.object(quota, "_mount_id", return_value=900), \
+             mock.patch.object(cleanup_storage, "_relative_metadata", side_effect=relative_metadata), \
              mock.patch.object(quota, "_read_proc", side_effect=lambda path, limit: self.rows), \
              mock.patch.object(quota.os, "fstatvfs", side_effect=lambda fd: self.vfs):
             yield

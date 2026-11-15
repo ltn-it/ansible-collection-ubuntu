@@ -1,0 +1,14 @@
+---
+bugfixes:
+  - github_runner - retain exact ancestry and mount ownership checks while releasing large retained engine trees
+    with bounded directory descriptors and depth-ordered filesystem durability barriers
+    inside the original cleanup deadline.
+  - >-
+    Incus cleanup receipt safety - preserve pending postchecks durably before
+    deletion; validate quota exit and receipt completion inside the original
+    deadline, then permit closure only with the same-process completion witness.
+    A reopened Ledger holds until a fresh exclusive Root-session readback
+    reauthenticates the original owner, custody, quota, full native scope and
+    exact resource/consumer absence; no deletion or authority clock is repeated.
+    Hash-bound inode-only metadata remains private audit evidence through durable
+    closure and permits only explicit, exact-owned post-close metadata collection.

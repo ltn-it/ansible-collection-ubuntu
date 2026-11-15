@@ -508,6 +508,9 @@ def operating_cleanup_fixture(mode):
         while (owned.returncode is None or not owned.eof) and time.monotonic() < end: owned.pump(.01)
         assert owned.returncode == 23 and owned.eof
         owned.record_exit()
+        # Match actual wait_for_exit: durable exit is followed by capture/FD release.
+        # Reopening only Ledger does not otherwise emulate controller process exit.
+        owned.release()
         for operation, name in (("engine-stop", "engine:lit-lease-" + lease), ("fence-disable", "fence:" + lease)):
             e = store.begin(lease, operation, name); store.record(lease, e, "verified", evidence_sha256="d" * 64)
         server.resources[state_url] = {"status": "Stopped", "status_code": 102, "pid": 0}
@@ -931,6 +934,15 @@ def interrupted_parent_cleanup(stage, *, negative=""):
             if not state["hit"]:
                 raise AssertionError("requested interruption boundary was not reached")
         interrupted = store.read(lease)
+        if negative == "raw-returned":
+            raw = Path(identity.decode_json(owner.engine_descriptor_bytes)["output_path"])
+            raw.mkdir(mode=0o700)
+        elif negative == "sidecar-corrupt":
+            observed = next(e["cleanup_observation"] for e in interrupted["effects"].values()
+                            if "cleanup_observation" in e)
+            path = Path(registry.select(selector).ledger_path) / observed["name"]
+            value = path.read_bytes()
+            path.write_bytes(value[:-1] + bytes([value[-1] ^ 1]))
         if negative in {"recreated", "foreign"}:
             server.resources[project_path] = parent
             if negative == "foreign":
@@ -1021,6 +1033,12 @@ class RootDeletedProjectReentryTests(unittest.TestCase):
         for stage in ("verified:project-delete", "verified:network-delete", "before:close", "after:close"):
             with self.subTest(stage=stage):
                 self.business(stage)
+
+    def test_fresh_root_reentry_retains_returned_raw_path_or_corrupt_original_inventory(self):
+        for negative in ("raw-returned", "sidecar-corrupt"):
+            with self.subTest(negative=negative), interrupted_parent_cleanup("verified:project-delete", negative=negative) as interrupted:
+                with self.assertRaises(interrupted):
+                    operating_cleanup_fixture("immediate")
 
     def test_operating_verified_parent_network_and_preclose_close_and_release_capacity(self):
         for stage in ("verified:project-delete", "verified:network-delete", "before:close", "after:close"):

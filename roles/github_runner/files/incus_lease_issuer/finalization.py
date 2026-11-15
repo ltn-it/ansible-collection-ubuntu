@@ -312,6 +312,7 @@ class RootFinalizer:
                         "instance:" + target["project"] + ":" + target["instance"], "instance", cleanup.instance_delete)
                 if project_deleted is None:
                     cleanup.wait_quiet(config.operation_wait_seconds)
+                cleanup_storage.reconcile_postchecks(session, owner, store, config, cleanup)
                 cleanup_storage.release_engine(owner, store, config)
                 self._fresh(session, registry, selector, store, owner)
                 cleanup_storage.delete_context(owner, store, config)
