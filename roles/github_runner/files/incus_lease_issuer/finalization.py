@@ -142,7 +142,9 @@ class RootFinalizer:
         require(runtime_rpc._configuration(self._runtime.path, self._runtime.sha256) == self._runtime
                 and registry.path == self._runtime.registry_path and registry.sha256 == self._runtime.registry_sha256
                 and config.registry_path == registry.path and config.registry_sha256 == registry.sha256
-                and cell_contract.owned_cell_for_cleanup(registry, selector, store, owner.lease_id) == owner,
+                and (cell_contract.partial_preparation_owner(registry, selector, store, owner.lease_id)
+                     if type(owner) is cell_contract.PartialPreparationOwner else
+                     cell_contract.owned_cell_for_cleanup(registry, selector, store, owner.lease_id)) == owner,
                 "finalization-root-drift")
         return config
 
@@ -157,6 +159,8 @@ class RootFinalizer:
         try:
             before = cleanup.readback(kind)
             require(before["state"] in {"required_fields_match", "absent_observed"}, "finalization-delete-not-owned")
+            if type(owner) is cell_contract.PartialPreparationOwner:
+                require(before["state"] == "required_fields_match", "partial-original-resource-disappeared")
             if before["state"] != "absent_observed":
                 if operation == "certificate-revoke":
                     inventory = cleanup.certificate_inventory()
@@ -192,6 +196,83 @@ class RootFinalizer:
             except Exception:
                 pass
             raise FinalizationUnknown("finalization-remote-unknown") from None
+
+    def withdraw_partial_preparation(self, registry, selector, store, lease_id):
+        """Immediate original certificate withdrawal; no data/VM cleanup gate."""
+        from . import root_session
+        with root_session._session(self._runtime.preparation_config_path,
+                                  self._runtime.preparation_config_sha256) as session:
+            owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
+            config = self._fresh(session, registry, selector, store, owner)
+            target = owner.incus
+            fingerprint = owner.creator_targets.get("certificate-create", "").removeprefix("certificate:")
+            client = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
+                target["project"], target["network"], "default", target["pool"],
+                (fingerprint,) if fingerprint else ()))
+            cleanup = incus_mutation.RootPartialPreparationCleanup(client, owner, store)
+            if fingerprint:
+                previous = _effect(store.read(lease_id), "certificate-revoke", owner.creator_targets["certificate-create"])
+                if previous is None:
+                    require(cleanup.certificate_inventory().fingerprints == (fingerprint,),
+                            "partial-original-certificate-not-present")
+                self._remote_delete(session, registry, selector, store, owner, cleanup, "certificate-revoke",
+                    owner.creator_targets["certificate-create"], "certificate", cleanup.certificate_delete)
+            else:
+                require(cleanup.certificates_absent(), "partial-uncreated-certificate-scope-held")
+            return {"lease_id": lease_id, "certificate_scope_absent": cleanup.certificates_absent(),
+                    "native_acceptance": False}
+
+    def finalize_partial_preparation(self, registry, selector, store, lease_id):
+        """One finite original no-engine failure lifecycle; never normal VM finalization."""
+        from . import root_session, cleanup_storage, operating_custody
+        self.withdraw_partial_preparation(registry, selector, store, lease_id)
+        with root_session._session(self._runtime.preparation_config_path,
+                                  self._runtime.preparation_config_sha256) as session:
+            owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
+            config = self._fresh(session, registry, selector, store, owner)
+            target = owner.incus
+            fingerprint = owner.creator_targets.get("certificate-create", "").removeprefix("certificate:")
+            client = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
+                target["project"], target["network"], "default", target["pool"],
+                (fingerprint,) if fingerprint else ()))
+            cleanup = incus_mutation.RootPartialPreparationCleanup(client, owner, store)
+            require(cleanup.certificates_absent(), "partial-certificate-scope-live")
+            if "project-create" in owner.creators and _effect(store.read(lease_id), "project-delete",
+                    owner.creator_targets["project-create"]) is None:
+                cleanup.quiet_project()
+            cleanup_storage.reconcile_postchecks(session, owner, store, config, cleanup)
+            operating_custody.require_partial_cleanup_allowed(store, lease_id)
+            if "engine-prepare" in owner.creators:
+                cleanup_storage.release_engine(owner, store, config)
+            if "context-create" in owner.creators:
+                cleanup_storage.delete_context(owner, store, config)
+            if "image-copy" in owner.creators:
+                copied = owner.creator_targets["image-copy"]
+                parent = _effect(store.read(lease_id), "project-delete", owner.creator_targets["project-create"])
+                if parent is None:
+                    self._remote_delete(session, registry, selector, store, owner, cleanup,
+                        "image-delete", copied, "image", cleanup.image_delete)
+                    cleanup.wait_quiet(config.operation_wait_seconds)
+                else:
+                    child = _effect(store.read(lease_id), "image-delete", copied)
+                    require(parent[1]["state"] == "verified" and child is not None
+                            and child[1]["state"] == "verified"
+                            and cleanup.readback("project")["state"] == "absent_observed",
+                            "partial-prior-image-or-project-held")
+            for operation, creator, kind, action in (
+                    ("project-delete", "project-create", "project", cleanup.project_delete),
+                    ("network-delete", "network-create", "bridge", cleanup.bridge_delete)):
+                if creator in owner.creators:
+                    self._remote_delete(session, registry, selector, store, owner, cleanup,
+                        operation, owner.creator_targets[creator], kind, action)
+            self._fresh(session, registry, selector, store, owner)
+            require(cleanup.certificates_absent(), "partial-certificate-returned")
+            store.close(lease_id)
+            record = store.read(lease_id)
+            return {"schema": 1, "state": "FAILED_PARTIAL_PREPARATION_CLOSED", "lease_id": lease_id,
+                    "closed_at": record["closed_at"], "effects_sha256": ledger.digest(record["effects"]),
+                    "partial_custody_sha256": ledger.digest(record["partial_preparation_custody"]),
+                    "native_acceptance": False}
 
     def finalize(self, registry, selector, store, lease_id):
         """Explicit Root call, serialized; no effect retry or job acceptance.
