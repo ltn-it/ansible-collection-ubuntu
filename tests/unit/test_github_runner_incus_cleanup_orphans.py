@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import secrets
-import stat
 import struct
 import sys
 import time
@@ -19,12 +18,10 @@ from incus_lease_issuer.identity import Denied
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Linux Root fixture only")
 class CleanupOrphanRecoveryTests(unittest.TestCase):
     def setUp(self):
-        base = Path("/run/proof")
-        if not base.is_dir() or base.stat().st_uid != 0 or stat.S_IMODE(base.stat().st_mode) != 0o700:
-            self.skipTest("requires private Root0700 /run/proof")
+        self.parent = fixtures.validated_fixture_parent(Path("/run/proof"), private=True)
         self.io = fixtures.IncusLedgerTests()
-        self.io.setUp()
         self.addCleanup(self.io.doCleanups)
+        self.io.setUp(parent=self.parent)
 
     def prepared(self, store):
         lease, *_ = self.io.prepare(store)
@@ -135,7 +132,7 @@ class CleanupOrphanRecoveryTests(unittest.TestCase):
                     with self.assertRaises(Denied):store.recover_cleanup_observation_orphans()
                 self.assertTrue((self.io.path/good).exists());self.assertTrue(path.exists())
                 if alias.exists():alias.unlink()
-            self.io.doCleanups();self.io.setUp()
+            self.io.doCleanups();self.io.setUp(parent=self.parent)
 
     def test_bounded_directory_scan_counts_irrelevant_entries_and_has_no_mutation(self):
         with self.io.open() as store:

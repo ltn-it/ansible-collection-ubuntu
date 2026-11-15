@@ -1778,7 +1778,7 @@ class Ledger:
         finally:
             os.close(fd)
 
-    def _recover_cleanup_observation_orphans(self, state, end):
+    def _recover_cleanup_observation_orphans(self, state, end, *, closed_identifier=None):
         """Same locked durable state, bounded two-pass proof; no effect mutation."""
         from . import storage_quota
         scope = self._cleanup_observation_scope(end)
@@ -1808,7 +1808,21 @@ class Ledger:
         finally:
             os.close(scan)
         orphans = sorted(set(names) - set(references) - protected)
-        if not orphans:
+        collecting = closed_identifier is not None
+        if collecting:
+            require(type(closed_identifier) is str and (closed_identifier == "*" or ID.fullmatch(closed_identifier)),
+                    "invalid-lease-id")
+            if closed_identifier != "*":
+                require(self._lease(state, closed_identifier)["state"] == "closed",
+                        "cleanup-observation-still-needed")
+            candidates = sorted(name for name, expected in references.items() if name in names
+                and (closed_identifier == "*" or expected[0] == closed_identifier)
+                and state["leases"][expected[0]]["state"] == "closed"
+                and "cleanup_postcheck" not in state["leases"][expected[0]]["effects"][expected[1]]
+                and "cleanup_postcheck_resolution" in state["leases"][expected[0]]["effects"][expected[1]])
+        else:
+            candidates = orphans
+        if not candidates:
             require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
             return {"removed": [], "remaining_unreferenced": 0, "effects_modified": False}
         # Validate every present reference FIRST. Missing closed/resolved files
@@ -1824,19 +1838,20 @@ class Ledger:
                         and "cleanup_postcheck_resolution" in effect, "cleanup-observation-recovery-reference")
                 continue
             proof = self._cleanup_observation_file(name, state, scope[5], end, expected=expected)
-            checked[name] = proof; bytes_to_hash += proof["size"]
+            checked[name] = proof
+            if not collecting: bytes_to_hash += proof["size"]
         require(not (set(names) & protected - set(references)), "cleanup-observation-recovery-protected")
         # Every orphan header must prove THIS durable lease/effect/operation,
         # even when more files exist than can be reclaimed in this finite batch.
         for name in orphans:
             checked[name] = self._cleanup_observation_file(name, state, scope[5], end)
         selected = []
-        for name in orphans:
+        for name in candidates:
             if len(selected) == 16 or bytes_to_hash + checked[name]["size"] > 268435456:
                 break
             selected.append(name); bytes_to_hash += checked[name]["size"]
         require(selected and bytes_to_hash <= 268435456, "cleanup-observation-recovery-byte-bound")
-        for name in [*references, *selected]:
+        for name in (selected if collecting else [*references, *selected]):
             if name not in checked:
                 continue
             proof = self._cleanup_observation_file(name, state, scope[5], end,
@@ -1855,7 +1870,26 @@ class Ledger:
             removed.append({"name": name, "size": checked[name]["size"], "sha256": checked[name]["sha256"]})
         os.fsync(self.fd)
         require(self._cleanup_observation_scope(end) == scope, "cleanup-observation-recovery-scope")
-        return {"removed": removed, "remaining_unreferenced": len(orphans) - len(selected), "effects_modified": False}
+        return {"removed": removed, "remaining_unreferenced": len(candidates) - len(selected), "effects_modified": False}
+
+    def collect_closed_cleanup_observations(self, identifier=None, *, deadline=None):
+        """Bounded closed-metadata maintenance; durable references/audit never change.
+
+        Each explicit historical batch validates every present reference header,
+        then fully authenticates only its <=16 selected closed files (<=256MiB).
+        This does not grant cleanup, closure, reconciliation or replay authority.
+        """
+        require(os.geteuid() == self.owner_uid == 0, "cleanup-observation-root-required")
+        now = time.monotonic(); end = now + 60 if deadline is None else deadline
+        require(type(now) in {int, float} and math.isfinite(now), "cleanup-observation-recovery-deadline")
+        if deadline is not None:
+            require(type(end) in {int, float} and math.isfinite(end) and 0 < end - now <= 60,
+                    "cleanup-observation-recovery-deadline")
+        with self._transaction() as state:
+            result = self._recover_cleanup_observation_orphans(state, end,
+                closed_identifier="*" if identifier is None else identifier)
+        return {"removed": result["removed"], "remaining_closed": result["remaining_unreferenced"],
+                "effects_modified": False}
 
     def recover_cleanup_observation_orphans(self, *, deadline=None):
         """Root-only pre-publication metadata recovery; never grant a retry."""
@@ -2049,3 +2083,10 @@ class Ledger:
             self._owned_instance_deleted(lease)
             lease["effects"] = effects
             lease.update(state="closed", closed_at=self._now())
+        # Closure is already durable. A metadata-maintenance failure must not
+        # turn it into an unresolved resource deletion or authorize a replay.
+        try:
+            maintenance = self.collect_closed_cleanup_observations(identifier)
+        except (Denied, OSError):
+            return {"state": "closed", "metadata_gc": "held"}
+        return {"state": "closed", "metadata_gc": "complete", "maintenance": maintenance}

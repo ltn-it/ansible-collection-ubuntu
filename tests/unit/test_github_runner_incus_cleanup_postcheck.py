@@ -21,9 +21,10 @@ from incus_lease_issuer.identity import Denied
 )
 class CleanupPostcheckTests(unittest.TestCase):
     def setUp(self):
+        self.parent = fixtures.validated_fixture_parent(Path("/run/proof"), private=True)
         self.fixture = fixtures.IncusLedgerTests()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp(parent=self.parent)
 
     def prepared(self, store):
         lease, *_ = self.fixture.prepare(store)
@@ -150,9 +151,13 @@ class CleanupPostcheckTests(unittest.TestCase):
             store.record(lease, effect, "verified", evidence_sha256=fixtures.EVIDENCE)
             store.complete_cleanup_postcheck(token)
             self.remaining(store, lease, targets)
-            store.close(lease)
-            self.assertTrue(sidecar.exists())
-            self.assertEqual(store.gc_cleanup_observation(lease, effect)["state"], "owned-metadata-removed")
+            closed = store.close(lease)
+            self.assertEqual(closed["state"], "closed")
+            self.assertEqual(closed["metadata_gc"], "complete")
+            self.assertFalse(sidecar.exists())
+            retained = store.read(lease)["effects"][effect]
+            self.assertEqual(retained["cleanup_observation"], row["cleanup_observation"])
+            self.assertIn("cleanup_postcheck_resolution", retained)
             self.assertEqual(store.gc_cleanup_observation(lease, effect)["state"], "already-absent")
 
     def test_sidecar_tampering_or_public_mode_cannot_grant_completion(self):
@@ -182,7 +187,7 @@ class CleanupPostcheckTests(unittest.TestCase):
                 if mutation == "bytes": sidecar.write_bytes(original)
                 # Distinct original lease/fixture; no unresolved effect is reused.
             self.fixture.doCleanups()
-            self.fixture.setUp()
+            self.fixture.setUp(parent=self.parent)
 
     def test_large_original_inode_sidecar_cost_includes_packing_fsync_and_readback(self):
         import struct, json

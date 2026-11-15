@@ -72,6 +72,35 @@ def crash_after_intent(path, lease, connection):
         os._exit(0)
 
 
+def validated_fixture_parent(parent=None, *, private=False):
+    """Select and validate the actual allocation parent before fixture setup."""
+    path = Path(tempfile.gettempdir() if parent is None else parent)
+    if not path.is_absolute() or ".." in path.parts:
+        raise unittest.SkipTest("requires a trusted absolute fixture parent")
+    owner = os.getuid()
+    fd = None
+    try:
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        for part in path.parts[1:]:
+            following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = following
+            info = os.fstat(fd)
+            writable = stat.S_IMODE(info.st_mode) & 0o022
+            if info.st_uid not in {0, owner} or (writable and not (
+                    owner != 0 and info.st_uid == 0 and info.st_mode & stat.S_ISVTX)):
+                raise unittest.SkipTest("requires trusted nonwritable fixture ancestry")
+        info = os.fstat(fd)
+        if private and (info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700):
+            raise unittest.SkipTest("requires an existing private owner0700 fixture parent")
+    except OSError:
+        raise unittest.SkipTest("requires an existing no-follow fixture parent") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return path
+
+
 class IncusLedgerTests(unittest.TestCase):
     def remote_stop_ready(self, store, lease):
         targets = self.provision(store, lease)
@@ -124,8 +153,9 @@ class IncusLedgerTests(unittest.TestCase):
             self.assertEqual(after["state"], "cancelled")
             self.deny(store.begin, lease, "instance-stop", target)
 
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+    def setUp(self, parent=None):
+        parent = validated_fixture_parent(parent)
+        self.directory = tempfile.TemporaryDirectory(dir=parent)
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "private-ledger"
         self.path.mkdir(mode=0o700)
