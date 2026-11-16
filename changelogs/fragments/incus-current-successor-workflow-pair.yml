@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - accept the reviewed current workflow and reusable-workflow pair for a schema-five continuation
+    while preserving the immutable failed-run history and rejecting mixed or unknown pairs.

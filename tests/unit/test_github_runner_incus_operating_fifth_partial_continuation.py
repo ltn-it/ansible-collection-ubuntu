@@ -70,6 +70,37 @@ class FifthPartialHistoryTests(unittest.TestCase):
             args=deepcopy(self.native);change(*args)
             with self.assertRaises(Denied):cells.fifth_native_projection(*args)
 
+    def test_current_successor_pair_keeps_original_history_and_commit_binding(self):
+        workflow='64e3d2ca0bd5e442233ec53b00d6f76fb7ba40064abea36237edeb783089b4ba'
+        reusable='a94199c94fd00226e194613d0fb9d52705baa808'
+        changed=deepcopy(self.descriptor)
+        changed['successor'].update(source_sha='086d039c8c58bc91edfeacadf508c207a03a58b5',
+            run_id=43778415146,source_workflow_sha256=workflow,reusable_sha=reusable)
+        self.assertEqual(cells.validate_continuation_descriptor(changed,workflow,reusable),changed)
+        cells.validate_continuation_commit({'sha':changed['successor']['source_sha'],
+            'parents':[{'sha':cells.FIFTH_MAIN}]},changed,changed['successor']['source_sha'],43778415146,reusable)
+        self.assertEqual(cells.validate_continuation_qualification(self.value),self.four.three.two.counts)
+        self.assertEqual(ledger.canonical(self.value['previous_qualification']),self.old_bytes)
+        for field,value in [('run_attempt',2),('first_parent',cells.FOURTH_MAIN),
+                            ('source_sha',cells.FIFTH_MAIN),('run_id',cells.FIFTH_RUN)]:
+            invalid=deepcopy(changed);invalid['successor'][field]=value
+            with self.subTest(field=field),self.assertRaises(Denied):
+                cells.validate_continuation_descriptor(invalid,workflow,reusable)
+
+    def test_successor_rejects_mixed_unknown_and_argument_mismatched_pairs(self):
+        workflow='64e3d2ca0bd5e442233ec53b00d6f76fb7ba40064abea36237edeb783089b4ba'
+        reusable='a94199c94fd00226e194613d0fb9d52705baa808'
+        for pair in [(workflow,cells.FOUR_HISTORY_REUSABLE),(cells.FOUR_HISTORY_WORKFLOW,reusable),
+                     ('0'*64,reusable),(workflow,'0'*40)]:
+            invalid=deepcopy(self.descriptor)
+            invalid['successor'].update(source_workflow_sha256=pair[0],reusable_sha=pair[1])
+            with self.subTest(pair=pair),self.assertRaises(Denied):
+                cells.validate_continuation_descriptor(invalid,*pair)
+        for pair in [(workflow,reusable),(cells.FOUR_HISTORY_WORKFLOW,reusable),
+                     (workflow,cells.FOUR_HISTORY_REUSABLE)]:
+            with self.subTest(arguments=pair),self.assertRaises(Denied):
+                cells.validate_continuation_descriptor(self.descriptor,*pair)
+
     def test_actor_profile_changes_do_not_change_failed_execution_graph(self):
         for field in ("actor", "triggering_actor"):
             with self.subTest(field=field):
