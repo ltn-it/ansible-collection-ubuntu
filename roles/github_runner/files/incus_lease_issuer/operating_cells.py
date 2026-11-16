@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 6:
+        return _validate_sixth_preparation_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 5:
         return _validate_partial_preparation_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 4:
@@ -139,7 +141,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
-                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN}[value["schema"]])
+                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN}[value["schema"]])
             and len({p["sha"] for p in parents}) == len(parents)
             and caller_sha not in {p["sha"] for p in parents}, "continuation-first-parent")
 
@@ -194,6 +196,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 6:
+        return _validate_sixth_preparation_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 5:
         return _validate_partial_preparation_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 4:
@@ -980,6 +984,127 @@ def partial_preparation_continuation_qualification(previous, run, inventory, che
     """Root-sealed assembly only; real closed-store/native absence is re-proved at entry."""
     value = {"schema": 5, "purpose": "g06-fifth-failed-partial-preparation-with-effects",
              "previous_qualification": previous, "native_fifth": fifth_native_projection(run, inventory, checks),
+             "retirement": retirement}
+    validate_continuation_qualification(value)
+    return value
+
+
+# The original sixth push published a context but never journaled a fence/start.
+# Preserve its failed native graph and actual closure; no replay or new budget.
+SIXTH_MAIN = "086d039c8c58bc91edfeacadf508c207a03a58b5"
+SIXTH_RUN = 43778415146
+SIXTH_LEASE = "6853b45b11a3bfcc84370c57788258ba"
+SIXTH_CELL = "5cba179a81a5d9a8d1aa3004e75a5f8c4dda68e19c05ca9541b7a7db02e8d631"
+SIXTH_POLICY = "4cc42e8494f27cc758bf859482678e68acc1a7dcfb734a1c5ea79caa24d01d1b"
+SIXTH_TERMINAL = 1794808083
+SIXTH_RETAIN_UNTIL = 1794822483
+SIXTH_GRAPH = "4a54b41ae5e95acf7703af177e9fa82f7bb29e66df24bb344b8b18601a59b53b"
+SIXTH_CHECKS = (133010603431, 133010877404, 133117295957)
+SIXTH_JOB = 133010877404
+SIXTH_CHECK = 133010877404
+SIXTH_RUNNER = 78
+SIXTH_UID = 995
+SIXTH_WORKFLOW = "64e3d2ca0bd5e442233ec53b00d6f76fb7ba40064abea36237edeb783089b4ba"
+SIXTH_REUSABLE = "a94199c94fd00226e194613d0fb9d52705baa808"
+SIXTH_PREVIOUS_QUALIFICATION = "3fcc132ce7c8b0e0530df1fc412f861dc2a9a34c5311813cb0fccaaccef5410b"
+SIXTH_SUCCESSOR_WORKFLOW = "3f54579cb8abb17f38a06ada3d52a4c4325a0f616905990b1927bc3e0ef92fd8"
+
+
+def sixth_native_projection(run, inventory, checks):
+    require(type(run) is dict and type(inventory) is dict and type(inventory.get("total_count")) is int
+            and inventory["total_count"] == 24 and type(inventory.get("jobs")) is list
+            and len(inventory["jobs"]) == 24, "continuation-sixth-complete-inventory")
+    repo = run.get("repository", {})
+    require(repo.get("id") == 1103407173 and repo.get("full_name") == "ltn-it/ansible-collection-supplementary"
+            and repo.get("private") is False and repo.get("owner", {}).get("id") == 54334171,
+            "continuation-sixth-native-repository")
+    refs = run.get("referenced_workflows")
+    require(type(refs) is list and sum(type(v) is dict and v.get("sha") == SIXTH_REUSABLE
+            and v.get("path") == "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + SIXTH_REUSABLE
+            for v in refs) == 1, "continuation-sixth-native-controller")
+    fields = ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion", "runner_id",
+              "runner_group_id", "started_at", "completed_at", "check_run_url")
+    rows = [{k: row.get(k) for k in fields} for row in inventory["jobs"]]
+    require(all(type(row["id"]) is int and row["id"] > 0 for row in rows)
+            and len({row["id"] for row in rows}) == 24, "continuation-sixth-native-ids")
+    actor = {"login": "litroc", "id": 76040632, "type": "User"}
+    require(all(type(run.get(field)) is dict and all(type(run[field].get(k)) is type(v)
+                and run[field][k] == v for k, v in actor.items())
+                for field in ("actor", "triggering_actor")), "continuation-sixth-actor")
+    graph = {"run": {**{k: run.get(k) for k in ("id", "run_attempt", "head_sha", "event", "head_branch",
+             "workflow_id", "path", "status", "conclusion")},
+             **{field: {k: run[field][k] for k in actor} for field in ("actor", "triggering_actor")}},
+             "jobs": sorted(rows, key=lambda row: row["id"])}
+    require(ledger.digest(graph) == SIXTH_GRAPH, "continuation-sixth-original-failed-graph")
+    require(type(checks) is list and len(checks) == len(SIXTH_CHECKS), "continuation-sixth-native-checks")
+    for identifier, check in zip(SIXTH_CHECKS, checks):
+        job = next(row for row in rows if row["id"] == identifier)
+        require(type(check) is dict and check.get("id") == identifier and check.get("head_sha") == SIXTH_MAIN
+                and all(check.get(k) == job[k] for k in ("name", "status", "conclusion", "started_at", "completed_at"))
+                and check.get("app", {}).get("id") == 15368 and check.get("app", {}).get("slug") == "github-actions",
+                "continuation-sixth-native-check")
+    return graph
+
+
+def _validate_sixth_retirement(value):
+    engine_policy._keys(value, {"schema", "kind", "lease_id", "record_sha256", "closed_at", "retain_until",
+                               "native_absence_sha256", "catalogues", "original_configuration"})
+    require(type(value["schema"]) is int and value["schema"] == 1
+            and value["kind"] == "original-sixth-post-context-pre-fence-verified-closed"
+            and value["lease_id"] == SIXTH_LEASE and type(value["closed_at"]) is int
+            and type(value["retain_until"]) is int
+            and value["closed_at"] >= value["retain_until"] == SIXTH_RETAIN_UNTIL,
+            "continuation-sixth-retirement-not-closed")
+    for field in ("record_sha256", "native_absence_sha256"):
+        engine_policy._hash(value[field])
+    original = engine_policy._keys(value["original_configuration"], {"directory", "manifest_sha256"})
+    engine_policy._path(original["directory"])
+    engine_policy._hash(original["manifest_sha256"])
+
+    catalogues = engine_policy._keys(value["catalogues"], {"native_intake_catalogue", "native_run_configuration_catalogue"})
+    for entries in catalogues.values():
+        require(type(entries) is dict and 0 < len(entries) <= 256, "continuation-sixth-retired-catalogue")
+        for name, digest in entries.items():
+            require(type(name) is str and re.fullmatch("[0-9a-f]{64}", name), "continuation-sixth-retired-entry")
+            engine_policy._hash(digest)
+    return value
+
+
+def _validate_sixth_preparation_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    require(type(value["schema"]) is int and value["schema"] == 6
+            and value["reason"] == "original-post-context-pre-fence-failed-retired", "continuation-sixth-purpose")
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"]); engine_policy._hash(ref["sha256"])
+    row = engine_policy._keys(value["successor"], {"source_sha", "run_id", "run_attempt", "first_parent",
+                                                  "source_workflow_sha256", "reusable_sha"})
+    cell_contract._commit(row["source_sha"])
+    engine_policy._integer(row["run_id"], 1, 2**63 - 1)
+    require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN, THIRD_MAIN, FOURTH_MAIN, FIFTH_MAIN, SIXTH_MAIN}
+            and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN, FOURTH_RUN, FIFTH_RUN, SIXTH_RUN}
+            and type(row["run_attempt"]) is int and row["run_attempt"] == 1 and row["first_parent"] == SIXTH_MAIN
+            and row["source_workflow_sha256"] == workflow_sha256 == SIXTH_SUCCESSOR_WORKFLOW
+            and row["reusable_sha"] == reusable_sha == SIXTH_REUSABLE, "continuation-sixth-successor")
+    return value
+
+
+def _validate_sixth_preparation_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "previous_qualification", "native_sixth", "retirement"})
+    require(type(value["schema"]) is int and value["schema"] == 6
+            and value["purpose"] == "g06-sixth-failed-post-context-pre-fence-with-effects", "continuation-sixth-qualification")
+    previous = value["previous_qualification"]
+    require(type(previous) is dict and type(previous.get("schema")) is int and previous["schema"] == 5
+            and ledger.digest(previous) == SIXTH_PREVIOUS_QUALIFICATION, "continuation-sixth-preserved-five-history")
+    counts = _validate_partial_preparation_qualification(previous)
+    require(ledger.digest(value["native_sixth"]) == SIXTH_GRAPH, "continuation-sixth-preserved-native-graph")
+    _validate_sixth_retirement(value["retirement"])
+    return counts
+
+
+def sixth_preparation_continuation_qualification(previous, run, inventory, checks, retirement):
+    """Root-only assembly; genuine closed original and native absence re-proved at entry."""
+    value = {"schema": 6, "purpose": "g06-sixth-failed-post-context-pre-fence-with-effects",
+             "previous_qualification": previous, "native_sixth": sixth_native_projection(run, inventory, checks),
              "retirement": retirement}
     validate_continuation_qualification(value)
     return value

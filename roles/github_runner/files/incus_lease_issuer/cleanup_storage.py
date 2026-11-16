@@ -825,6 +825,31 @@ def release_engine(owner, store, config):
             os.close(fd)
 
 
+def _partial_context_files(owner, store, config, record, context, binding, binding_proof):
+    """Authenticate an existing publication for deletion, never renew authority."""
+    publication = owner.creators.get("context-publish")
+    if publication is None:
+        require("admission" not in binding, "partial-context-unrecorded-publication")
+        files = signed_context._files(context, binding, None)
+        unsigned = binding
+    else:
+        payload, _ = signed_context._decode_signed(binding.get("admission"), config.signing_public_key)
+        engine_sha256 = engine._hash(payload.get("engine_policy_sha256"))
+        receipt = preparation.PreparationReceipt(owner.lease_id, owner.cell_sha256, engine_sha256,
+                                                 binding_proof.sha256, owner.expires_at)
+        # This existing ownership verifier deliberately accepts expired signed
+        # ownership while binding every original field/file. It grants nothing.
+        engine_executor._authenticate(config, owner.registry, owner.selector, store, owner.lease_id, receipt)
+        effect = record["effects"][publication["id"]]
+        require(effect["state"] == "verified" and effect["evidence_sha256"] == ledger.digest({
+            "prepared": owner.prepared_sha256, "binding_sha256": binding_proof.sha256,
+            "engine_policy_sha256": engine_sha256}), "partial-context-original-publication")
+        files = signed_context._files(context, binding, binding["admission"])
+        unsigned = signed_context._projection(binding)
+    files["binding.json"] = hashlib.sha256(ledger.canonical(unsigned)).hexdigest()
+    return files
+
+
 def delete_context(owner, store, config):
     """Authenticate the original TLS context, then unlink that exact inventory."""
     effect, opened = None, []
@@ -848,9 +873,7 @@ def delete_context(owner, store, config):
         raw, binding_proof = signed_context._sealed(context + "/binding.json", 32768)
         binding = identity.decode_json(raw)
         if type(owner) is cell_contract.PartialPreparationOwner:
-            require("admission" not in binding, "partial-context-published")
-            files = signed_context._files(context, binding, None)
-            files["binding.json"] = hashlib.sha256(ledger.canonical(binding)).hexdigest()
+            files = _partial_context_files(owner, store, config, record, context, binding, binding_proof)
         else:
             receipt = preparation.PreparationReceipt(owner.lease_id, owner.cell_sha256, owner.engine_policy_sha256,
                                                      binding_proof.sha256, owner.expires_at)

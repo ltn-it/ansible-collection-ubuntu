@@ -646,13 +646,14 @@ def partial_preparation_owner(registry, selector, store, lease_id):
         "project-create": "project:" + incus["project"],
         "profile-configure": "profile:" + incus["project"] + ":default",
         "context-create": "context:" + selected.cell_sha256,
-        "engine-prepare": "engine:" + lease_id}
+        "engine-prepare": "engine:" + lease_id,
+        "context-publish": "context:" + selected.cell_sha256}
     order = ("network-create", "project-create", "profile-configure")
     if env.get("QUALITY_INPUT_PROFILE") == "operating":
         from . import operating_cells
         expected["image-copy"] = "image:" + incus["project"] + ":" + operating_cells.IMAGE
         order += ("image-copy",)
-    order += ("context-create", "certificate-create", "engine-prepare")
+    order += ("context-create", "certificate-create", "engine-prepare", "context-publish")
     creators = {}
     allowed_cleanup = {"certificate-revoke", "engine-release", "context-delete", "image-delete", "project-delete", "network-delete"}
     require("owned_instance" not in record and "custody" not in record,
@@ -675,6 +676,12 @@ def partial_preparation_owner(registry, selector, store, lease_id):
             require(effect["target"] == expected[operation], "partial-preparation-creator-target")
         creators[operation] = {"id": identifier, "target": effect["target"], "sha256": ledger.digest(effect)}
     require(set(creators) == set(order[:len(creators)]), "partial-preparation-not-verified-prefix")
+    if "context-publish" in creators:
+        # A healthy original can still start after publication. Cleanup gains
+        # only a terminal/cancelled/expired original, never its live grant.
+        require("native_terminal" in record or record["state"] in {"cancelled", "closed"}
+                or store._now() >= min(record["expires_at"], record["authorizations"][-1]["valid_until"]),
+                "partial-published-original-still-live")
     paired = {"image-delete": "image-copy", "certificate-revoke": "certificate-create", "engine-release": "engine-prepare",
               "context-delete": "context-create", "project-delete": "project-create", "network-delete": "network-create"}
     for effect in record["effects"].values():
