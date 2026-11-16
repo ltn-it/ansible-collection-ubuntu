@@ -929,8 +929,13 @@ def _validate_partial_preparation_descriptor(value, workflow_sha256, reusable_sh
     require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN, THIRD_MAIN, FOURTH_MAIN, FIFTH_MAIN}
             and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN, FOURTH_RUN, FIFTH_RUN}
             and type(row["run_attempt"]) is int and row["run_attempt"] == 1 and row["first_parent"] == FIFTH_MAIN
-            and row["source_workflow_sha256"] == workflow_sha256 == FOUR_HISTORY_WORKFLOW
-            and row["reusable_sha"] == reusable_sha == FOUR_HISTORY_REUSABLE, "continuation-fifth-successor")
+            and row["source_workflow_sha256"] == workflow_sha256
+            and row["reusable_sha"] == reusable_sha
+            and (workflow_sha256, reusable_sha) in {
+                (FOUR_HISTORY_WORKFLOW, FOUR_HISTORY_REUSABLE),
+                ("64e3d2ca0bd5e442233ec53b00d6f76fb7ba40064abea36237edeb783089b4ba",
+                 "a94199c94fd00226e194613d0fb9d52705baa808"),
+            }, "continuation-fifth-successor")
     return value
 
 
