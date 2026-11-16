@@ -48,7 +48,7 @@ class SixthPartialHistoryTests(unittest.TestCase):
             "qualification": {"path": "/root/qualified.json", "sha256": "a" * 64},
             "successor": {"source_sha": "e" * 40, "run_id": cells.SIXTH_RUN + 1, "run_attempt": 1,
                           "first_parent": cells.SIXTH_MAIN, "source_workflow_sha256": cells.SIXTH_SUCCESSOR_WORKFLOW,
-                          "reusable_sha": cells.SIXTH_REUSABLE}}
+                          "reusable_sha": cells.SIXTH_SUCCESSOR_REUSABLE}}
 
     def previous_hash_model(self):
         # Public fixtures use modeled private-retirement metadata. Only this
@@ -73,9 +73,9 @@ class SixthPartialHistoryTests(unittest.TestCase):
         self.assertEqual(value["native_sixth"]["run"]["conclusion"], "failure")
 
     def test_exact_new_tuple_and_first_parent_commit_pass(self):
-        cells.validate_continuation_descriptor(self.descriptor, cells.SIXTH_SUCCESSOR_WORKFLOW, cells.SIXTH_REUSABLE)
+        cells.validate_continuation_descriptor(self.descriptor, cells.SIXTH_SUCCESSOR_WORKFLOW, cells.SIXTH_SUCCESSOR_REUSABLE)
         cells.validate_continuation_commit({"sha": "e" * 40, "parents": [{"sha": cells.SIXTH_MAIN}]},
-            self.descriptor, "e" * 40, cells.SIXTH_RUN + 1, cells.SIXTH_REUSABLE)
+            self.descriptor, "e" * 40, cells.SIXTH_RUN + 1, cells.SIXTH_SUCCESSOR_REUSABLE)
 
     def test_old_rerun_parent_or_future_unknown_tuple_denied(self):
         for field, value in [("source_sha", cells.SIXTH_MAIN), ("run_id", cells.SIXTH_RUN),
@@ -83,10 +83,12 @@ class SixthPartialHistoryTests(unittest.TestCase):
                              ("source_sha", None), ("run_id", None)]:
             changed = deepcopy(self.descriptor); changed["successor"][field] = value
             with self.subTest(field=field, value=value), self.assertRaises(Denied):
-                cells.validate_continuation_descriptor(changed, cells.SIXTH_SUCCESSOR_WORKFLOW, cells.SIXTH_REUSABLE)
+                cells.validate_continuation_descriptor(changed, cells.SIXTH_SUCCESSOR_WORKFLOW, cells.SIXTH_SUCCESSOR_REUSABLE)
 
     def test_mixed_unknown_or_argument_mismatched_pair_denied(self):
         for pair in [(cells.SIXTH_WORKFLOW, cells.SIXTH_REUSABLE),
+                     (cells.SIXTH_SUCCESSOR_WORKFLOW, cells.SIXTH_REUSABLE),
+                     (cells.SIXTH_WORKFLOW, cells.SIXTH_SUCCESSOR_REUSABLE),
                      (cells.FOUR_HISTORY_WORKFLOW, cells.SIXTH_REUSABLE),
                      (cells.SIXTH_SUCCESSOR_WORKFLOW, cells.FOUR_HISTORY_REUSABLE),
                      ("0" * 64, cells.SIXTH_REUSABLE), (cells.SIXTH_SUCCESSOR_WORKFLOW, "0" * 40)]:
@@ -102,7 +104,20 @@ class SixthPartialHistoryTests(unittest.TestCase):
                        {"sha": "f" * 40, "parents": [{"sha": cells.SIXTH_MAIN}]}]:
             with self.assertRaises(Denied):
                 cells.validate_continuation_commit(commit, self.descriptor, "e" * 40,
-                                                  cells.SIXTH_RUN + 1, cells.SIXTH_REUSABLE)
+                                                  cells.SIXTH_RUN + 1, cells.SIXTH_SUCCESSOR_REUSABLE)
+
+    def test_unknown_successor_pins_deny_without_changing_original_history(self):
+        before = deepcopy(self.native)
+        for values in ({"SIXTH_SUCCESSOR_WORKFLOW": None}, {"SIXTH_SUCCESSOR_REUSABLE": None},
+                       {"SIXTH_SUCCESSOR_WORKFLOW": None, "SIXTH_SUCCESSOR_REUSABLE": None}):
+            with self.subTest(values=values), mock.patch.multiple(cells, **values):
+                with self.assertRaisesRegex(Denied, "continuation-sixth-successor-pins-unbound"):
+                    cells.validate_continuation_descriptor(self.descriptor,
+                        self.descriptor["successor"]["source_workflow_sha256"],
+                        self.descriptor["successor"]["reusable_sha"])
+                self.assertEqual(cells.sixth_native_projection(*self.native), cells.sixth_native_projection(*before))
+        self.assertEqual(cells.SIXTH_REUSABLE, "a94199c94fd00226e194613d0fb9d52705baa808")
+        self.assertEqual(cells.SIXTH_WORKFLOW, "64e3d2ca0bd5e442233ec53b00d6f76fb7ba40064abea36237edeb783089b4ba")
 
     def test_actual_graph_missing_duplicate_green_or_borrowed_denied(self):
         changes = [lambda r, j, c: r.update(conclusion="success"), lambda r, j, c: r.update(run_attempt=2),

@@ -1007,7 +1007,10 @@ SIXTH_UID = 995
 SIXTH_WORKFLOW = "64e3d2ca0bd5e442233ec53b00d6f76fb7ba40064abea36237edeb783089b4ba"
 SIXTH_REUSABLE = "a94199c94fd00226e194613d0fb9d52705baa808"
 SIXTH_PREVIOUS_QUALIFICATION = "3fcc132ce7c8b0e0530df1fc412f861dc2a9a34c5311813cb0fccaaccef5410b"
-SIXTH_SUCCESSOR_WORKFLOW = "3f54579cb8abb17f38a06ada3d52a4c4325a0f616905990b1927bc3e0ef92fd8"
+# Required late binding from the actual newly published callee and caller bytes.
+# Neither pending value is a historical identity or an authorization fallback.
+SIXTH_SUCCESSOR_WORKFLOW = '90e1bb3b99809605a3bce7258f81d6bf2922315250154ebea0ab4a7c46ab9865'
+SIXTH_SUCCESSOR_REUSABLE = 'cb317a6d3b3e7b1b0549c3c62bb581e14de778c3'
 
 
 def sixth_native_projection(run, inventory, checks):
@@ -1071,6 +1074,13 @@ def _validate_sixth_retirement(value):
 
 
 def _validate_sixth_preparation_descriptor(value, workflow_sha256, reusable_sha):
+    require(type(SIXTH_SUCCESSOR_WORKFLOW) is str
+            and re.fullmatch("[0-9a-f]{64}", SIXTH_SUCCESSOR_WORKFLOW)
+            and SIXTH_SUCCESSOR_WORKFLOW not in {SIXTH_WORKFLOW, "0" * 64}
+            and type(SIXTH_SUCCESSOR_REUSABLE) is str
+            and re.fullmatch("[0-9a-f]{40}", SIXTH_SUCCESSOR_REUSABLE)
+            and SIXTH_SUCCESSOR_REUSABLE not in {SIXTH_REUSABLE, "0" * 40},
+            "continuation-sixth-successor-pins-unbound")
     engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
     require(type(value["schema"]) is int and value["schema"] == 6
             and value["reason"] == "original-post-context-pre-fence-failed-retired", "continuation-sixth-purpose")
@@ -1084,7 +1094,7 @@ def _validate_sixth_preparation_descriptor(value, workflow_sha256, reusable_sha)
             and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN, FOURTH_RUN, FIFTH_RUN, SIXTH_RUN}
             and type(row["run_attempt"]) is int and row["run_attempt"] == 1 and row["first_parent"] == SIXTH_MAIN
             and row["source_workflow_sha256"] == workflow_sha256 == SIXTH_SUCCESSOR_WORKFLOW
-            and row["reusable_sha"] == reusable_sha == SIXTH_REUSABLE, "continuation-sixth-successor")
+            and row["reusable_sha"] == reusable_sha == SIXTH_SUCCESSOR_REUSABLE, "continuation-sixth-successor")
     return value
 
 
