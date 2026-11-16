@@ -201,22 +201,33 @@ class PartialPreparationTests(unittest.TestCase):
         self.assertEqual(self.store.read(self.lease),before)
         self.assertEqual(self.io.writes(),writes)
 
-    def test_published_terminal_without_engine_remains_explicit_cleanup_hold(self):
-        self.io.run_prepare();self.terminal()
-        before=self.store.read(self.lease);writes=list(self.io.writes())
+    def test_published_terminal_without_engine_withdraws_and_retains_actual_clock(self):
+        self.io.run_prepare();terminal=self.terminal()
         result=operating_custody.tick_runtime(str(self.runtime),hashlib.sha256(self.runtime.read_bytes()).hexdigest(),'f'*64)
-        self.assertEqual([e['kind']for e in result['events']],['cleanup-unknown'])
-        self.assertEqual(self.store.read(self.lease),before)
-        self.assertEqual(self.io.writes(),writes)
+        self.assertEqual([e['kind']for e in result['events']],['failed-cell-retained'])
+        record=self.store.read(self.lease)
+        self.assertEqual(record['partial_preparation_custody']['retain_until'],terminal['completed_at']+14400)
+        self.assertEqual(sum(e['operation']=='certificate-revoke'and e['state']=='verified'
+            for e in record['effects'].values()),1)
+        self.assertNotIn('custody',record);self.assertNotIn('owned_instance',record)
+        self.assertFalse(any(e['operation']in {'engine-start','fence-create'}for e in record['effects'].values()))
 
-    def test_published_expired_without_engine_remains_explicit_cleanup_hold(self):
-        self.io.run_prepare();before=self.store.read(self.lease);writes=list(self.io.writes())
+    def test_published_expired_without_engine_withdraws_while_original_job_pending(self):
+        self.io.run_prepare();before=self.store.read(self.lease)
         deadline=min(before['expires_at'],before['authorizations'][-1]['valid_until'])
-        with mock.patch.object(ledger.Ledger,'_now',return_value=deadline):
+        who=before['identity'];policy=self.registry.select('approved').identity
+        pending={'id':who['job_id'],'run_id':who['run_id'],'head_sha':who['caller_sha'],
+          'runner_id':who['runner_id'],'name':policy.required_native_job_name,'run_attempt':1,
+          'status':'in_progress','conclusion':None}
+        with mock.patch.object(ledger.Ledger,'_now',return_value=deadline), \
+             mock.patch.object(identity,'HTTPSReader',return_value=SimpleNamespace(read=lambda url:ledger.canonical(pending))):
             result=operating_custody.tick_runtime(str(self.runtime),hashlib.sha256(self.runtime.read_bytes()).hexdigest(),'f'*64)
-        self.assertEqual([e['kind']for e in result['events']],['cleanup-unknown'])
-        self.assertEqual(self.store.read(self.lease),before)
-        self.assertEqual(self.io.writes(),writes)
+        self.assertEqual(result['events'],[])
+        record=self.store.read(self.lease)
+        self.assertNotIn('native_terminal',record);self.assertNotIn('partial_preparation_custody',record)
+        self.assertEqual(sum(e['operation']=='certificate-revoke'and e['state']=='verified'
+            for e in record['effects'].values()),1)
+        self.assertFalse(any(e['operation']in {'engine-start','fence-create'}for e in record['effects'].values()))
 
     def retained_partial_owner(self):
         owner=self.fail_after_six()

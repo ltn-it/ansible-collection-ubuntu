@@ -1574,17 +1574,24 @@ Preparation checks real device/inode stability before the first creator intent.
 The publisher independently repeats its exact check after materialization. No
 cross-filesystem copy fallback or path-based filesystem inference is provided.
 
+On first use, an absent `/run/netns` leaf does not prevent the journaled namespace
+creation. Root first authenticates `/run`; existing namespace parents must still
+pass the no-symlink, ownership and permission checks. The existing journaled IP
+command creates its runtime parent; preflight creates or repairs no directory.
+
 A separate `PartialPreparationOwner` covers only a verified original creator
-prefix before context publication, fencing or engine entry. It is not a prepared
-cell, stopped VM or engine cleanup owner. Unknown creators, published/fenced cells,
-engine-start entries and observed VM ownership remain held under their respective
-existing contracts. Exact original certificate withdrawal is independent of the
+prefix before fencing or engine entry. A verified context publication is eligible
+only after the original native end, cancellation, or actual authorization/lease
+expiry. It is not a prepared cell, stopped VM or engine cleanup owner. Unknown
+creators, unconfirmed publications, fenced cells, engine-start entries and observed
+VM ownership remain held under their respective existing contracts.
+Exact original certificate withdrawal is independent of the
 native terminal/retention and storage-inventory gates; it never retries a prior
 revoke or adopts an unconfirmed pre-publication certificate rotation. The independent watchdog can discover this partial case without an
 `engine_exit` receipt.
 
-For an eligible failure, the archived policy retains private data from the actual
-original native job completion. A separate opaque partial-retention proof records
+For an eligible failure, the archived policy retains private data for four hours
+from the actual original native job completion. A separate opaque partial-retention proof records
 that boundary; it neither invents VM custody nor releases running capacity.
 After retention, exact original inode/context evidence, native ownership and scope
 absence permit only the journaled engine/context/project/network cleanup chain.
@@ -1603,8 +1610,10 @@ the deadline. Backing-file reservation is checked through bounded FIEMAP pages
 with complete contiguous physical coverage, allowed allocation flags and a final
 extent marker. The proof has one fixed wall-time bound across all pages; it does
 not synchronize, allocate space or increase the byte/inode quota or cleanup limit.
-A published, unexpired cell waiting for its original engine owner
-remains a normal wait; unsupported expired or authenticated terminal states alarm.
+A published, unexpired cell waiting for its original engine owner remains a normal
+wait. Published-context deletion authenticates the original signature, files and
+durable publication receipt even after expiry; it never renews authorization.
+Unsupported expired or authenticated terminal states still alarm.
 
 The original lease closes only after every actual creator is paired. Any unknown
 write or failed native/readback/storage guard remains held, without deadline or
@@ -1618,6 +1627,13 @@ are not a claim that the current global catalogues are empty. Every entry bounda
 revalidates the original closed store and exact retired entries; unknown entries
 are denied. The successor requires a separate store and a genuine new Main native
 tuple. Package/unit evidence alone is not operating acceptance.
+
+The finite sixth continuation also preserves the failed post-publication,
+pre-fence native graph and that complete prior qualification. Its original
+seven-creator state must finish the same native-completion-based four-hour
+retention and independent absence checks. Only a distinct ordinary Main push
+with the reviewed Source workflow/controller pair and a separate store can follow.
+Pending closure, changed history or an unknown native outcome cannot unlock it.
 
 
 ### Physical runtime host package preparation (unpublished)

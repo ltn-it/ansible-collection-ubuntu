@@ -782,7 +782,8 @@ def _partial_custody_record(value, record, policy):
             and value["kind"] == "failed-partial-preparation" and "owned_instance" not in record
             and "custody" not in record and "native_terminal" in record,
             "partial-custody-shape")
-    require(not any(e["operation"] in {"engine-start", "context-publish", "fence-create"}
+    require(not any(e["operation"] in {"engine-start", "fence-create"}
+                    or e["operation"] == "context-publish" and e["state"] != "verified"
                     for e in record["effects"].values()), "partial-custody-entered")
     creators = {k: ledger.digest(e) for k, e in record["effects"].items()
                 if e["operation"] in ledger.PROVISIONING}

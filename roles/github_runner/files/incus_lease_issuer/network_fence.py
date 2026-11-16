@@ -539,9 +539,20 @@ def create(root_policy_path, expected_sha256, prepared, store, worker, root_conf
     _fresh(prepared, store, worker, root_configuration)
     _backend(policy, prepared, root_configuration)
     namespace, host, peer, _ = _names(prepared)
-    parent = installation._open_directory("/run/netns")
+    # Only the missing leaf is absence; /run and existing parents stay trusted.
+    # ip netns add creates its runtime directory inside the journaled effect.
+    parent = installation._open_directory("/run")
     try:
-        require(namespace not in os.listdir(parent), "fence-namespace-exists")
+        try:
+            namespaces = os.open("netns", installation.DIR_FLAGS, dir_fd=parent)
+        except FileNotFoundError:
+            namespaces = None
+        if namespaces is not None:
+            try:
+                installation._directory(os.fstat(namespaces))
+                require(namespace not in os.listdir(namespaces), "fence-namespace-exists")
+            finally:
+                os.close(namespaces)
     finally:
         os.close(parent)
     links = _ip(policy, "link", "show")
