@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - preserve retired execution provenance while binding its continuation to a distinct,
+    exact successor workflow and reusable-workflow pair.

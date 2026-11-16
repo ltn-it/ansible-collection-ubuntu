@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - withdraw and retain an authenticated published Incus context after a pre-engine failure,
+    preserving the original four-hour retention and verifying signed ownership before exact context cleanup.
