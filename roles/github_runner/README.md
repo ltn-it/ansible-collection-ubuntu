@@ -1665,6 +1665,10 @@ the partial prefix untouched: it is never completed, adopted or reused as a
 prepared configuration. A distinct successor store and genuine new Main push
 remain required. Unknown entries, replaced original directories, live leases,
 changed snapshots and incomplete native history keep admission closed.
+Initial qualification requires the exact original catalogue membership. Later
+revalidation rehashes every preserved historical entry and independently checks
+every added entry against the exact successor invocation, including staged
+intakes and configurations; their presence never permits adoption of history.
 
 
 ### Physical runtime host package preparation (unpublished)

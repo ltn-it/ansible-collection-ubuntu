@@ -721,7 +721,7 @@ def _continuation_origin_absent(bootstrap, qualified):
         history["retirement"]["catalogues"] if schema in {5, 6} else None)
     if seventh:
         require(_seventh_failed_prefix_projection(bootstrap.value["ledger_path"],
-                    receipt["failed_prefix"]["original_bootstrap"], history) == receipt["failed_prefix"],
+                    receipt["failed_prefix"]["original_bootstrap"], history, revalidating=True) == receipt["failed_prefix"],
                 "continuation-seventh-failed-prefix-drift")
     if schema == 6:
         previous = history["previous_qualification"]["retirement"]
@@ -1196,7 +1196,8 @@ def _continuation_seventh_native(get):
     return result
 
 
-def _seventh_failed_prefix_projection(successor_ledger_path, original_bootstrap, previous_qualification):
+def _seventh_failed_prefix_projection(successor_ledger_path, original_bootstrap, previous_qualification, *,
+                                      revalidating=False):
     """Authenticate immutable failed prelease history without sealing or adopting it."""
     operating_cells._validate_sixth_preparation_qualification(previous_qualification)
     require(ledger.digest(previous_qualification) == operating_cells.SEVENTH_PREVIOUS_QUALIFICATION,
@@ -1273,8 +1274,13 @@ def _seventh_failed_prefix_projection(successor_ledger_path, original_bootstrap,
         root = installation._open_directory(parent)
         try:
             names = run_intake._entries(root)
-            require(names == set(old_catalogues[kind]) | {entry["name"]}, "continuation-seventh-extra-catalogue-entry")
-            rows = {name: _fifth_retired_entry(Path(parent) / name) for name in names}
+            historical = set(old_catalogues[kind]) | {entry["name"]}
+            # Collection fixes the entire original catalogue. Revalidation
+            # rehashes that same history; _continuation_origin_absent separately
+            # authenticates every addition through _continuation_catalogue.
+            require(historical <= names if revalidating else historical == names,
+                    "continuation-seventh-extra-catalogue-entry")
+            rows = {name: _fifth_retired_entry(Path(parent) / name) for name in historical}
             require(all(rows[name] == sha for name, sha in old_catalogues[kind].items())
                     and rows[entry["name"]] == entry["inventory_sha256"]
                     and run_intake._entries(root) == names, "continuation-seventh-catalogue-drift")

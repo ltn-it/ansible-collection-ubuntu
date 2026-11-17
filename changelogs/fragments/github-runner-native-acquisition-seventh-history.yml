@@ -18,3 +18,7 @@ bugfixes:
     github_runner - acquire independent continuation histories with at most four
     concurrent readers while preserving each complete ordered family, deterministic
     failure precedence, worker joining, and all fresh checks before later effects.
+  - >-
+    github_runner - revalidate preserved seventh-history catalogues after a
+    successor stages its own intake or configuration. Keep initial qualification
+    exact and authenticate every addition against the current successor.
