@@ -231,7 +231,7 @@ def _hash_file(fd, path, limit, *, private=False, keep=False):
 def _file(path, limit, *, private=False, keep=False):
     parts = _absolute(path)
     require(parts, "installation-file-path")
-    parent = _open_directory(str(PurePosixPath(path).parent))
+    parent = _open_directory("/" + "/".join(parts[:-1]))
     try:
         fd = os.open(parts[-1], FILE_FLAGS, dir_fd=parent)
         try:

@@ -102,6 +102,13 @@ class RootBootstrapTests(unittest.TestCase):
         self.server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(self.server.close); self.addCleanup(self.client.close)
         self.collected = mock.patch.object(collector, "collect_worker", return_value=self.worker).start()
+        # Native acquisition is modeled here; real collector epochs have their
+        # own kernel/FS tests. Preserve worker drift injection at both boundaries.
+        mock.patch.object(collector, "begin_worker_acquisition",
+            side_effect=lambda connected, policy: (self.collected(connected, policy), object())).start()
+        mock.patch.object(collector, "finish_worker_acquisition",
+            side_effect=lambda token, connected, policy: self.collected(connected, policy)).start()
+        mock.patch.object(collector, "discard_worker_acquisition").start()
         reader = FixtureReader(self.native)
         def read(url, *, bearer=None):
             prefix = identity.API + "/repos/" + crypto.REPOSITORY

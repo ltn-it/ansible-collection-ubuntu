@@ -34,8 +34,10 @@ class AuditTransportTests(unittest.TestCase):
             (checkout / "nested").mkdir()
             (checkout / "nested/goss.yml").write_text("command: {}\n")
             (checkout / ".gitignore").write_text("ignored\n")
+            git_environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            git_environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
             def git(*args):
-                return subprocess.check_output(["git", "-C", directory, *args]).strip()
+                return subprocess.check_output(["git", "-C", directory, *args], env=git_environment).strip()
             git("init", "-q")
             git("add", ".")
             git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture")
@@ -61,7 +63,7 @@ class AuditTransportTests(unittest.TestCase):
                 validate_revision(directory, revision)
             entry.chmod(0o755)
             tree = git("rev-parse", "HEAD^{tree}").decode()
-            raw = subprocess.check_output(["git", "-C", directory, "cat-file", "tree", tree])
+            raw = subprocess.check_output(["git", "-C", directory, "cat-file", "tree", tree], env=git_environment)
             object_path = checkout / ".git/objects" / tree[:2] / tree[2:]
             object_path.chmod(0o644)
             changed = raw.replace(b"100755", b"100644")

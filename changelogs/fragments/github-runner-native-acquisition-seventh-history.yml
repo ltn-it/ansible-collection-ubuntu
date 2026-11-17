@@ -1,0 +1,28 @@
+---
+bugfixes:
+  - >-
+    github_runner - reduce duplicate full stock verification during native
+    revalidation through a process-, thread-, and socket-bound one-use acquisition.
+    Keep fresh complete stock checks at both boundaries, independent short maps
+    brackets, and complete process-root metadata scans against sealed membership.
+  - >-
+    github_runner - preserve the exact seventh failed pre-lease native history,
+    its sealed intake, unsealed preparation prefix, and empty original store.
+    Require a distinct authenticated successor without adopting partial state or
+    resetting earlier attempts, retention, or authorization deadlines.
+  - >-
+    github_runner - avoid retaining unused inventory payload copies and repeating
+    lexical path construction or immutable-bootstrap decoding. Preserve complete fresh
+    file-content, ancestor, metadata, catalogue, and drift checks at every boundary.
+  - >-
+    github_runner - acquire independent continuation histories with at most four
+    concurrent readers while preserving each complete ordered family, deterministic
+    failure precedence, worker joining, and all fresh checks before later effects.
+  - >-
+    github_runner - revalidate preserved seventh-history catalogues after a
+    successor stages its own intake or configuration. Keep initial qualification
+    exact and authenticate every addition against the current successor.
+  - >-
+    github_runner - reduce repeated lexical validation and process-tree proof
+    classification while preserving the exact path vocabulary, complete fresh
+    namespace observations, metadata checks, and unchanged authorization budgets.
