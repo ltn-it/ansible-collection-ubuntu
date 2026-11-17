@@ -1670,6 +1670,13 @@ revalidation rehashes every preserved historical entry and independently checks
 every added entry against the exact successor invocation, including staged
 intakes and configurations; their presence never permits adoption of history.
 
+Inventory path validation uses the same closed ASCII component vocabulary without
+rebuilding lexical path objects for each entry. Process-tree scans classify that
+same freshly verified installation proof once per acquisition; every scan still
+reopens and observes every directory and leaf, checks full membership and metadata,
+and confirms the root again. This reuses immutable proof bookkeeping only, never
+filesystem observations or authorization results.
+
 
 ### Physical runtime host package preparation (unpublished)
 

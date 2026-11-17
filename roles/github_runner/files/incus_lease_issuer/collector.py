@@ -311,6 +311,7 @@ class _TreeLayout:
     directories: frozenset
     links: MappingProxyType
     runtime: frozenset
+    entries: MappingProxyType
 
 
 def _tree_layout(proof):
@@ -347,8 +348,16 @@ def _tree_layout(proof):
                 and value.sha256 == proof.files[path] and type(stamp) is tuple and len(stamp) == 9
                 and (value.device, value.inode, value.size) == (stamp[0], stamp[1], stamp[6])
                 and stamp == proof.tree_stamps[path[len(prefix):]], "process-root-file-evidence")
+    entries = {}
+    for kind, paths, stamps in (("file", expected_files, proof.tree_stamps),
+                                ("directory", expected_dirs, proof.tree_stamps),
+                                ("link", expected_links, proof.tree_stamps),
+                                ("runtime", expected_runtime, proof.runtime_stamps)):
+        for path in paths:
+            require(path not in entries, "process-root-tree-evidence")
+            entries[path] = (kind, stamps[path], expected_links[path] if kind == "link" else None)
     return _TreeLayout(proof, frozenset(expected_files), frozenset(expected_dirs),
-                       MappingProxyType(expected_links), frozenset(expected_runtime))
+                       MappingProxyType(expected_links), frozenset(expected_runtime), MappingProxyType(entries))
 
 
 def _view_inventory(root, layout, uid):
@@ -360,57 +369,57 @@ def _view_inventory(root, layout, uid):
     size = 0
     entry_count = 0
 
-    def walk(fd, prefix, depth):
+    def walk(fd, prefix, depth, expected_stamp):
         nonlocal size, entry_count
         require(depth <= installation.MAX_DEPTH, "installation-inventory-limit")
-        relative = prefix[:-1] if prefix else "."
         before = installation._stamp(os.fstat(fd))
         installation._directory(os.fstat(fd))
-        require(before == proof.tree_stamps[relative], "process-root-tree-changed")
+        require(before == expected_stamp, "process-root-tree-changed")
         os.lseek(fd, 0, os.SEEK_SET)
         with os.scandir(fd) as entries:
             for entry in entries:
                 path = prefix + entry.name
                 # Membership authenticates every component before use: unknown
                 # names never become a path or an opened file. No FS cache.
-                require(path not in seen and (path in proof.tree_stamps or path in proof.runtime_stamps),
-                        "process-root-inventory-mismatch")
+                entry_proof = layout.entries.get(path)
+                require(path not in seen and entry_proof is not None, "process-root-inventory-mismatch")
+                kind, expected_stamp, expected_target = entry_proof
                 require(entry_count < installation.MAX_ENTRIES, "installation-inventory-limit")
                 seen.add(path)
-                if path not in layout.runtime:
+                if kind != "runtime":
                     entry_count += 1
                 info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
-                if path in layout.runtime:
+                if kind == "runtime":
                     require(not prefix and entry.name == "_diag", "process-root-runtime")
                     expected = installation._runtime_stamp(info, uid)
                     child = os.open(entry.name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
                     try:
                         require(expected == installation._runtime_stamp(os.fstat(child), uid)
-                                == proof.runtime_stamps[path], "process-root-tree-changed")
+                                == expected_stamp, "process-root-tree-changed")
                     finally:
                         os.close(child)
-                elif path in layout.links:
+                elif kind == "link":
                     target, stamp = installation._read_link(fd, entry.name, path, info)
-                    require(target == layout.links[path] and stamp == proof.tree_stamps[path],
+                    require(target == expected_target and stamp == expected_stamp,
                             "process-root-tree-changed")
-                elif path in layout.directories:
+                elif kind == "directory":
                     installation._directory(info)
                     child = os.open(entry.name, installation.DIR_FLAGS, dir_fd=fd)
                     try:
                         require(installation._stamp(info) == installation._stamp(os.fstat(child)),
                                 "installation-entry-changed")
-                        walk(child, path + "/", depth + 1)
+                        walk(child, path + "/", depth + 1, expected_stamp)
                     finally:
                         os.close(child)
                 else:
-                    require(path in layout.files, "process-root-inventory-mismatch")
+                    require(kind == "file", "process-root-inventory-mismatch")
                     installation._regular(info)
                     child = os.open(entry.name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
                     try:
                         current = os.fstat(child)
                         installation._regular(current)
                         require(installation._stamp(info) == installation._stamp(current)
-                                == proof.tree_stamps[path], "process-root-tree-changed")
+                                == expected_stamp, "process-root-tree-changed")
                         require(0 <= current.st_size <= installation.MAX_FILE_BYTES,
                                 "installation-file-limit")
                         size += current.st_size
@@ -422,8 +431,8 @@ def _view_inventory(root, layout, uid):
     with _view(root, proof.runner_root, directory=True) as fd:
         before = installation._stamp(os.fstat(fd))
         require(before == proof.tree_stamps["."], "process-root-directory-changed")
-        walk(fd, "", 0)
-        require(seen == layout.files | layout.directories | set(layout.links) | layout.runtime,
+        walk(fd, "", 0, proof.tree_stamps["."])
+        require(seen == layout.entries.keys(),
                 "process-root-inventory-mismatch")
         require(installation._stamp(os.fstat(fd)) == before, "process-root-directory-changed")
         with _view(root, proof.runner_root, directory=True) as confirmed:

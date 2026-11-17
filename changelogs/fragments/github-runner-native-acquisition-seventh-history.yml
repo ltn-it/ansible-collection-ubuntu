@@ -22,3 +22,7 @@ bugfixes:
     github_runner - revalidate preserved seventh-history catalogues after a
     successor stages its own intake or configuration. Keep initial qualification
     exact and authenticate every addition against the current successor.
+  - >-
+    github_runner - reduce repeated lexical validation and process-tree proof
+    classification while preserving the exact path vocabulary, complete fresh
+    namespace observations, metadata checks, and unchanged authorization budgets.

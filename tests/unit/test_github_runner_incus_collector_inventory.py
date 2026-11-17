@@ -82,6 +82,76 @@ class ClosedInventoryTests(unittest.TestCase):
         Path(next(iter(self.proof.files))).chmod(0o400)
         with self.assertRaises(Denied): collector._view_inventory(self.root, layout, os.getuid())
 
+    def test_lookup_is_immutable_and_bound_to_exact_sealed_categories_and_stamps(self):
+        layout = collector._tree_layout(self.proof)
+        expected = {}
+        for path in self.proof.files:
+            name = str(Path(path).relative_to(self.runner))
+            expected[name] = ("file", self.proof.tree_stamps[name], None)
+        for path in self.proof.directories:
+            name = str(Path(path).relative_to(self.runner))
+            expected[name] = ("directory", self.proof.tree_stamps[name], None)
+        for path, target in self.proof.symlinks.items():
+            name = str(Path(path).relative_to(self.runner))
+            expected[name] = ("link", self.proof.tree_stamps[name], target)
+        expected["_diag"] = ("runtime", self.proof.runtime_stamps["_diag"], None)
+        self.assertEqual(dict(layout.entries), expected)
+        with self.assertRaises(TypeError): layout.entries["foreign"] = ("file", (), None)
+        with self.assertRaises(TypeError): layout.entries["_diag"][0] = "file"
+        self.assertIs(layout.entries["_diag"][1], self.proof.runtime_stamps["_diag"])
+        self.assertIs(layout.proof, self.proof)
+
+    def test_overlapping_proof_categories_deny_before_any_namespace_read(self):
+        path = next(iter(self.proof.files))
+        relative = str(Path(path).relative_to(self.runner))
+        cases = (replace(self.proof, directories=self.proof.directories + (path,)),
+                 replace(self.proof, symlinks=MappingProxyType({**self.proof.symlinks, path: "directory-0/file-0"})),
+                 replace(self.proof, runtime_directories=self.proof.runtime_directories + (path,),
+                         runtime_stamps=MappingProxyType({**self.proof.runtime_stamps, relative: (1, 2, 3, 4, 5)})))
+        for proof in cases:
+            with self.subTest(proof=proof), patch.object(collector, "_view", side_effect=AssertionError("must deny proof first")):
+                with self.assertRaisesRegex(Denied, "process-root-tree-evidence"):
+                    self.check(proof)
+
+    def test_each_directory_keeps_both_initial_fstats_and_every_leaf_fd_observation(self):
+        events = []
+        originals = {name: getattr(os, name) for name in ("open", "close", "stat", "fstat", "lseek")}
+        def track(name):
+            def call(*args, **kwargs):
+                result = originals[name](*args, **kwargs)
+                events.append((name, args, kwargs, result if name == "open" else None))
+                return result
+            return call
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for name in originals: stack.enter_context(patch.object(os, name, side_effect=track(name)))
+            self.check()
+        seeks = [index for index, event in enumerate(events) if event[0] == "lseek"]
+        self.assertEqual(len(seeks), 1 + len(self.proof.directories))
+        for index in seeks:
+            fd = events[index][1][0]
+            self.assertEqual([(event[0], event[1]) for event in events[index-2:index]],
+                             [("fstat", (fd,)), ("fstat", (fd,))])
+        leaves = [(index, event) for index, event in enumerate(events) if event[0] == "open"
+                  and isinstance(event[1][0], str) and event[1][0].startswith("file-")]
+        self.assertEqual(len(leaves), len(self.proof.files))
+        for index, event in leaves:
+            fd = event[3]
+            self.assertEqual(events[index-1][0], "stat")
+            self.assertEqual((events[index+1][0], events[index+1][1]), ("fstat", (fd,)))
+            self.assertEqual((events[index+2][0], events[index+2][1]), ("close", (fd,)))
+
+    def test_duplicate_fresh_directory_membership_denies_without_reusing_observation(self):
+        original = os.scandir
+        @contextmanager
+        def duplicate(fd):
+            with original(fd) as entries:
+                values = list(entries)
+                yield iter(values + values[:1])
+        with patch.object(collector.os, "scandir", side_effect=duplicate):
+            with self.assertRaisesRegex(Denied, "process-root-inventory-mismatch"):
+                self.check()
+
     def test_all_leaves_use_parent_relative_fds_and_only_two_full_root_walks(self):
         opened, original = [], os.open
         def tracked(path, flags, *args, **kwargs):
