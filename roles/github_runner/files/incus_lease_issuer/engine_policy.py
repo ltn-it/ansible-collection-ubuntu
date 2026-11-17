@@ -86,9 +86,10 @@ def _path(value):
 
 def _relative(value):
     require(type(value) is str and 0 < len(value) <= 1024 and not value.startswith("/")
-            and re.fullmatch(r"[A-Za-z0-9_./@-]+", value) and value != "."
-            and str(PurePosixPath(value)) == value and ".." not in PurePosixPath(value).parts
-            and len(PurePosixPath(value).parts) <= 32, "engine-relative-path")
+            and re.fullmatch(r"[A-Za-z0-9_./@-]+", value), "engine-relative-path")
+    parts = value.split("/")
+    require(len(parts) <= 32 and all(part not in {"", ".", ".."} for part in parts),
+            "engine-relative-path")
     return value
 
 

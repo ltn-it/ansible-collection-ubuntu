@@ -15,6 +15,8 @@ import pwd
 from pathlib import PurePosixPath
 import re
 import stat
+import threading
+import weakref
 from types import MappingProxyType
 
 from . import identity
@@ -309,6 +311,7 @@ class _TreeLayout:
     directories: frozenset
     links: MappingProxyType
     runtime: frozenset
+    entries: MappingProxyType
 
 
 def _tree_layout(proof):
@@ -328,6 +331,10 @@ def _tree_layout(proof):
     expected_dirs = {path[len(prefix):] for path in proof.directories}
     expected_links = {path[len(prefix):]: target for path, target in proof.symlinks.items()}
     expected_runtime = {path[len(prefix):] for path in proof.runtime_directories}
+    # Validate the sealed vocabulary once. Every process scan still reacquires
+    # all names/FD metadata, without repeating generic lexical parsing per PID.
+    for path in expected_files | expected_dirs | set(expected_links) | expected_runtime:
+        installation._relative(path)
     require(set(proof.tree_stamps) == {"."} | expected_files | expected_dirs | set(expected_links)
             and set(proof.runtime_stamps) == expected_runtime, "process-root-tree-evidence")
     require(all(type(stamp) is tuple and len(stamp) == 9
@@ -341,25 +348,93 @@ def _tree_layout(proof):
                 and value.sha256 == proof.files[path] and type(stamp) is tuple and len(stamp) == 9
                 and (value.device, value.inode, value.size) == (stamp[0], stamp[1], stamp[6])
                 and stamp == proof.tree_stamps[path[len(prefix):]], "process-root-file-evidence")
+    entries = {}
+    for kind, paths, stamps in (("file", expected_files, proof.tree_stamps),
+                                ("directory", expected_dirs, proof.tree_stamps),
+                                ("link", expected_links, proof.tree_stamps),
+                                ("runtime", expected_runtime, proof.runtime_stamps)):
+        for path in paths:
+            require(path not in entries, "process-root-tree-evidence")
+            entries[path] = (kind, stamps[path], expected_links[path] if kind == "link" else None)
     return _TreeLayout(proof, frozenset(expected_files), frozenset(expected_dirs),
-                       MappingProxyType(expected_links), frozenset(expected_runtime))
+                       MappingProxyType(expected_links), frozenset(expected_runtime), MappingProxyType(entries))
 
 
 def _view_inventory(root, layout, uid):
-    """Fresh FD-anchored process tree scan; no namespace observations are cached."""
+    """Fresh complete process tree scan against already sealed path vocabulary."""
     require(type(layout) is _TreeLayout, "process-root-layout")
     proof = layout.proof
+    require(hasattr(os, "O_PATH"), "process-root-platform")
+    seen = set()
+    size = 0
+    entry_count = 0
+
+    def walk(fd, prefix, depth, expected_stamp):
+        nonlocal size, entry_count
+        require(depth <= installation.MAX_DEPTH, "installation-inventory-limit")
+        before = installation._stamp(os.fstat(fd))
+        installation._directory(os.fstat(fd))
+        require(before == expected_stamp, "process-root-tree-changed")
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                path = prefix + entry.name
+                # Membership authenticates every component before use: unknown
+                # names never become a path or an opened file. No FS cache.
+                entry_proof = layout.entries.get(path)
+                require(path not in seen and entry_proof is not None, "process-root-inventory-mismatch")
+                kind, expected_stamp, expected_target = entry_proof
+                require(entry_count < installation.MAX_ENTRIES, "installation-inventory-limit")
+                seen.add(path)
+                if kind != "runtime":
+                    entry_count += 1
+                info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                if kind == "runtime":
+                    require(not prefix and entry.name == "_diag", "process-root-runtime")
+                    expected = installation._runtime_stamp(info, uid)
+                    child = os.open(entry.name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    try:
+                        require(expected == installation._runtime_stamp(os.fstat(child), uid)
+                                == expected_stamp, "process-root-tree-changed")
+                    finally:
+                        os.close(child)
+                elif kind == "link":
+                    target, stamp = installation._read_link(fd, entry.name, path, info)
+                    require(target == expected_target and stamp == expected_stamp,
+                            "process-root-tree-changed")
+                elif kind == "directory":
+                    installation._directory(info)
+                    child = os.open(entry.name, installation.DIR_FLAGS, dir_fd=fd)
+                    try:
+                        require(installation._stamp(info) == installation._stamp(os.fstat(child)),
+                                "installation-entry-changed")
+                        walk(child, path + "/", depth + 1, expected_stamp)
+                    finally:
+                        os.close(child)
+                else:
+                    require(kind == "file", "process-root-inventory-mismatch")
+                    installation._regular(info)
+                    child = os.open(entry.name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    try:
+                        current = os.fstat(child)
+                        installation._regular(current)
+                        require(installation._stamp(info) == installation._stamp(current)
+                                == expected_stamp, "process-root-tree-changed")
+                        require(0 <= current.st_size <= installation.MAX_FILE_BYTES,
+                                "installation-file-limit")
+                        size += current.st_size
+                        require(size <= installation.MAX_TOTAL_BYTES, "installation-inventory-limit")
+                    finally:
+                        os.close(child)
+        require(installation._stamp(os.fstat(fd)) == before, "process-root-directory-changed")
+
     with _view(root, proof.runner_root, directory=True) as fd:
         before = installation._stamp(os.fstat(fd))
         require(before == proof.tree_stamps["."], "process-root-directory-changed")
-        files, directories, links, stamps, _, runtime = installation._inventory(
-            fd, proof.runner_root, hash_files=False, service_uid=uid)
-        require(set(files) == layout.files and directories == layout.directories and links == layout.links
-                and set(runtime) == layout.runtime, "process-root-inventory-mismatch")
-        require(stamps == proof.tree_stamps and runtime == proof.runtime_stamps,
-                "process-root-tree-changed")
+        walk(fd, "", 0, proof.tree_stamps["."])
+        require(seen == layout.entries.keys(),
+                "process-root-inventory-mismatch")
         require(installation._stamp(os.fstat(fd)) == before, "process-root-directory-changed")
-        # Reject path replacement instead of accepting only a detached retained FD.
         with _view(root, proof.runner_root, directory=True) as confirmed:
             require(installation._stamp(os.fstat(confirmed)) == before, "process-root-directory-changed")
 
@@ -492,6 +567,99 @@ def collect_worker(connected_unix_socket, policy):
         require(final_peer == peer, "collector-peer-changed")
         return worker.verify_lineage(lineage, peer_pid=peer.pid, peer_uid=peer.uid, boot_id=boot,
                                      snapshots=first, confirmed_snapshots=second, confirmed_boot_id=final_boot)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        identity._diagnostic_failed("collector", error)
+        raise Denied("collector-acquisition-denied") from None
+
+
+class _WorkerAcquisition:
+    """Identity-only provisional token, never an admission or worker grant."""
+    __slots__ = ('__weakref__',)
+
+
+_ACQUISITIONS = weakref.WeakKeyDictionary()
+_ACQUISITION_GUARD = threading.RLock()
+
+
+def _worker_bracket(connected_unix_socket, policy, proof=None):
+    """Keep both original short kernel/maps observations within this call."""
+    require(os.geteuid() == 0, "root-collector-required")
+    try:
+        controls = _controls(policy)
+        peer = kernel.read_peer(connected_unix_socket)
+        install_policy = policy.service.installation
+        require(peer.uid == install_policy.service_uid, "collector-peer-uid")
+        initial_service = service.read_service(policy.service)
+        proof = installation.verify_installation(install_policy) if proof is None else proof
+        require(initial_service.service_uid == install_policy.service_uid
+                and proof.runner_root == install_policy.root, "collector-service-identity")
+        layout = _tree_layout(proof)
+        boot = kernel.read_boot_id()
+        first = kernel.read_chain(peer.pid, initial_service.main_pid)
+        lineage = worker.LineagePolicy(initial_service.main_pid, install_policy.service_uid,
+                                       install_policy.runner_id, initial_service.cgroup,
+                                       proof.main, proof.node, proof.listener, proof.worker)
+        binding = worker.verify_lineage(lineage, peer_pid=peer.pid, peer_uid=peer.uid, boot_id=boot,
+                                        snapshots=first, confirmed_snapshots=first, confirmed_boot_id=boot)
+        order, current = [], binding.pid
+        while current != initial_service.main_pid:
+            order.append(current)
+            current = first[current].stat.ppid
+        order.append(current)
+        require(len(order) == 4, "collector-service-layout")
+        hosts = dict(controls)
+        # Only this call's completed fresh stock verification seeds its existing
+        # host cache. Namespace checks and the second full stock hash remain fresh.
+        require(set(proof.trusted_files) == set(proof.files)
+                and set(proof.file_stamps) == set(proof.files), "collector-stock-file-evidence")
+        hosts.update(proof.trusted_files)
+        closures = {pid: _closure(pid, first[pid], proof, policy, hosts, layout) for pid in order}
+        second = kernel.read_chain(peer.pid, initial_service.main_pid)
+        require(set(second) == set(first), "collector-lineage-changed")
+        for pid in order:
+            require(_closure(pid, second[pid], proof, policy, hosts, layout) == closures[pid], "collector-maps-changed")
+        require(service.read_service(policy.service) == initial_service
+                and _controls(policy) == controls, "collector-trust-changed")
+        final_peer, final_boot = kernel.read_peer(connected_unix_socket), kernel.read_boot_id()
+        require(final_peer == peer, "collector-peer-changed")
+        result = worker.verify_lineage(lineage, peer_pid=peer.pid, peer_uid=peer.uid, boot_id=boot,
+                                     snapshots=first, confirmed_snapshots=second, confirmed_boot_id=final_boot)
+        return result, proof
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        identity._diagnostic_failed("collector", error)
+        raise Denied("collector-acquisition-denied") from None
+
+
+def begin_worker_acquisition(connected_unix_socket, policy):
+    binding, proof = _worker_bracket(connected_unix_socket, policy)
+    token = _WorkerAcquisition()
+    state = (weakref.ref(connected_unix_socket), connected_unix_socket.fileno(),
+             os.getpid(), threading.get_ident(), policy, binding, proof)
+    with _ACQUISITION_GUARD:
+        _ACQUISITIONS[token] = state
+    return binding, token
+
+
+def discard_worker_acquisition(token):
+    with _ACQUISITION_GUARD:
+        _ACQUISITIONS.pop(token, None)
+
+
+def finish_worker_acquisition(token, connected_unix_socket, policy):
+    require(os.geteuid() == 0, "root-collector-required")
+    try:
+        require(type(token) is _WorkerAcquisition, "collector-provisional-proof")
+        with _ACQUISITION_GUARD:
+            state = _ACQUISITIONS.pop(token, None)
+        require(state is not None, "collector-provisional-proof")
+        connected, fd, pid, thread, original_policy, first, proof = state
+        require(connected() is connected_unix_socket and fd == connected_unix_socket.fileno()
+                and pid == os.getpid() and thread == threading.get_ident()
+                and policy == original_policy, "collector-provisional-binding")
+        final, _ = _worker_bracket(connected_unix_socket, policy, proof)
+        final_proof = installation.verify_installation(policy.service.installation)
+        require(final_proof == proof and final == first, "collector-trust-changed")
+        return final
     except (OSError, ValueError, KeyError, TypeError) as error:
         identity._diagnostic_failed("collector", error)
         raise Denied("collector-acquisition-denied") from None
