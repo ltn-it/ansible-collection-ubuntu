@@ -1,4 +1,5 @@
 """Real Root namespace-tree boundaries; no native Worker or authorization claim."""
+from contextlib import contextmanager
 from dataclasses import replace
 import os
 from pathlib import Path
@@ -62,17 +63,16 @@ class ClosedInventoryTests(unittest.TestCase):
 
     def test_fresh_existing_reader_scans_complete_tree_once_without_code_rehash(self):
         (self.runtime / "mutable-diagnostic-not-code").write_bytes(b"not executable evidence")
-        with patch.object(installation, "_inventory", wraps=installation._inventory) as scan, \
+        with patch.object(collector.os, "scandir", wraps=os.scandir) as scan, \
                 patch.object(installation, "_hash_file", side_effect=AssertionError("metadata scan only")):
             self.check()
-        self.assertEqual(scan.call_count, 1)
-        self.assertFalse(scan.call_args.kwargs["hash_files"])
+        self.assertEqual(scan.call_count, 1 + len(self.proof.directories))
 
     def test_same_call_layout_reuses_only_immutable_bindings_not_namespace_observations(self):
         layout = collector._tree_layout(self.proof)
-        with patch.object(installation, "_inventory", wraps=installation._inventory) as scan:
+        with patch.object(collector.os, "scandir", wraps=os.scandir) as scan:
             for _ in range(8): collector._view_inventory(self.root, layout, os.getuid())
-        self.assertEqual(scan.call_count, 8)
+        self.assertEqual(scan.call_count, 8 * (1 + len(self.proof.directories)))
         self.assertIs(layout.proof, self.proof)
         with self.assertRaises(TypeError): layout.links["foreign"] = "target"
         with self.assertRaises(Denied):
@@ -130,13 +130,16 @@ class ClosedInventoryTests(unittest.TestCase):
             with self.subTest(proof=proof), self.assertRaises(Denied): self.check(proof)
 
     def test_shadow_root_or_directory_rename_cannot_validate_detached_fd(self):
-        original = installation._inventory
-        def detached(*args, **kwargs):
-            value = original(*args, **kwargs)
-            self.runner.rename(self.runner.with_name("detached-stock"))
-            self.runner.mkdir(mode=0o700)
-            return value
-        with patch.object(installation, "_inventory", side_effect=detached):
+        original = os.scandir
+        root_identity = self.runner.stat().st_ino
+        @contextmanager
+        def detached(fd):
+            with original(fd) as entries:
+                yield entries
+            if os.fstat(fd).st_ino == root_identity:
+                self.runner.rename(self.runner.with_name("detached-stock"))
+                self.runner.mkdir(mode=0o700)
+        with patch.object(collector.os, "scandir", side_effect=detached):
             with self.assertRaises(Denied): self.check()
 
     def test_mutation_during_metadata_scan_is_not_a_stale_stamp_success(self):

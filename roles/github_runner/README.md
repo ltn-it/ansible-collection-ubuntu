@@ -241,6 +241,17 @@ Its sparse virtual size is not resident memory or immutable code evidence.
 Effective AppArmor, diagnostics, privilege and static dependency checks remain
 required. The collector does not install a handler or issue runtime credentials.
 
+Native revalidation uses an internal one-use acquisition bound to the same
+process, thread and connected socket. Full stock bytes are freshly verified
+before and after that acquisition. Each side keeps its own short kernel/maps
+bracket; qualified mapping changes between the two sides do not become a new
+cross-HTTP equality requirement. Every process-root view is freshly walked
+against the sealed path vocabulary, with complete entry membership, file
+descriptor metadata, link, runtime-directory and root-replacement checks.
+The standalone collector retains its original behavior. Neither installation
+results nor native authorization are cached across acquisitions, and deadlines
+and the native proof reserve remain unchanged.
+
 The opt-in producer below stages fresh verified packages and rechecks existing
 protected installations. Migration of legacy registrations, future-version and
 credential-refresh convergence, effective kernel confinement, complete admission
@@ -511,9 +522,9 @@ fresh on every revalidation. The third history adds five provider reads to that
 initial proof and changes no deadline, hash pass, retention or admission rule.
 Every schema-3 selection, including business execution and observer proofs,
 also freshly verifies the actual successor commit's first parent. For business
-intake this adds four commit reads across the existing native validations:
-55 pre-mkdir provider reads for the observed one-page inventories, with the
-same ten collectors and twenty complete installation hashes. Native timing
+intake this added four commit reads across the original native validations:
+the historical one-page model observed 55 pre-mkdir provider reads, ten
+collectors and twenty complete installation hashes. Native timing
 feasibility and operating acceptance remain unproven by these modeled checks.
 No compiler, activation, rerun or dispatch is performed by these pure helpers.
 
@@ -538,8 +549,10 @@ reasons before the public sanitizing wrapper; an exact standard-library
 IncompleteRead becomes a fixed framing category without inspecting its body.
 Foreign errors remain unclassified. Local tests exercise real HTTP framing and
 the complete private stage/configuration/readback path with provider/archive IO
-modeled. That full path makes 26 fresh collector calls and 12 native-validation
-calls, including all post-discovery materialization checks. The original
+modeled. That earlier full-path model observed 26 fresh collector calls and
+12 native-validation calls, including post-discovery materialization checks.
+The current one-use acquisition removes duplicate full stock verification
+within each native call while retaining fresh checks at both boundaries. The original
 intake authentication budget and the later initial-effects budget are distinct;
 neither is renewed or increased. Local modeled materialization cannot establish
 native whole-job timing, successful workloads or the remaining operating proof.
@@ -1634,6 +1647,16 @@ seven-creator state must finish the same native-completion-based four-hour
 retention and independent absence checks. Only a distinct ordinary Main push
 with the reviewed Source workflow/controller pair and a separate store can follow.
 Pending closure, changed history or an unknown native outcome cannot unlock it.
+
+The finite seventh continuation retains the complete prior qualification and
+the terminal native run `43947870949`, attempt one. That run failed before a
+lease while leaving a sealed intake and an **unsealed** configuration prefix.
+Qualification verifies their exact original identities and inventories together
+with the two older catalogue entries and the empty original store. It leaves
+the partial prefix untouched: it is never completed, adopted or reused as a
+prepared configuration. A distinct successor store and genuine new Main push
+remain required. Unknown entries, replaced original directories, live leases,
+changed snapshots and incomplete native history keep admission closed.
 
 
 ### Physical runtime host package preparation (unpublished)

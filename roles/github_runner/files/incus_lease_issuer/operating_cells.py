@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 7:
+        return _validate_seventh_prelease_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 6:
         return _validate_sixth_preparation_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 5:
@@ -141,7 +143,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
-                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN}[value["schema"]])
+                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN, 7: SEVENTH_MAIN}[value["schema"]])
             and len({p["sha"] for p in parents}) == len(parents)
             and caller_sha not in {p["sha"] for p in parents}, "continuation-first-parent")
 
@@ -196,6 +198,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 7:
+        return _validate_seventh_prelease_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 6:
         return _validate_sixth_preparation_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 5:
@@ -1116,5 +1120,157 @@ def sixth_preparation_continuation_qualification(previous, run, inventory, check
     value = {"schema": 6, "purpose": "g06-sixth-failed-post-context-pre-fence-with-effects",
              "previous_qualification": previous, "native_sixth": sixth_native_projection(run, inventory, checks),
              "retirement": retirement}
+    validate_continuation_qualification(value)
+    return value
+
+
+# Original seventh run failed after immutable intake/config staging, before any
+# lease. Its staged entries remain history; no same-run retry or adoption exists.
+SEVENTH_MAIN = "cfd2e8ca4cbcf58a1a22cf37f2a8336bba19cb85"
+SEVENTH_RUN = 43947870949
+SEVENTH_JOB = 133584862472
+SEVENTH_CHECKS = (133584862472, 133689573836, 133690106874)
+SEVENTH_REUSABLE = "cb317a6d3b3e7b1b0549c3c62bb581e14de778c3"
+SEVENTH_WORKFLOW = "90e1bb3b99809605a3bce7258f81d6bf2922315250154ebea0ab4a7c46ab9865"
+SEVENTH_GRAPH = "77922e610222336f0a141a42396fb3fe8279f185677c00fb8256002b04f7bed2"
+SEVENTH_PREVIOUS_QUALIFICATION = "ac77310e5f9689c6bc9f4ef9e665b82e1c6718f2e99509d8e1293488ee381108"
+SEVENTH_CONFIGURATION = "f2bf2233351f72c25649a6205aa990526d80fd6c44b7deedd24dfb2c3be69012"
+SEVENTH_INTAKE = "ecab33dec453b2d3d4b3ecb9e14295567e60612918216dc8dc2fd457758b14a2"
+SEVENTH_CONFIG_INTENT = "597492b48ec2d29dd7efa8bad8fa47d3142f1f640cfa68015032e4cdfb1c5bf3"
+SEVENTH_INTAKE_RECEIPT = "8cb863ba820105855901f1ad0c93884ad22c7799bcb89d892c39b4cadabeecf5"
+SEVENTH_BOOTSTRAP = "f261a7d92eb0d3b393bc704a74689870020c3ce3c4d755d65379fa5a3606eaf9"
+# Genuine future published caller/callee bytes are mandatory; unbound denies.
+SEVENTH_BANK_IDENTITY = (64517, 1313166)
+SEVENTH_CONFIGURATION_IDENTITY = (64517, 1313199)
+SEVENTH_INTAKE_IDENTITY = (64517, 1313170)
+SEVENTH_CONFIGURATION_INVENTORY = "4c512c7bc6342c378a6eb4e406c2c3c4535b7644937b0a74aa505de7126e604b"
+SEVENTH_INTAKE_INVENTORY = "58b55ca43a4aaa5e4195ef59b85dd010551c457cc76a6653428b1129f46a4750"
+SEVENTH_SUCCESSOR_WORKFLOW = "9df6727c7c63b996389d138f4478611404d938664e231fe3fd8b26324b4b1cdc"
+SEVENTH_SUCCESSOR_REUSABLE = "1be871ceb82d977f9403e87554d2ade9dc9714e9"
+
+
+def seventh_native_projection(run, inventory, checks):
+    require(type(run) is dict and type(inventory) is dict and type(inventory.get("total_count")) is int
+            and inventory["total_count"] == 24 and type(inventory.get("jobs")) is list
+            and len(inventory["jobs"]) == 24, "continuation-seventh-complete-inventory")
+    repo = run.get("repository", {})
+    require(repo.get("id") == 1103407173 and repo.get("full_name") == "ltn-it/ansible-collection-supplementary"
+            and repo.get("private") is False and repo.get("owner", {}).get("id") == 54334171,
+            "continuation-seventh-native-repository")
+    refs = run.get("referenced_workflows")
+    require(type(refs) is list and sum(type(v) is dict and v.get("sha") == SEVENTH_REUSABLE
+            and v.get("path") == "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + SEVENTH_REUSABLE
+            for v in refs) == 1, "continuation-seventh-native-controller")
+    fields = ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion", "runner_id",
+              "runner_group_id", "started_at", "completed_at", "check_run_url")
+    rows = [{k: row.get(k) for k in fields} for row in inventory["jobs"]]
+    require(all(type(row["id"]) is int and row["id"] > 0 for row in rows)
+            and len({row["id"] for row in rows}) == 24, "continuation-seventh-native-ids")
+    actor = {"login": "litroc", "id": 76040632, "type": "User"}
+    require(all(type(run.get(field)) is dict and all(type(run[field].get(k)) is type(v)
+                and run[field][k] == v for k, v in actor.items())
+                for field in ("actor", "triggering_actor")), "continuation-seventh-actor")
+    graph = {"run": {**{k: run.get(k) for k in ("id", "run_attempt", "head_sha", "event", "head_branch",
+             "workflow_id", "path", "status", "conclusion")},
+             **{field: {k: run[field][k] for k in actor} for field in ("actor", "triggering_actor")}},
+             "jobs": sorted(rows, key=lambda row: row["id"])}
+    require(ledger.digest(graph) == SEVENTH_GRAPH, "continuation-seventh-original-failed-graph")
+    require(type(checks) is list and len(checks) == len(SEVENTH_CHECKS), "continuation-seventh-native-checks")
+    for identifier, check in zip(SEVENTH_CHECKS, checks):
+        job = next(row for row in rows if row["id"] == identifier)
+        require(type(check) is dict and check.get("id") == identifier and check.get("head_sha") == SEVENTH_MAIN
+                and all(check.get(k) == job[k] for k in ("name", "status", "conclusion", "started_at", "completed_at"))
+                and check.get("app", {}).get("id") == 15368 and check.get("app", {}).get("slug") == "github-actions",
+                "continuation-seventh-native-check")
+    return graph
+
+
+
+def _validate_seventh_failed_prefix(value):
+    engine_policy._keys(value, {"schema", "kind", "original_bootstrap", "original_bank", "configuration",
+                               "intake", "catalogues"})
+    require(type(value["schema"]) is int and value["schema"] == 1
+            and value["kind"] == "original-seventh-staged-prelease-no-lease-preserved",
+            "continuation-seventh-prefix-kind")
+    bootstrap = engine_policy._keys(value["original_bootstrap"], {"path", "sha256"})
+    engine_policy._path(bootstrap["path"])
+    require(bootstrap["sha256"] == SEVENTH_BOOTSTRAP, "continuation-seventh-original-bootstrap")
+    bank = engine_policy._keys(value["original_bank"], {"path", "device", "inode"})
+    engine_policy._path(bank["path"])
+    require(bank["path"].endswith("/oidc-config-successor-b260217d0b354c5fa44493c092c45200/ledger"),
+            "continuation-seventh-original-bank")
+    for key in ("device", "inode"):
+        engine_policy._integer(bank[key], 1, 2**63 - 1)
+    require((bank["device"], bank["inode"]) == SEVENTH_BANK_IDENTITY, "continuation-seventh-original-bank-identity")
+    for kind, name, fixed, inventory in (("configuration", SEVENTH_CONFIGURATION, SEVENTH_CONFIG_INTENT, SEVENTH_CONFIGURATION_INVENTORY),
+                                         ("intake", SEVENTH_INTAKE, SEVENTH_INTAKE_RECEIPT, SEVENTH_INTAKE_INVENTORY)):
+        row = engine_policy._keys(value[kind], {"name", "device", "inode", "receipt_sha256", "inventory_sha256"})
+        require(row["name"] == name and row["receipt_sha256"] == fixed, "continuation-seventh-prefix-identity")
+        expected_identity = SEVENTH_CONFIGURATION_IDENTITY if kind == "configuration" else SEVENTH_INTAKE_IDENTITY
+        require((row["device"], row["inode"]) == expected_identity, "continuation-seventh-prefix-directory-identity")
+        engine_policy._hash(inventory)
+        require(row["inventory_sha256"] == inventory, "continuation-seventh-prefix-inventory")
+        for key in ("device", "inode"):
+            engine_policy._integer(row[key], 1, 2**63 - 1)
+    catalogue = engine_policy._keys(value["catalogues"], {"native_intake_catalogue", "native_run_configuration_catalogue"})
+    for kind, extra in (("native_intake_catalogue", value["intake"]),
+                         ("native_run_configuration_catalogue", value["configuration"])):
+        entries = catalogue[kind]
+        require(type(entries) is dict and 0 < len(entries) <= 256
+                and entries.get(extra["name"]) == extra["inventory_sha256"], "continuation-seventh-catalogue")
+        for name, sha in entries.items():
+            require(type(name) is str and re.fullmatch("[0-9a-f]{64}", name), "continuation-seventh-catalogue-name")
+            engine_policy._hash(sha)
+    return value
+
+
+def _validate_seventh_prelease_descriptor(value, workflow_sha256, reusable_sha):
+    require(type(SEVENTH_SUCCESSOR_WORKFLOW) is str and re.fullmatch("[0-9a-f]{64}", SEVENTH_SUCCESSOR_WORKFLOW)
+            and SEVENTH_SUCCESSOR_WORKFLOW not in {SEVENTH_WORKFLOW, "0" * 64}
+            and type(SEVENTH_SUCCESSOR_REUSABLE) is str and re.fullmatch("[0-9a-f]{40}", SEVENTH_SUCCESSOR_REUSABLE)
+            and SEVENTH_SUCCESSOR_REUSABLE not in {SEVENTH_REUSABLE, "0" * 40},
+            "continuation-seventh-successor-pins-unbound")
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    require(type(value["schema"]) is int and value["schema"] == 7
+            and value["reason"] == "original-staged-prelease-expired-no-lease", "continuation-seventh-purpose")
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"]); engine_policy._hash(ref["sha256"])
+    row = engine_policy._keys(value["successor"], {"source_sha", "run_id", "run_attempt", "first_parent",
+                                                  "source_workflow_sha256", "reusable_sha"})
+    cell_contract._commit(row["source_sha"])
+    engine_policy._integer(row["run_id"], 1, 2**63 - 1)
+    require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN, THIRD_MAIN, FOURTH_MAIN, FIFTH_MAIN, SIXTH_MAIN, SEVENTH_MAIN}
+            and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN, FOURTH_RUN, FIFTH_RUN, SIXTH_RUN, SEVENTH_RUN}
+            and type(row["run_attempt"]) is int and row["run_attempt"] == 1 and row["first_parent"] == SEVENTH_MAIN
+            and row["source_workflow_sha256"] == workflow_sha256 == SEVENTH_SUCCESSOR_WORKFLOW
+            and row["reusable_sha"] == reusable_sha == SEVENTH_SUCCESSOR_REUSABLE, "continuation-seventh-successor")
+    return value
+
+
+def _validate_seventh_prelease_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "previous_qualification", "native_seventh", "failed_prefix"})
+    require(type(value["schema"]) is int and value["schema"] == 7
+            and value["purpose"] == "g06-seventh-failed-prelease-staged-history", "continuation-seventh-qualification")
+    previous = value["previous_qualification"]
+    require(type(previous) is dict and type(previous.get("schema")) is int and previous["schema"] == 6
+            and ledger.digest(previous) == SEVENTH_PREVIOUS_QUALIFICATION, "continuation-seventh-preserved-six-history")
+    counts = _validate_sixth_preparation_qualification(previous)
+    require(ledger.digest(value["native_seventh"]) == SEVENTH_GRAPH, "continuation-seventh-preserved-native-graph")
+    prefix = _validate_seventh_failed_prefix(value["failed_prefix"])
+    old = previous["retirement"]["catalogues"]
+    for kind, extra in (("native_intake_catalogue", SEVENTH_INTAKE),
+                         ("native_run_configuration_catalogue", SEVENTH_CONFIGURATION)):
+        require(set(prefix["catalogues"][kind]) == set(old[kind]) | {extra}
+                and extra not in old[kind]
+                and all(prefix["catalogues"][kind][name] == sha for name, sha in old[kind].items()),
+                "continuation-seventh-preserved-catalogues")
+    return counts
+
+
+def seventh_prelease_continuation_qualification(previous, run, inventory, checks, failed_prefix):
+    """Root-only historical assembly; no lease or resource grant is created."""
+    value = {"schema": 7, "purpose": "g06-seventh-failed-prelease-staged-history",
+             "previous_qualification": previous, "native_seventh": seventh_native_projection(run, inventory, checks),
+             "failed_prefix": failed_prefix}
     validate_continuation_qualification(value)
     return value

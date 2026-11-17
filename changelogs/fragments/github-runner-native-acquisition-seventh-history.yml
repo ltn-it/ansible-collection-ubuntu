@@ -1,0 +1,12 @@
+---
+bugfixes:
+  - >-
+    github_runner - reduce duplicate full stock verification during native
+    revalidation through a process-, thread-, and socket-bound one-use acquisition.
+    Keep fresh complete stock checks at both boundaries, independent short maps
+    brackets, and complete process-root metadata scans against sealed membership.
+  - >-
+    github_runner - preserve the exact seventh failed pre-lease native history,
+    its sealed intake, unsealed preparation prefix, and empty original store.
+    Require a distinct authenticated successor without adopting partial state or
+    resetting earlier attempts, retention, or authorization deadlines.

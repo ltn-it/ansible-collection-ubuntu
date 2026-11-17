@@ -1,5 +1,5 @@
 """Read-only factory joins; public fixed native graph and modeled private retirement. No live closure."""
-import base64,copy,hashlib,json,os,sys,tempfile,unittest
+import base64,copy,hashlib,json,os,socket,sys,tempfile,unittest
 from pathlib import Path
 from contextlib import ExitStack
 from types import SimpleNamespace as NS
@@ -111,7 +111,8 @@ class SixthFactoryTests(unittest.TestCase):
   receipt={'previous_qualification':fifth,'native_sixth':{'fixture':'sixth'}}
   successor={'source_sha':'e'*40,'run_id':c.SIXTH_RUN+1,'reusable_sha':c.SIXTH_REUSABLE}
   qualified=({'schema':6,'successor':successor},receipt,{},None);raw=b'modeled-current-workflow'
-  bootstrap=NS(value={'source_workflow_sha256':hashlib.sha256(raw).hexdigest()});selected=NS(bootstrap=bootstrap,identity=NS(required_native_job_name='modeled-current-native-job'),template_bytes=b'{}')
+  worker=ledger.Worker(995,78,1234,5678,'12345678-1234-4234-8234-123456789abc')
+  bootstrap=NS(collector=object(),value={'source_workflow_sha256':hashlib.sha256(raw).hexdigest(),'source_identity':{'runner_id':worker.runner_id,'service_uid':worker.uid}});selected=NS(bootstrap=bootstrap,identity=NS(required_native_job_name='modeled-current-native-job'),template_bytes=b'{}')
   who=NS(caller_sha=successor['source_sha'],run_id=successor['run_id'],reusable_sha=successor['reusable_sha'],job_id=123)
   def get(url,**kwargs):
    if '/contents/'in url:return ledger.canonical({'type':'file','path':'.github/workflows/collection-ci.yml','encoding':'base64','content':base64.b64encode(raw).decode(),'size':len(raw)})
@@ -123,10 +124,14 @@ class SixthFactoryTests(unittest.TestCase):
    def read(_get):order.append(label);return value
    return read
   with ExitStack()as stack:
-   for obj,name,value in [(f.admission,'_secret',lambda _:None),(f,'_controls',lambda _:'controls'),(f,'_worker',lambda *_:NS(uid=995)),(f.identity,'verify_github_assignment',lambda *_args,**_kwargs:who),(f.identity,'HTTPSReader',lambda:NS(read=get)),(f,'_continuation_receipt',lambda _:qualified),(f,'_continuation_original_native',older),(f,'_continuation_third_native',historical('third',three['native_third'])),(f,'_continuation_fourth_native',historical('fourth',four['native_fourth'])),(f,'_continuation_fifth_native',historical('fifth',fifth['native_fifth'])),(f,'_continuation_sixth_native',historical('sixth',receipt['native_sixth'])),(f,'_continuation_origin_absent',lambda *_:order.append('fresh-absence')),(c,'validate_continuation_commit',lambda *_:order.append('current-commit'))]:stack.enter_context(patch.object(obj,name,value))
-   f._native(None,selected,'nonce','modeled-auth','modeled-api')
+   connected,peer=socket.socketpair();stack.callback(connected.close);stack.callback(peer.close)
+   begin=Mock(side_effect=lambda *_:(worker,object()));finish=Mock(return_value=worker);discard=Mock()
+   # Real socket contract; native/kernel acquisition remains explicitly modeled.
+   for obj,name,value in [(f.admission,'_secret',lambda _:None),(f,'_controls',lambda _:'controls'),(f.collector,'begin_worker_acquisition',begin),(f.collector,'finish_worker_acquisition',finish),(f.collector,'discard_worker_acquisition',discard),(f.identity,'verify_github_assignment',lambda *_args,**_kwargs:who),(f.identity,'HTTPSReader',lambda:NS(read=get)),(f,'_continuation_receipt',lambda _:qualified),(f,'_continuation_original_native',older),(f,'_continuation_third_native',historical('third',three['native_third'])),(f,'_continuation_fourth_native',historical('fourth',four['native_fourth'])),(f,'_continuation_fifth_native',historical('fifth',fifth['native_fifth'])),(f,'_continuation_sixth_native',historical('sixth',receipt['native_sixth'])),(f,'_continuation_origin_absent',lambda *_:order.append('fresh-absence')),(c,'validate_continuation_commit',lambda *_:order.append('current-commit'))]:stack.enter_context(patch.object(obj,name,value))
+   f._native(connected,selected,'nonce','modeled-auth','modeled-api')
    self.assertEqual(order,['origin','prior','third','fourth','fifth','sixth','fresh-absence','current-commit'])
-   order.clear();f._native(None,selected,'nonce','modeled-auth','modeled-api',check_origin=False)
+   order.clear();f._native(connected,selected,'nonce','modeled-auth','modeled-api',check_origin=False)
    self.assertEqual(order,['fresh-absence','current-commit'])
+   self.assertEqual((begin.call_count,finish.call_count,discard.call_count),(2,2,2))
 
 if __name__=='__main__':unittest.main(verbosity=2)
