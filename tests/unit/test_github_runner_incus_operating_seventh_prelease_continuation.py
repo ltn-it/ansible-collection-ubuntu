@@ -135,14 +135,22 @@ class SeventhPreleaseHistoryTests(unittest.TestCase):
             if "/actions/jobs/" in url:
                 return ledger.canonical({"id": 123, "run_id": who.run_id, "head_sha": who.caller_sha, "status": "in_progress", "conclusion": None, "name": "modeled-native-job", "started_at": "2026-11-16T23:18:15Z"})
             return ledger.canonical({"sha": who.caller_sha, "parents": [{"sha": cells.SEVENTH_MAIN}]})
-        order = []
+        order, completed = [], []
+        expected_history = ["origin", "prior", "third", "fourth", "fifth", "sixth", "seventh"]
         def older(get, *, prior=False):
-            order.append("prior" if prior else "origin")
+            label = "prior" if prior else "origin"
+            order.append(label); completed.append(label)
             return two["native_prior"] if prior else legacy["native_origin"]
         def historical(label, value):
             def read(get):
-                order.append(label); return value
+                order.append(label); completed.append(label); return value
             return read
+        def barrier(label):
+            self.assertCountEqual(completed, expected_history)
+            order.append(label)
+        def finish_worker(*args):
+            barrier("worker-finish")
+            return worker
         with ExitStack() as stack:
             connected, peer = socket.socketpair()
             stack.callback(connected.close)
@@ -150,7 +158,7 @@ class SeventhPreleaseHistoryTests(unittest.TestCase):
             # Provider and kernel acquisition remain explicitly modeled. The
             # integrated native entry still checks a real connected Unix socket.
             begin = mock.Mock(side_effect=lambda *_: (worker, object()))
-            finish = mock.Mock(return_value=worker)
+            finish = mock.Mock(side_effect=finish_worker)
             discard = mock.Mock()
             for obj, name, value in [
                 (factory.admission, "_secret", lambda _: None), (factory, "_controls", lambda _: "controls"),
@@ -166,14 +174,15 @@ class SeventhPreleaseHistoryTests(unittest.TestCase):
                 (factory, "_continuation_fifth_native", historical("fifth", fifth["native_fifth"])),
                 (factory, "_continuation_sixth_native", historical("sixth", six["native_sixth"])),
                 (factory, "_continuation_seventh_native", historical("seventh", receipt["native_seventh"])),
-                (factory, "_continuation_origin_absent", lambda *_: order.append("fresh-absence")),
-                (cells, "validate_continuation_commit", lambda *_: order.append("current-commit"))]:
+                (factory, "_continuation_origin_absent", lambda *_: barrier("fresh-absence")),
+                (cells, "validate_continuation_commit", lambda *_: barrier("current-commit"))]:
                 stack.enter_context(mock.patch.object(obj, name, value))
             factory._native(connected, selected, "nonce", "modeled-auth", "modeled-api")
-            self.assertEqual(order, ["origin", "prior", "third", "fourth", "fifth", "sixth", "seventh", "fresh-absence", "current-commit"])
-            order.clear()
+            self.assertCountEqual(order[:-3], expected_history)
+            self.assertEqual(order[-3:], ["fresh-absence", "current-commit", "worker-finish"])
+            order.clear(); completed.clear(); expected_history.clear()
             factory._native(connected, selected, "nonce", "modeled-auth", "modeled-api", check_origin=False)
-            self.assertEqual(order, ["fresh-absence", "current-commit"])
+            self.assertEqual(order, ["fresh-absence", "current-commit", "worker-finish"])
             self.assertEqual((begin.call_count, finish.call_count, discard.call_count), (2, 2, 2))
             self.assertTrue(all(call.args[0] is connected for call in begin.call_args_list))
 

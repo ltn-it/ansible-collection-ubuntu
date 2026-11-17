@@ -411,6 +411,7 @@ def _inventory(directory):
     def visit(path, prefix=''):
         fd = installation._open_directory(str(path))
         try:
+            child_prefix = path.rstrip('/') + '/'
             for name in sorted(os.listdir(fd)):
                 if not prefix and name in ignored:
                     continue
@@ -420,15 +421,15 @@ def _inventory(directory):
                 if stat.S_ISDIR(info.st_mode):
                     require(info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700, 'generation-directory-mode')
                     result[relative] = {'kind':'directory','device':info.st_dev,'inode':info.st_ino}
-                    visit(path/name,relative+'/')
+                    visit(child_prefix+name,relative+'/')
                 else:
-                    proof, _, stamp = installation._file(str(path/name), MAX_TOTAL, private=False, keep=True)
+                    proof, _, stamp = installation._file(child_prefix+name, MAX_TOTAL, private=False, keep=False)
                     require(stat.S_IMODE(stamp[2]) in {0o600,0o700}, 'generation-file-mode')
                     result[relative] = {'kind':'file','sha256':proof.sha256,'stamp':list(stamp)}
                 require(len(result) <= MAX_MEMBERS, 'generation-inventory-size')
         finally:
             os.close(fd)
-    visit(directory)
+    visit(str(directory))
     return result
 
 

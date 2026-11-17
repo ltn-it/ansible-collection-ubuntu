@@ -6,6 +6,7 @@ publisher call, TLS/signing-key read, lease initialization or engine effect is
 performed here. Existing native custody/lease admission remains mandatory.
 """
 from dataclasses import asdict, dataclass
+from concurrent.futures import ThreadPoolExecutor
 import base64
 import datetime as dt
 import hashlib
@@ -745,6 +746,40 @@ def _continuation_origin_absent(bootstrap, qualified):
                     and who["reusable_sha"] == successor["reusable_sha"], "continuation-original-or-unknown-lease")
 
 
+@identity._diagnostic_step("native-histories")
+def _continuation_native_histories(get, descriptor, receipt):
+    """Overlap only independent terminal families; join before any proof escapes."""
+    seventh = descriptor["schema"] == 7
+    history = receipt["previous_qualification"] if seventh else receipt
+    schema = 6 if seventh else descriptor["schema"]
+    fifth = history["previous_qualification"] if schema == 6 else history
+    four = fifth["previous_qualification"] if schema in {5, 6} else fifth
+    three = four["previous_qualification"] if schema in {4, 5, 6} else four
+    previous = three["previous_qualification"] if schema in {3, 4, 5, 6} else three
+    legacy = previous["legacy_qualification"] if schema in {2, 3, 4, 5, 6} else previous
+    families = [(_continuation_original_native, {}, legacy["native_origin"], "continuation-original-native-drift")]
+    if schema in {2, 3, 4, 5, 6}:
+        families.append((_continuation_original_native, {"prior": True}, previous["native_prior"],
+                         "continuation-prior-native-drift"))
+    if schema in {3, 4, 5, 6}:
+        families.append((_continuation_third_native, {}, three["native_third"], "continuation-third-native-drift"))
+    if schema in {4, 5, 6}:
+        families.append((_continuation_fourth_native, {}, four["native_fourth"], "continuation-fourth-native-drift"))
+    if schema in {5, 6}:
+        families.append((_continuation_fifth_native, {}, fifth["native_fifth"], "continuation-fifth-native-drift"))
+    if schema == 6:
+        families.append((_continuation_sixth_native, {}, history["native_sixth"], "continuation-sixth-native-drift"))
+    if seventh:
+        families.append((_continuation_seventh_native, {}, receipt["native_seventh"],
+                         "continuation-seventh-native-drift"))
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        pending = [executor.submit(helper, get, **arguments) for helper, arguments, _, _ in families]
+        # Declaration order decides the first failure, independently of finish
+        # order. Executor exit also joins every later family on any failure.
+        for future, (_, _, expected, reason) in zip(pending, families):
+            require(future.result() == expected, reason)
+
+
 @identity._diagnostic_step("native-current")
 def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
     admission._secret(token); admission._secret(api_token)
@@ -789,29 +824,7 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             # opaque native proof. Current authorization and original absence are
             # still freshly checked on every revalidation; no shared cache exists.
             if check_origin:
-                seventh = descriptor["schema"] == 7
-                history = receipt["previous_qualification"] if seventh else receipt
-                schema = 6 if seventh else descriptor["schema"]
-                fifth = history["previous_qualification"] if schema == 6 else history
-                four = fifth["previous_qualification"] if schema in {5, 6} else fifth
-                three = four["previous_qualification"] if schema in {4, 5, 6} else four
-                previous = three["previous_qualification"] if schema in {3, 4, 5, 6} else three
-                legacy = previous["legacy_qualification"] if schema in {2, 3, 4, 5, 6} else previous
-                require(_continuation_original_native(get) == legacy["native_origin"], "continuation-original-native-drift")
-                if schema in {2, 3, 4, 5, 6}:
-                    require(_continuation_original_native(get, prior=True) == previous["native_prior"],
-                            "continuation-prior-native-drift")
-                if schema in {3, 4, 5, 6}:
-                    require(_continuation_third_native(get) == three["native_third"], "continuation-third-native-drift")
-                if schema in {4, 5, 6}:
-                    require(_continuation_fourth_native(get) == four["native_fourth"], "continuation-fourth-native-drift")
-                if schema in {5, 6}:
-                    require(_continuation_fifth_native(get) == fifth["native_fifth"], "continuation-fifth-native-drift")
-                if schema == 6:
-                    require(_continuation_sixth_native(get) == history["native_sixth"], "continuation-sixth-native-drift")
-                if seventh:
-                    require(_continuation_seventh_native(get) == receipt["native_seventh"],
-                            "continuation-seventh-native-drift")
+                _continuation_native_histories(get, descriptor, receipt)
             _continuation_origin_absent(selected.bootstrap, qualified)
             if descriptor["schema"] in {3, 4, 5, 6, 7} or identity.decode_json(selected.template_bytes)["kind"] == "operating":
                 operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
@@ -1189,18 +1202,19 @@ def _seventh_failed_prefix_projection(successor_ledger_path, original_bootstrap,
     require(ledger.digest(previous_qualification) == operating_cells.SEVENTH_PREVIOUS_QUALIFICATION,
             "continuation-seventh-exact-previous-qualification")
     old = load_bootstrap(original_bootstrap["path"], original_bootstrap["sha256"])
-    require(old.sha256 == operating_cells.SEVENTH_BOOTSTRAP and old.value["ledger_path"] != successor_ledger_path,
-            "continuation-seventh-separate-bank-required")
-    qualified = _continuation_receipt(old.value)
+    require(old.sha256 == operating_cells.SEVENTH_BOOTSTRAP, "continuation-seventh-separate-bank-required")
+    old_value = old.value
+    require(old_value["ledger_path"] != successor_ledger_path, "continuation-seventh-separate-bank-required")
+    qualified = _continuation_receipt(old_value)
     require(qualified is not None and qualified[0]["schema"] == 6 and qualified[1] == previous_qualification
             and qualified[0]["successor"]["source_sha"] == operating_cells.SEVENTH_MAIN
             and qualified[0]["successor"]["run_id"] == operating_cells.SEVENTH_RUN
             and qualified[0]["successor"]["reusable_sha"] == operating_cells.SEVENTH_REUSABLE,
             "continuation-seventh-original-bootstrap")
-    with ledger.Ledger(old.value["ledger_path"], clock=time.time) as store:
+    with ledger.Ledger(old_value["ledger_path"], clock=time.time) as store:
         require(store.lease_ids() == (), "continuation-seventh-original-lease-present")
         info = os.fstat(store.fd)
-        bank = {"path": old.value["ledger_path"], "device": info.st_dev, "inode": info.st_ino}
+        bank = {"path": old_value["ledger_path"], "device": info.st_dev, "inode": info.st_ino}
         if os.path.lexists(successor_ledger_path):
             new = installation._open_directory(successor_ledger_path)
             try:
@@ -1266,7 +1280,7 @@ def _seventh_failed_prefix_projection(successor_ledger_path, original_bootstrap,
                     and run_intake._entries(root) == names, "continuation-seventh-catalogue-drift")
             catalogues[kind] = rows
         finally: os.close(root)
-    with ledger.Ledger(old.value["ledger_path"], clock=time.time) as store:
+    with ledger.Ledger(old_value["ledger_path"], clock=time.time) as store:
         info = os.fstat(store.fd)
         require(store.lease_ids() == () and (info.st_dev, info.st_ino) == (bank["device"], bank["inode"]),
                 "continuation-seventh-original-bank-drift")

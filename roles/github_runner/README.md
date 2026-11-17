@@ -252,6 +252,14 @@ The standalone collector retains its original behavior. Neither installation
 results nor native authorization are cached across acquisitions, and deadlines
 and the native proof reserve remain unchanged.
 
+Independent continuation histories are read by at most four concurrent workers.
+Each family retains its complete ordered requests, pagination, projections and
+required second inventory readback. Results are checked in declaration order;
+all workers finish before a failure escapes or fresh absence, current-commit
+validation and worker acquisition completion proceed. Worker identity, its proof
+and control reads stay on the acquiring thread. Provider responses are never
+cached across acquisitions.
+
 The opt-in producer below stages fresh verified packages and rechecks existing
 protected installations. Migration of legacy registrations, future-version and
 credential-refresh convergence, effective kernel confinement, complete admission
