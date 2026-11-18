@@ -1,0 +1,10 @@
+---
+bugfixes:
+  - >-
+    github_runner - keep authenticated retired Incus preparation directories as historical evidence
+    while resolving current execution and observer configurations; reject altered history and
+    unqualified partial directories.
+  - >-
+    github_runner - preserve the exact eighth completed prelease failure and its sealed intake/configuration
+    through a separately qualified next Main transition without retrying the original job or changing
+    its historical policy.

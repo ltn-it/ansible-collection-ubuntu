@@ -126,6 +126,7 @@ def _file(path, expected=None, *, private=False, maximum=512 * 1024 * 1024):
 
 
 def _tree(value):
+    installation._root()
     _keys(value, {"path", "files", "directories"})
     path = _path(value["path"])
     require(type(value["files"]) is dict and 0 < len(value["files"]) <= MAX_FILES
@@ -135,7 +136,7 @@ def _tree(value):
     expected_dirs = {_relative(item) for item in value["directories"]}
     require(len(expected_dirs) == len(value["directories"]) and not (expected_dirs & set(expected_files)), "engine-inventory")
     found_files, found_dirs, total = {}, set(), 0
-    root = _directory(path)
+    root = installation._open_directory(path)
     def walk(fd, prefix=""):
         nonlocal total
         before = os.fstat(fd)
@@ -151,19 +152,38 @@ def _tree(value):
                     found_dirs.add(relative)
                     child = os.open(entry.name, DIR, dir_fd=fd)
                     try:
+                        require(_stamp(os.fstat(child)) == _stamp(info), "engine-directory-drift")
                         walk(child, relative + "/")
+                        require(_stamp(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) == _stamp(info),
+                                "engine-directory-drift")
                     finally:
                         os.close(child)
                 else:
                     require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and relative in expected_files,
                             "engine-unlisted-file")
-                    proof = _file(path + "/" + relative, expected_files[relative])
+                    # The verified directory chain is held open for this one
+                    # fresh walk. Hash the exact named inode without reopening
+                    # all absolute ancestors for every file; no cross-call cache.
+                    opened = os.open(entry.name, installation.FILE_FLAGS, dir_fd=fd)
+                    try:
+                        require(_stamp(os.fstat(opened)) == _stamp(info), "engine-file-entry-drift")
+                        proof, _, _ = installation._hash_file(opened, path + "/" + relative, 512 * 1024 * 1024)
+                        require(proof.sha256 == expected_files[relative], "engine-file-drift")
+                        require(_stamp(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) == _stamp(info),
+                                "engine-file-entry-drift")
+                    finally:
+                        os.close(opened)
                     total += proof.size
                     require(total <= MAX_TOTAL, "engine-inventory-size")
                     found_files[relative] = proof.sha256
         require(_stamp(before) == _stamp(os.fstat(fd)), "engine-directory-drift")
     try:
         walk(root)
+        current = installation._open_directory(path)
+        try:
+            require(_stamp(os.fstat(current)) == _stamp(os.fstat(root)), "engine-directory-drift")
+        finally:
+            os.close(current)
     finally:
         os.close(root)
     require(found_files == expected_files and found_dirs == expected_dirs, "engine-inventory-missing")

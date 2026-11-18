@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 8:
+        return _validate_eighth_prelease_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 7:
         return _validate_seventh_prelease_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 6:
@@ -143,7 +145,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
-                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN, 7: SEVENTH_MAIN}[value["schema"]])
+                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN}[value["schema"]])
             and len({p["sha"] for p in parents}) == len(parents)
             and caller_sha not in {p["sha"] for p in parents}, "continuation-first-parent")
 
@@ -198,6 +200,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 8:
+        return _validate_eighth_prelease_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 7:
         return _validate_seventh_prelease_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 6:
@@ -1271,6 +1275,161 @@ def seventh_prelease_continuation_qualification(previous, run, inventory, checks
     """Root-only historical assembly; no lease or resource grant is created."""
     value = {"schema": 7, "purpose": "g06-seventh-failed-prelease-staged-history",
              "previous_qualification": previous, "native_seventh": seventh_native_projection(run, inventory, checks),
+             "failed_prefix": failed_prefix}
+    validate_continuation_qualification(value)
+    return value
+
+
+# The eighth original completed before any lease. Both intake and generated
+# configuration are complete and remain immutable history, never adopted.
+EIGHTH_MAIN = "8345d447e65609e66eac616afbeb3b5d4bc362be"
+EIGHTH_RUN = 44153750769
+EIGHTH_JOB = 134291739967
+EIGHTH_CHECKS = (134291739967, 134338536637, 134339042918)
+EIGHTH_REUSABLE = "1be871ceb82d977f9403e87554d2ade9dc9714e9"
+EIGHTH_WORKFLOW = "9df6727c7c63b996389d138f4478611404d938664e231fe3fd8b26324b4b1cdc"
+EIGHTH_GRAPH = "564c07affa2ff555e27eda5b59312d7759cdfa916b0f224ac6bf01187e69a470"
+EIGHTH_PREVIOUS_QUALIFICATION = "ea6dbf15463c3c960b05ab0c07bf946b0edacd23204bcdc3631d8768723e8c71"
+EIGHTH_CONFIGURATION = "612ca4d78616159f4765ee5271c54a5a5ca28a16d62473806349a39df5e0e413"
+EIGHTH_INTAKE = "2b6415bacdde122ab2999e0b055483f0154b7355849353dd01e85e26bcc2c162"
+EIGHTH_CONFIG_RECEIPT = "670794b93bab1d41e2fbf9e863ae440a407f48539c6169e01a116ff9721d60f2"
+EIGHTH_INTAKE_RECEIPT = "7a423507892c7641d73dea23bd62b426fbfaca15395f2340ff32bc5645d807bb"
+EIGHTH_BOOTSTRAP = "9f12437843c50f2ea050e32e6f4f438160fbb439a7df296dbbefc33581dc667e"
+EIGHTH_BOOTSTRAP_IDENTITY = (64517, 1441916)
+EIGHTH_BANK_IDENTITY = (64517, 1441904)
+EIGHTH_CONFIGURATION_IDENTITY = (64517, 1441934)
+EIGHTH_INTAKE_IDENTITY = (64517, 1441908)
+EIGHTH_CONFIGURATION_INVENTORY = "5562e6cb46b450ecba6062e1d272c6ad51a6111cd675f407914648e1bd9d8492"
+EIGHTH_INTAKE_INVENTORY = "b1438907dd14fc1fb89183276ef19f49e206d83e3d3cfc9707a1f45b5b8b247c"
+# Exact local Source candidate bytes and genuinely published Validation Main.
+# Installation still requires the accepted Source consumer and native gates.
+EIGHTH_SUCCESSOR_WORKFLOW = "6d293f9e8a57942417acd651b35fb11aa5495dba7e0ae2f5e5e386d2ccec315e"
+EIGHTH_SUCCESSOR_REUSABLE = "99efac0591dd9cd4df836d7d8d805ccdc3ec808f"
+
+
+def eighth_native_projection(run, inventory, checks):
+    require(type(run) is dict and type(inventory) is dict and type(inventory.get("total_count")) is int
+            and inventory["total_count"] == 24 and type(inventory.get("jobs")) is list
+            and len(inventory["jobs"]) == 24, "continuation-eighth-complete-inventory")
+    repo = run.get("repository", {})
+    require(repo.get("id") == 1103407173 and repo.get("full_name") == "ltn-it/ansible-collection-supplementary"
+            and repo.get("private") is False and repo.get("owner", {}).get("id") == 54334171,
+            "continuation-eighth-native-repository")
+    refs = run.get("referenced_workflows")
+    require(type(refs) is list and sum(type(v) is dict and v.get("sha") == EIGHTH_REUSABLE
+            and v.get("path") == "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + EIGHTH_REUSABLE
+            for v in refs) == 1, "continuation-eighth-native-controller")
+    fields = ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion", "runner_id",
+              "runner_group_id", "started_at", "completed_at", "check_run_url")
+    rows = [{k: row.get(k) for k in fields} for row in inventory["jobs"]]
+    require(all(type(row["id"]) is int and row["id"] > 0 for row in rows)
+            and len({row["id"] for row in rows}) == 24, "continuation-eighth-native-ids")
+    actor = {"login": "litroc", "id": 76040632, "type": "User"}
+    require(all(type(run.get(field)) is dict and all(type(run[field].get(k)) is type(v)
+                and run[field][k] == v for k, v in actor.items())
+                for field in ("actor", "triggering_actor")), "continuation-eighth-actor")
+    graph = {"run": {**{k: run.get(k) for k in ("id", "run_attempt", "head_sha", "event", "head_branch",
+             "workflow_id", "path", "status", "conclusion")},
+             **{field: {k: run[field][k] for k in actor} for field in ("actor", "triggering_actor")}},
+             "jobs": sorted(rows, key=lambda row: row["id"])}
+    require(ledger.digest(graph) == EIGHTH_GRAPH, "continuation-eighth-original-failed-graph")
+    require(type(checks) is list and len(checks) == len(EIGHTH_CHECKS), "continuation-eighth-native-checks")
+    for identifier, check in zip(EIGHTH_CHECKS, checks):
+        job = next(row for row in rows if row["id"] == identifier)
+        require(type(check) is dict and check.get("id") == identifier and check.get("head_sha") == EIGHTH_MAIN
+                and all(check.get(k) == job[k] for k in ("name", "status", "conclusion", "started_at", "completed_at"))
+                and check.get("app", {}).get("id") == 15368 and check.get("app", {}).get("slug") == "github-actions",
+                "continuation-eighth-native-check")
+    return graph
+
+
+def _validate_eighth_failed_prefix(value):
+    engine_policy._keys(value, {"schema", "kind", "original_bootstrap", "original_bank", "configuration",
+                               "intake", "catalogues"})
+    require(type(value["schema"]) is int and value["schema"] == 1
+            and value["kind"] == "original-eighth-complete-prelease-no-lease-preserved",
+            "continuation-eighth-prefix-kind")
+    bootstrap = engine_policy._keys(value["original_bootstrap"], {"path", "sha256"})
+    engine_policy._path(bootstrap["path"])
+    require(bootstrap["sha256"] == EIGHTH_BOOTSTRAP and bootstrap["path"].endswith(
+        "/oidc-config-successor-18aec68429f14f8ea94a90217f9ffe70/immutable-bootstrap-locator-repair/candidate-bootstrap.json"),
+        "continuation-eighth-original-bootstrap")
+    bank = engine_policy._keys(value["original_bank"], {"path", "device", "inode"})
+    engine_policy._path(bank["path"])
+    require(bank["path"].endswith("/oidc-config-successor-18aec68429f14f8ea94a90217f9ffe70/ledger"),
+            "continuation-eighth-original-bank")
+    for key in ("device", "inode"):
+        engine_policy._integer(bank[key], 1, 2**63 - 1)
+    require((bank["device"], bank["inode"]) == EIGHTH_BANK_IDENTITY, "continuation-eighth-original-bank-identity")
+    for kind, name, fixed, inventory in (("configuration", EIGHTH_CONFIGURATION, EIGHTH_CONFIG_RECEIPT, EIGHTH_CONFIGURATION_INVENTORY),
+                                         ("intake", EIGHTH_INTAKE, EIGHTH_INTAKE_RECEIPT, EIGHTH_INTAKE_INVENTORY)):
+        row = engine_policy._keys(value[kind], {"name", "device", "inode", "receipt_sha256", "inventory_sha256"})
+        require(row["name"] == name and row["receipt_sha256"] == fixed, "continuation-eighth-prefix-identity")
+        expected_identity = EIGHTH_CONFIGURATION_IDENTITY if kind == "configuration" else EIGHTH_INTAKE_IDENTITY
+        require((row["device"], row["inode"]) == expected_identity, "continuation-eighth-prefix-directory-identity")
+        engine_policy._hash(inventory)
+        require(row["inventory_sha256"] == inventory, "continuation-eighth-prefix-inventory")
+        for key in ("device", "inode"):
+            engine_policy._integer(row[key], 1, 2**63 - 1)
+    catalogue = engine_policy._keys(value["catalogues"], {"native_intake_catalogue", "native_run_configuration_catalogue"})
+    for kind, extra in (("native_intake_catalogue", value["intake"]),
+                         ("native_run_configuration_catalogue", value["configuration"])):
+        entries = catalogue[kind]
+        require(type(entries) is dict and 0 < len(entries) <= 256
+                and entries.get(extra["name"]) == extra["inventory_sha256"], "continuation-eighth-catalogue")
+        for name, sha in entries.items():
+            require(type(name) is str and re.fullmatch("[0-9a-f]{64}", name), "continuation-eighth-catalogue-name")
+            engine_policy._hash(sha)
+    return value
+
+
+def _validate_eighth_prelease_descriptor(value, workflow_sha256, reusable_sha):
+    require(type(EIGHTH_SUCCESSOR_WORKFLOW) is str and re.fullmatch("[0-9a-f]{64}", EIGHTH_SUCCESSOR_WORKFLOW)
+            and EIGHTH_SUCCESSOR_WORKFLOW not in {EIGHTH_WORKFLOW, "0" * 64}
+            and type(EIGHTH_SUCCESSOR_REUSABLE) is str and re.fullmatch("[0-9a-f]{40}", EIGHTH_SUCCESSOR_REUSABLE)
+            and EIGHTH_SUCCESSOR_REUSABLE not in {EIGHTH_REUSABLE, "0" * 40},
+            "continuation-eighth-successor-pins-unbound")
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    require(type(value["schema"]) is int and value["schema"] == 8
+            and value["reason"] == "original-complete-prelease-catalogue-reader-failed", "continuation-eighth-purpose")
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"]); engine_policy._hash(ref["sha256"])
+    row = engine_policy._keys(value["successor"], {"source_sha", "run_id", "run_attempt", "first_parent",
+                                                  "source_workflow_sha256", "reusable_sha"})
+    cell_contract._commit(row["source_sha"])
+    engine_policy._integer(row["run_id"], 1, 2**63 - 1)
+    require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN, THIRD_MAIN, FOURTH_MAIN, FIFTH_MAIN, SIXTH_MAIN, SEVENTH_MAIN, EIGHTH_MAIN}
+            and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN, FOURTH_RUN, FIFTH_RUN, SIXTH_RUN, SEVENTH_RUN, EIGHTH_RUN}
+            and type(row["run_attempt"]) is int and row["run_attempt"] == 1 and row["first_parent"] == EIGHTH_MAIN
+            and row["source_workflow_sha256"] == workflow_sha256 == EIGHTH_SUCCESSOR_WORKFLOW
+            and row["reusable_sha"] == reusable_sha == EIGHTH_SUCCESSOR_REUSABLE, "continuation-eighth-successor")
+    return value
+
+
+def _validate_eighth_prelease_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "previous_qualification", "native_eighth", "failed_prefix"})
+    require(type(value["schema"]) is int and value["schema"] == 8
+            and value["purpose"] == "g06-eighth-failed-prelease-complete-history", "continuation-eighth-qualification")
+    previous = value["previous_qualification"]
+    require(type(previous) is dict and type(previous.get("schema")) is int and previous["schema"] == 7
+            and ledger.digest(previous) == EIGHTH_PREVIOUS_QUALIFICATION, "continuation-eighth-preserved-seven-history")
+    counts = _validate_seventh_prelease_qualification(previous)
+    require(ledger.digest(value["native_eighth"]) == EIGHTH_GRAPH, "continuation-eighth-preserved-native-graph")
+    prefix = _validate_eighth_failed_prefix(value["failed_prefix"])
+    old = previous["failed_prefix"]["catalogues"]
+    for kind, extra in (("native_intake_catalogue", EIGHTH_INTAKE),
+                        ("native_run_configuration_catalogue", EIGHTH_CONFIGURATION)):
+        require(set(prefix["catalogues"][kind]) == set(old[kind]) | {extra}
+                and extra not in old[kind]
+                and all(prefix["catalogues"][kind][name] == sha for name, sha in old[kind].items()),
+                "continuation-eighth-preserved-catalogues")
+    return counts
+
+
+def eighth_prelease_continuation_qualification(previous, run, inventory, checks, failed_prefix):
+    """Assemble genuine immutable history; never grant a retry or alter old stages."""
+    value = {"schema": 8, "purpose": "g06-eighth-failed-prelease-complete-history",
+             "previous_qualification": previous, "native_eighth": eighth_native_projection(run, inventory, checks),
              "failed_prefix": failed_prefix}
     validate_continuation_qualification(value)
     return value

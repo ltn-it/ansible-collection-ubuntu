@@ -405,6 +405,87 @@ class SeventhStagedCatalogueTests(unittest.TestCase):
             self.check()
             self.assertEqual(Path(result.directory).parent, self.configs)
             self.assertEqual(factory._read_complete(Path(result.directory))[0], result)
+            # The creator/readback alone missed the real failure: downstream
+            # lookup must traverse current complete + authenticated old partial
+            # together, preserving the entire older catalogue and empty bank.
+            current = created.bootstrap
+            before = {name: factory._fifth_retired_entry(self.configs / name)
+                      for name in self.prefix["catalogues"]["native_run_configuration_catalogue"]}
+            original_load = factory.load_bootstrap
+            original_receipt = factory._continuation_receipt
+            def load(path, sha):
+                if (path, sha) == (current.path, current.sha256):
+                    return current
+                return original_load(path, sha)
+            def qualified(value):
+                if value["ledger_path"] == current.value["ledger_path"]:
+                    return self.qualified
+                return original_receipt(value)
+            # External collector/control identity remains modeled, as in the
+            # creator fixture; full retired filesystem/absence checks do not.
+            with mock.patch.object(factory, "load_bootstrap", side_effect=load), \
+                 mock.patch.object(factory, "_continuation_receipt", side_effect=qualified), \
+                 mock.patch.object(factory, "_controls", return_value=created.proof.controls_sha256):
+                self.assertEqual(factory.resolve_configuration(current, created.selector,
+                    result.manifest_sha256), result)
+                self.assertEqual(factory.find_existing_execution_configuration(current,
+                    created.selector, created.proof), result)
+                helper = created.helper
+                helper.native.job["name"] = helper.value["cells"][created.selector]["native_observer_job_name"]
+                helper.native.claims["check_run_id"] = "735"
+                helper.native.job.update(id=906, check_run_url=factory.identity.API + "/repos/" + factory.SOURCE + "/check-runs/735")
+                challenge = factory.challenge_bootstrap(helper.server, current, created.selector)
+                helper.native.claims["aud"] = challenge["audience"]
+                # This fixture models the historical native HTTP family, not
+                # the registered observer proof or its fresh current signature.
+                with mock.patch.object(factory, "_continuation_receipt", return_value=None):
+                    observer = factory.verify_bootstrap_native(helper.server, current, created.selector,
+                        challenge["nonce"], helper.native.token(), "synthetic-job-token", purpose="observer")
+                self.assertEqual(factory.find_existing_configuration(current, created.selector, observer), result)
+                unknown = self.configs / ("e" * 64)
+                unknown.mkdir(mode=0o700)
+                self.write(unknown / "intent.json", {"schema": 1})
+                for read in (lambda: factory.resolve_configuration(current, created.selector, result.manifest_sha256),
+                             lambda: factory.find_existing_configuration(current, created.selector, observer)):
+                    with self.assertRaises(Denied): read()
+            self.assertEqual({name: factory._fifth_retired_entry(self.configs / name) for name in before}, before)
+
+    def catalogue(self):
+        historical = factory._continuation_receipt
+        def qualified(value):
+            return self.qualified if value["ledger_path"] == str(self.bank) else historical(value)
+        with mock.patch.object(factory, "_continuation_receipt", side_effect=qualified):
+            root = factory.installation._open_directory(str(self.configs))
+            try:
+                return factory._current_configuration_catalogue(self.bootstrap, root)
+            finally:
+                os.close(root)
+
+    def test_catalogue_authenticates_retired_partial_instead_of_reading_it_as_complete(self):
+        self.assertEqual(self.catalogue(), [])
+        self.assertFalse((self.old_config / "sealed-inventory.json").exists())
+        self.old_fifth.assert_called()
+        self.old_sixth.assert_called()
+
+    def test_catalogue_never_skips_unsealed_current_or_unknown_entries(self):
+        self.stage("configuration")
+        with self.assertRaises(FileNotFoundError): self.catalogue()
+
+    def test_catalogue_rejects_changed_retired_bytes_before_exclusion(self):
+        self.write(self.old_config / "runtime.json", {"fixture": "changed retired runtime"})
+        with self.assertRaises(Denied): self.catalogue()
+
+    def test_catalogue_rechecks_retired_bytes_after_current_read(self):
+        self.stage("configuration")
+        def read(directory):
+            self.write(self.old_config / "runtime.json", {"fixture": "history changed during current read"})
+            return object(), {}
+        with mock.patch.object(factory, "_read_complete", side_effect=read), self.assertRaises(Denied):
+            self.catalogue()
+
+    def test_catalogue_rejects_missing_retired_directory(self):
+        self.old_config.rename(self.configs / ("f" * 64))
+        with self.assertRaises((Denied, OSError)): self.catalogue()
 
     def test_foreign_successor_fields_and_names_deny(self):
         for kind in ("intake", "configuration"):
