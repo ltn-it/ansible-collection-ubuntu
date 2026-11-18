@@ -406,30 +406,54 @@ def _acquired_receiver(registry, artifact):
 
 def _inventory(directory):
     """FD-guarded immutable payload snapshot, excluding later receipt leaves."""
+    installation._root()
     ignored = {'sealed-inventory.json','publish-intent.json','published.json'}
     result = {}
-    def visit(path, prefix=''):
-        fd = installation._open_directory(str(path))
+    def visit(fd, path, prefix=''):
+        before = installation._stamp(os.fstat(fd))
+        child_prefix = path.rstrip('/') + '/'
+        for name in sorted(os.listdir(fd)):
+            if not prefix and name in ignored:
+                continue
+            relative = prefix + name
+            _relative(relative)
+            info = os.stat(name,dir_fd=fd,follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                require(info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700, 'generation-directory-mode')
+                result[relative] = {'kind':'directory','device':info.st_dev,'inode':info.st_ino}
+                child = os.open(name, installation.DIR_FLAGS, dir_fd=fd)
+                try:
+                    require(installation._stamp(os.fstat(child)) == installation._stamp(info), 'generation-entry-drift')
+                    visit(child, child_prefix+name, relative+'/')
+                    require(installation._stamp(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                            == installation._stamp(info), 'generation-entry-drift')
+                finally:
+                    os.close(child)
+            else:
+                opened = os.open(name, installation.FILE_FLAGS, dir_fd=fd)
+                try:
+                    require(installation._stamp(os.fstat(opened)) == installation._stamp(info), 'generation-entry-drift')
+                    proof, _, stamp = installation._hash_file(opened, child_prefix+name, MAX_TOTAL,
+                                                              private=False, keep=False)
+                    require(installation._stamp(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                            == installation._stamp(info), 'generation-entry-drift')
+                finally:
+                    os.close(opened)
+                require(stat.S_IMODE(stamp[2]) in {0o600,0o700}, 'generation-file-mode')
+                result[relative] = {'kind':'file','sha256':proof.sha256,'stamp':list(stamp)}
+            require(len(result) <= MAX_MEMBERS, 'generation-inventory-size')
+        require(installation._stamp(os.fstat(fd)) == before, 'generation-directory-drift')
+    root = installation._open_directory(str(directory))
+    try:
+        visit(root, str(directory))
+        current = installation._open_directory(str(directory))
         try:
-            child_prefix = path.rstrip('/') + '/'
-            for name in sorted(os.listdir(fd)):
-                if not prefix and name in ignored:
-                    continue
-                relative = prefix + name
-                _relative(relative)
-                info = os.stat(name,dir_fd=fd,follow_symlinks=False)
-                if stat.S_ISDIR(info.st_mode):
-                    require(info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700, 'generation-directory-mode')
-                    result[relative] = {'kind':'directory','device':info.st_dev,'inode':info.st_ino}
-                    visit(child_prefix+name,relative+'/')
-                else:
-                    proof, _, stamp = installation._file(child_prefix+name, MAX_TOTAL, private=False, keep=False)
-                    require(stat.S_IMODE(stamp[2]) in {0o600,0o700}, 'generation-file-mode')
-                    result[relative] = {'kind':'file','sha256':proof.sha256,'stamp':list(stamp)}
-                require(len(result) <= MAX_MEMBERS, 'generation-inventory-size')
+            require(installation._stamp(os.fstat(current)) == installation._stamp(os.fstat(root)),
+                    'generation-directory-drift')
         finally:
-            os.close(fd)
-    visit(str(directory))
+            os.close(current)
+    finally:
+        os.close(root)
     return result
 
 

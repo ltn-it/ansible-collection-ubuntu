@@ -371,6 +371,23 @@ class RootConfigurationTests(unittest.TestCase):
         with self.assertRaises(Denied): factory.resolve_configuration(self.bootstrap, self.selector, "9" * 64)
         with self.assertRaises(Denied): factory.read_configuration_origin(replace(result, manifest_sha256="9" * 64))
 
+    def test_resolver_rejects_catalogue_root_replacement_after_complete_read(self):
+        result = self.create()
+        read = factory._read_complete
+        replaced = False
+        def replace_root(directory):
+            nonlocal replaced
+            value = read(directory)
+            if not replaced:
+                replaced = True
+                self.directory.rename(self.directory.with_name("preserved-original-configurations"))
+                self.directory.mkdir(mode=0o700)
+            return value
+        with mock.patch.object(factory, "_read_complete", side_effect=replace_root):
+            with self.assertRaisesRegex(Denied, "run-configuration-resolve-held"):
+                factory.resolve_configuration(self.bootstrap, self.selector, result.manifest_sha256)
+        self.assertTrue(replaced)
+
     def test_runtime_fresh_native_origin_cannot_borrow_another_run_or_check_same_head(self):
         result = self.create()
         runtime = factory.runtime_rpc.RuntimeRPC(result.runtime_config_path, result.runtime_config_sha256,

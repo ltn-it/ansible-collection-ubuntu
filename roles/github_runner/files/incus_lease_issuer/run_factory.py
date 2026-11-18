@@ -714,24 +714,31 @@ def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, temp
 def _continuation_origin_absent(bootstrap, qualified):
     """Product API reads only; call outside any nested Ledger transaction."""
     descriptor, receipt, counts, _ = qualified
-    seventh = descriptor["schema"] == 7
-    history = receipt["previous_qualification"] if seventh else receipt
-    schema = 6 if seventh else descriptor["schema"]
-    retired = receipt["failed_prefix"]["catalogues"] if seventh else (
-        history["retirement"]["catalogues"] if schema in {5, 6} else None)
-    if seventh:
-        require(_seventh_failed_prefix_projection(bootstrap.value["ledger_path"],
-                    receipt["failed_prefix"]["original_bootstrap"], history, revalidating=True) == receipt["failed_prefix"],
-                "continuation-seventh-failed-prefix-drift")
-    if schema == 6:
-        previous = history["previous_qualification"]["retirement"]
-        _revalidate_fifth_retirement(previous, bootstrap.value["ledger_path"])
-        _revalidate_sixth_retirement(history["retirement"], bootstrap.value["ledger_path"])
-        require(all(set(previous["catalogues"][kind]) < set(history["retirement"]["catalogues"][kind])
-                    and all(history["retirement"]["catalogues"][kind].get(name) == digest for name, digest in previous["catalogues"][kind].items())
-                    for kind in previous["catalogues"]), "continuation-sixth-previous-catalogue-drift")
-    elif retired is not None:
-        _revalidate_fifth_retirement(history["retirement"], bootstrap.value["ledger_path"])
+    if descriptor["schema"] == 8:
+        require(_eighth_failed_prefix_projection(bootstrap.value["ledger_path"],
+                    receipt["failed_prefix"]["original_bootstrap"], receipt["previous_qualification"],
+                    revalidating=True, defer_catalogues=True) == receipt["failed_prefix"],
+                "continuation-eighth-failed-prefix-drift")
+        retired = receipt["failed_prefix"]["catalogues"]
+    else:
+        seventh = descriptor["schema"] == 7
+        history = receipt["previous_qualification"] if seventh else receipt
+        schema = 6 if seventh else descriptor["schema"]
+        retired = receipt["failed_prefix"]["catalogues"] if seventh else (
+            history["retirement"]["catalogues"] if schema in {5, 6} else None)
+        if seventh:
+            require(_seventh_failed_prefix_projection(bootstrap.value["ledger_path"],
+                        receipt["failed_prefix"]["original_bootstrap"], history, revalidating=True) == receipt["failed_prefix"],
+                    "continuation-seventh-failed-prefix-drift")
+        if schema == 6:
+            previous = history["previous_qualification"]["retirement"]
+            _revalidate_fifth_retirement(previous, bootstrap.value["ledger_path"])
+            _revalidate_sixth_retirement(history["retirement"], bootstrap.value["ledger_path"])
+            require(all(set(previous["catalogues"][kind]) < set(history["retirement"]["catalogues"][kind])
+                        and all(history["retirement"]["catalogues"][kind].get(name) == digest for name, digest in previous["catalogues"][kind].items())
+                        for kind in previous["catalogues"]), "continuation-sixth-previous-catalogue-drift")
+        elif retired is not None:
+            _revalidate_fifth_retirement(history["retirement"], bootstrap.value["ledger_path"])
     _continuation_catalogue(run_intake.ROOT, counts["native_intake_catalogue"], descriptor, bootstrap.sha256,
                             bootstrap.value["cells"], intake=True,
                             retired=retired["native_intake_catalogue"] if retired is not None else None)
@@ -749,8 +756,10 @@ def _continuation_origin_absent(bootstrap, qualified):
 @identity._diagnostic_step("native-histories")
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
-    seventh = descriptor["schema"] == 7
-    history = receipt["previous_qualification"] if seventh else receipt
+    eighth = descriptor["schema"] == 8
+    record = receipt["previous_qualification"] if eighth else receipt
+    seventh = descriptor["schema"] in {7, 8}
+    history = record["previous_qualification"] if seventh else record
     schema = 6 if seventh else descriptor["schema"]
     fifth = history["previous_qualification"] if schema == 6 else history
     four = fifth["previous_qualification"] if schema in {5, 6} else fifth
@@ -770,8 +779,11 @@ def _continuation_native_histories(get, descriptor, receipt):
     if schema == 6:
         families.append((_continuation_sixth_native, {}, history["native_sixth"], "continuation-sixth-native-drift"))
     if seventh:
-        families.append((_continuation_seventh_native, {}, receipt["native_seventh"],
+        families.append((_continuation_seventh_native, {}, record["native_seventh"],
                          "continuation-seventh-native-drift"))
+    if eighth:
+        families.append((_continuation_eighth_native, {}, receipt["native_eighth"],
+                         "continuation-eighth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         pending = [executor.submit(helper, get, **arguments) for helper, arguments, _, _ in families]
         # Declaration order decides the first failure, independently of finish
@@ -826,7 +838,7 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             if check_origin:
                 _continuation_native_histories(get, descriptor, receipt)
             _continuation_origin_absent(selected.bootstrap, qualified)
-            if descriptor["schema"] in {3, 4, 5, 6, 7} or identity.decode_json(selected.template_bytes)["kind"] == "operating":
+            if descriptor["schema"] in {3, 4, 5, 6, 7, 8} or identity.decode_json(selected.template_bytes)["kind"] == "operating":
                 operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
                                                              who.caller_sha, who.run_id, who.reusable_sha)
         elif identity.decode_json(selected.template_bytes)["kind"] == "operating":
@@ -1080,6 +1092,39 @@ def create_run_configuration(proof, connected, bootstrap, selector, token, api_t
         if root is not None: os.close(root)
 
 
+def _current_configuration_catalogue(bootstrap, root):
+    """Read current complete configs, preserving authenticated retired history.
+
+    Retired entries are evidence, not runnable configurations. Their exact full
+    history, inodes, bytes, original absence and every successor addition are
+    revalidated on both sides of the read. An unqualified or current partial
+    directory still fails closed; no missing-seal exception grants admission.
+    """
+    qualified = _continuation_receipt(bootstrap.value)
+    retired = {}
+    if qualified is not None:
+        _continuation_origin_absent(bootstrap, qualified)
+        descriptor, receipt, _, _ = qualified
+        if descriptor["schema"] in {7, 8}:
+            retired = receipt["failed_prefix"]["catalogues"]["native_run_configuration_catalogue"]
+        elif descriptor["schema"] in {5, 6}:
+            retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
+    directory_identity = run_intake._directory_identity(root)
+    names = run_intake._entries(root)
+    require(len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names)
+            and set(retired) <= names, "run-config-catalogue-bound")
+    rows = [_read_complete(Path(ROOT) / name) for name in sorted(names - set(retired))]
+    if qualified is not None:
+        _continuation_origin_absent(bootstrap, qualified)
+    current = installation._open_directory(ROOT)
+    try:
+        require(run_intake._directory_identity(current) == directory_identity
+                and run_intake._entries(root) == names, "run-config-catalogue-drift")
+    finally:
+        os.close(current)
+    return rows
+
+
 def find_existing_configuration(bootstrap, selector, observer_proof):
     return _find_existing_configuration(bootstrap, selector, observer_proof, purpose="observer")
 
@@ -1110,13 +1155,9 @@ def _find_existing_configuration(bootstrap, selector, observer_proof, *, purpose
                 and _worker(connected, bootstrap) == observer_proof.worker
                 and _controls(bootstrap) == observer_proof.controls_sha256, "run-config-observer")
         root = installation._open_directory(ROOT); run_intake._directory_identity(root)
-        os.lseek(root, 0, os.SEEK_SET)
-        names = os.listdir(root)
-        require(len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names), "run-config-lookup-bound")
         found = []
         who = observer_proof.identity
-        for name in names:
-            result, receipt = _read_complete(Path(ROOT) / name)
+        for result, receipt in _current_configuration_catalogue(bootstrap, root):
             row = receipt["invocation"]
             if ((row["repository"], row["run_id"], row["source_sha"], row["reusable_sha"], row["selector"])
                     == (SOURCE, who.run_id, who.caller_sha, who.reusable_sha, selector)):
@@ -1168,12 +1209,8 @@ def resolve_configuration(bootstrap, selector, manifest_sha256):
                 and type(selector) is str and selector in bootstrap.value["cells"], "run-config-resolver")
         engine._hash(manifest_sha256)
         root = installation._open_directory(ROOT); run_intake._directory_identity(root)
-        os.lseek(root, 0, os.SEEK_SET)
-        names = os.listdir(root)
-        require(len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names), "run-config-resolver-bound")
         found = []
-        for name in names:
-            configuration, receipt = _read_complete(Path(ROOT) / name)
+        for configuration, receipt in _current_configuration_catalogue(bootstrap, root):
             if configuration.manifest_sha256 == manifest_sha256:
                 require(receipt["invocation"]["bootstrap_sha256"] == bootstrap.sha256
                         and receipt["invocation"]["selector"] == selector, "run-config-resolver-domain")
@@ -1308,4 +1345,176 @@ def collect_seventh_prelease_history(successor_ledger_path, original_bootstrap, 
     _revalidate_sixth_retirement(previous_qualification["retirement"], successor_ledger_path)
     require(_seventh_failed_prefix_projection(successor_ledger_path, original_bootstrap, previous_qualification) == value,
             "continuation-seventh-prefix-collection-drift")
+    return value
+
+
+def _continuation_eighth_native(get):
+    prefix = "/actions/runs/" + str(operating_cells.EIGHTH_RUN)
+    path = prefix + "/attempts/1/jobs?per_page=100&page=1"
+    run, inventory = get(prefix), get(path)
+    checks = [get("/check-runs/" + str(identifier)) for identifier in operating_cells.EIGHTH_CHECKS]
+    result = operating_cells.eighth_native_projection(run, inventory, checks)
+    require(get(path) == inventory, "continuation-eighth-native-inventory-drift")
+    return result
+
+
+def _eighth_failed_prefix_projection(successor_ledger_path, original_bootstrap, previous_qualification, *,
+                                     revalidating=False, defer_catalogues=False):
+    """Read exact complete prelease history; never reseal, renew or adopt it."""
+    require(type(revalidating) is bool and type(defer_catalogues) is bool
+            and (not defer_catalogues or revalidating), "continuation-eighth-catalogue-composition")
+    operating_cells._validate_seventh_prelease_qualification(previous_qualification)
+    require(ledger.digest(previous_qualification) == operating_cells.EIGHTH_PREVIOUS_QUALIFICATION,
+            "continuation-eighth-exact-previous-qualification")
+    old = load_bootstrap(original_bootstrap["path"], original_bootstrap["sha256"])
+    require(old.sha256 == operating_cells.EIGHTH_BOOTSTRAP
+            and old.file_stamp[:2] == operating_cells.EIGHTH_BOOTSTRAP_IDENTITY
+            and original_bootstrap["path"].endswith(
+                "/oidc-config-successor-18aec68429f14f8ea94a90217f9ffe70/immutable-bootstrap-locator-repair/candidate-bootstrap.json"),
+            "continuation-eighth-immutable-original-bootstrap")
+    old_value = old.value
+    require(old_value["ledger_path"] != successor_ledger_path, "continuation-eighth-separate-bank-required")
+    qualified = _continuation_receipt(old_value)
+    require(qualified is not None and qualified[0]["schema"] == 7 and qualified[1] == previous_qualification
+            and qualified[0]["successor"]["source_sha"] == operating_cells.EIGHTH_MAIN
+            and qualified[0]["successor"]["run_id"] == operating_cells.EIGHTH_RUN
+            and qualified[0]["successor"]["reusable_sha"] == operating_cells.EIGHTH_REUSABLE,
+            "continuation-eighth-original-bootstrap")
+    # Revalidate every older history while allowing only the outer current
+    # descriptor to classify additions. Reusing old _continuation_origin_absent
+    # here would incorrectly classify the next legitimate caller as old work.
+    sixth = previous_qualification["previous_qualification"]
+    _revalidate_fifth_retirement(sixth["previous_qualification"]["retirement"], successor_ledger_path)
+    _revalidate_sixth_retirement(sixth["retirement"], successor_ledger_path)
+    require(_seventh_failed_prefix_projection(old_value["ledger_path"],
+                previous_qualification["failed_prefix"]["original_bootstrap"], sixth, revalidating=True)
+            == previous_qualification["failed_prefix"], "continuation-eighth-preserved-seventh-prefix")
+    with ledger.Ledger(old_value["ledger_path"], clock=time.time) as store:
+        require(store.lease_ids() == (), "continuation-eighth-original-lease-present")
+        info = os.fstat(store.fd)
+        bank = {"path": old_value["ledger_path"], "device": info.st_dev, "inode": info.st_ino}
+        if os.path.lexists(successor_ledger_path):
+            new = installation._open_directory(successor_ledger_path)
+            try:
+                current = os.fstat(new)
+                require((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino),
+                        "continuation-eighth-aliased-original-bank")
+            finally: os.close(new)
+    entries = {}
+    for kind, parent, name, marker, fixed in (
+            ("configuration", ROOT, operating_cells.EIGHTH_CONFIGURATION, "sealed-inventory.json", operating_cells.EIGHTH_CONFIG_RECEIPT),
+            ("intake", run_intake.ROOT, operating_cells.EIGHTH_INTAKE, "sealed.json", operating_cells.EIGHTH_INTAKE_RECEIPT)):
+        directory = Path(parent) / name
+        fd = installation._open_directory(str(directory))
+        try:
+            device, inode, *_ = run_intake._directory_identity(fd)
+            names = run_intake._entries(fd)
+            receipt, sha, stamp = run_intake._read_at(fd, marker)
+            require(sha == fixed, "continuation-eighth-prefix-receipt")
+            if kind == "configuration":
+                require(names == {"archives", "trees", "intent.json", "cell.json", "preparation.json", "registry.json", "runtime.json", "sealed-inventory.json"},
+                        "continuation-eighth-complete-configuration-inventory")
+                configuration, actual = _read_complete(directory)
+                require(actual == receipt and configuration.manifest_sha256 == sha,
+                        "continuation-eighth-complete-configuration-receipt")
+                who = receipt["invocation"]
+                require(who["source_sha"] == operating_cells.EIGHTH_MAIN
+                        and who["reusable_sha"] == operating_cells.EIGHTH_REUSABLE
+                        and who["run_id"] == operating_cells.EIGHTH_RUN and type(who["run_attempt"]) is int
+                        and who["run_attempt"] == 1
+                        and who["job_id"] == who["check_run_id"] == operating_cells.EIGHTH_JOB
+                        and who["bootstrap_sha256"] == old.sha256
+                        and receipt["snapshot_receipt_sha256"] == operating_cells.EIGHTH_INTAKE_RECEIPT
+                        and receipt["worker"]["runner_id"] == old_value["source_identity"]["runner_id"]
+                        and receipt["worker"]["uid"] == old_value["source_identity"]["service_uid"],
+                        "continuation-eighth-complete-configuration-origin")
+            else:
+                require(names == run_intake.INVENTORY, "continuation-eighth-intake-inventory")
+                intent, intent_sha, _ = run_intake._read_at(fd, "intent.json")
+                require(receipt["binding"] == intent["binding"] and receipt["intent_sha256"] == intent_sha,
+                        "continuation-eighth-intake-intent")
+                who = intent["original_job"]
+                proven = run_intake._proven(receipt["snapshot"]["acquisition"])
+                require(proven.source.commit_sha == operating_cells.EIGHTH_MAIN
+                        and proven.controller.commit_sha == operating_cells.EIGHTH_REUSABLE
+                        and proven.artifact.run_id == operating_cells.EIGHTH_RUN
+                        and type(proven.artifact.run_attempt) is int and proven.artifact.run_attempt == 1
+                        and who["run_id"] == operating_cells.EIGHTH_RUN
+                        and who["job_id"] == who["check_run_id"] == operating_cells.EIGHTH_JOB,
+                        "continuation-eighth-intake-origin")
+                fds = []
+                try:
+                    for archive in run_intake.ARCHIVES:
+                        fds.append(os.open(archive, installation.FILE_FLAGS, dir_fd=fd))
+                    require(len(set(fds)) == 3, "continuation-eighth-distinct-archive-fds")
+                    stamps = [installation._stamp(os.fstat(archive)) for archive in fds]
+                    require(stamps == [tuple(receipt["archive_stamps"][name]) for name in run_intake.ARCHIVES],
+                            "continuation-eighth-intake-archive-stamps")
+                    if revalidating:
+                        # Strict collection has reconstructed these exact fixed
+                        # bytes. Freshly verify every byte/FD again, without
+                        # repeating inert semantic unpacking on each native
+                        # proof. The seal, provenance and full inventory remain
+                        # exact; no previous-call cache or pathname-only proof.
+                        expected = ((proven.artifact_sha256, proven.artifact_size),
+                                    (proven.source.archive_sha256, proven.source.archive_size),
+                                    (proven.controller.archive_sha256, proven.controller.archive_size))
+                        for archive, pair in zip(fds, expected): run_intake._archive_bytes(archive, *pair)
+                    else:
+                        snapshot = run_intake._validate_archives(proven,
+                            **dict(zip(("artifact_fd", "source_fd", "controller_fd"), fds)))
+                        require(ledger.canonical(asdict(snapshot)) == ledger.canonical(receipt["snapshot"]),
+                                "continuation-eighth-intake-archives")
+                    require([installation._stamp(os.fstat(archive)) for archive in fds] == stamps,
+                            "continuation-eighth-intake-archive-drift")
+                finally:
+                    for archive in fds: os.close(archive)
+                run_intake._sealed_state_unchanged(fd, sha)
+            entries[kind] = {"name": name, "device": device, "inode": inode,
+                             "receipt_sha256": sha, "inventory_sha256": _fifth_retired_entry(directory)}
+            require(run_intake._read_at(fd, marker)[1:] == (sha, stamp)
+                    and run_intake._entries(fd) == names, "continuation-eighth-prefix-drift")
+        finally: os.close(fd)
+    catalogues = {}
+    old_catalogues = previous_qualification["failed_prefix"]["catalogues"]
+    for kind, parent, entry in (("native_intake_catalogue", run_intake.ROOT, entries["intake"]),
+                                ("native_run_configuration_catalogue", ROOT, entries["configuration"])):
+        if defer_catalogues:
+            # Only the composed origin check uses this path. The complete
+            # seventh prefix and both exact eighth entries were freshly read
+            # above; its following _continuation_catalogue must freshly verify
+            # every historical digest, root identity, name and current entry.
+            # Collection and standalone projection retain their full pass.
+            catalogues[kind] = {**old_catalogues[kind], entry["name"]: entry["inventory_sha256"]}
+            continue
+        root = installation._open_directory(parent)
+        try:
+            names = run_intake._entries(root)
+            historical = set(old_catalogues[kind]) | {entry["name"]}
+            require(len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names)
+                    and (historical <= names if revalidating else historical == names),
+                    "continuation-eighth-extra-catalogue-entry")
+            rows = {name: _fifth_retired_entry(Path(parent) / name) for name in historical}
+            require(all(rows[name] == sha for name, sha in old_catalogues[kind].items())
+                    and rows[entry["name"]] == entry["inventory_sha256"]
+                    and run_intake._entries(root) == names, "continuation-eighth-catalogue-drift")
+            catalogues[kind] = rows
+        finally: os.close(root)
+    with ledger.Ledger(old_value["ledger_path"], clock=time.time) as store:
+        info = os.fstat(store.fd)
+        require(store.lease_ids() == () and (info.st_dev, info.st_ino) == (bank["device"], bank["inode"]),
+                "continuation-eighth-original-bank-drift")
+    result = {"schema": 1, "kind": "original-eighth-complete-prelease-no-lease-preserved",
+              "original_bootstrap": original_bootstrap, "original_bank": bank,
+              **entries, "catalogues": catalogues}
+    operating_cells._validate_eighth_failed_prefix(result)
+    return result
+
+
+def collect_eighth_prelease_history(successor_ledger_path, original_bootstrap, previous_qualification):
+    """Collect exact complete original history twice; no same-run resume or publication."""
+    _root(); engine._path(successor_ledger_path)
+    value = _eighth_failed_prefix_projection(successor_ledger_path, original_bootstrap, previous_qualification)
+    require(_eighth_failed_prefix_projection(successor_ledger_path, original_bootstrap, previous_qualification) == value,
+            "continuation-eighth-prefix-collection-drift")
     return value
