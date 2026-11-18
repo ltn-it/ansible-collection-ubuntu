@@ -565,6 +565,32 @@ intake authentication budget and the later initial-effects budget are distinct;
 neither is renewed or increased. Local modeled materialization cannot establish
 native whole-job timing, successful workloads or the remaining operating proof.
 
+The fixed schema-8 continuation preserves the completed failed run `44153750769`
+at attempt one, including its complete terminal job graph and three original
+failed checks. Its intake and generated configuration are already sealed. Their
+exact original bytes, inode identities, archive contents and empty original
+Ledger remain historical evidence; they are never completed again or adopted
+by a new job. The preceding schema-7 qualification and its immutable bootstrap
+locator remain unchanged. The historical schema-7 workflow/controller pair is
+not overwritten when binding the next pair.
+
+The new descriptor requires the exact next original Main transition after
+`8345d447`, a separately published caller/controller pair, and fresh native job
+assignment. Missing future pins fail closed. It neither permits attempt two nor
+resumes the completed original job. All previous native histories, current
+worker, controls, original absence and four-hour retention checks remain in
+force. The additional complete-history reads must be included in the full
+existing authentication budget before native activation; a local qualification
+or a read-only history check does not prove timing or operating acceptance.
+
+Execution, same-job recovery lookup and observers use one catalogue reader.
+Only the exact freshly authenticated retired entries are excluded from runnable
+configuration selection. Complete current configurations still undergo their
+full reader checks; unknown or current partial directories remain held. The
+reader revalidates historical evidence before and after selection and checks
+the current catalogue root and inventory again. It never deletes an old entry,
+ignores a missing seal generically or creates execution authority.
+
 ### Disabled bootstrap and operating observer preparation
 
 `github_runner_runtime_v2_bootstrap: true` selects an existing sealed bootstrap
