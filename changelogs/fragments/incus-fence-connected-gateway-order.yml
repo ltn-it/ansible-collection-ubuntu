@@ -31,3 +31,6 @@ bugfixes:
   - >-
       github_runner - read runtime receipt cell configuration through the existing sealed cell contract,
       retaining its size and digest guards for source inventories larger than 64 KiB.
+  - >-
+      github_runner - serialize full runner-tree walks within each acquisition round
+      while checking all four process roots.

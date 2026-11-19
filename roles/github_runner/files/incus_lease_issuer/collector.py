@@ -464,7 +464,14 @@ class _HostFiles:
         self.files, self.proof = files, proof
         self.total = sum(item.size for item in files.values())
         self.lock = threading.Lock()
+        self.view_lock = threading.Lock()
         require(self.total <= MAX_HOST_BYTES, "collector-host-file-limit")
+
+    def verify_view(self, root, layout, uid):
+        # Each process has its own root FD. Concurrent walks compete for the
+        # same directory metadata; still verify every process root in full.
+        with self.view_lock:
+            _view_inventory(root, layout, uid)
 
     def file(self, path):
         with self.lock:
@@ -512,7 +519,7 @@ def _closure(pid, snapshot, proof, policy, hosts, layout):
         # root is a deliberate /proc kernel magic-link exception, never a job path.
         root = os.open("root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd)
         try:
-            _view_inventory(root, layout, policy.service.installation.service_uid)
+            shared.verify_view(root, layout, policy.service.installation.service_uid)
             for path in (policy.profile_path, policy.config_path):
                 _same_file(root, path, host(path))
             for item in mapped:

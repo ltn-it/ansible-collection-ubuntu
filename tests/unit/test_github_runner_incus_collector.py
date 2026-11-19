@@ -299,6 +299,34 @@ if __name__ == "__main__":
 
 
 class JoinedClosureAccountingTests(unittest.TestCase):
+    def test_inventory_walks_each_root_without_overlap(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+
+        shared = collector._HostFiles({}, object())
+        ready = threading.Barrier(4, timeout=3)
+        inside = threading.Lock()
+        visited = []
+        layout = object()
+
+        def walk(root, actual_layout, uid):
+            self.assertIs(actual_layout, layout)
+            self.assertEqual(uid, 2101)
+            self.assertTrue(inside.acquire(blocking=False))
+            try:
+                visited.append(root)
+                threading.Event().wait(0.01)
+            finally:
+                inside.release()
+
+        def verify(root):
+            ready.wait()
+            shared.verify_view(root, layout, 2101)
+
+        with patch.object(collector, '_view_inventory', side_effect=walk), ThreadPoolExecutor(4) as pool:
+            list(pool.map(verify, range(4)))
+        self.assertCountEqual(visited, range(4))
+
     def exercise(self, limit=100, failure=False):
         import threading
         from types import SimpleNamespace
