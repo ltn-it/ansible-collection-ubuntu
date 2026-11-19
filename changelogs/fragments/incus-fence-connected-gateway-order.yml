@@ -1,8 +1,24 @@
 ---
 bugfixes:
-  - github_runner - activate the deny-all private namespace links before adding the Incus backend route.
-  - github_runner - inspect independent empty thread descriptor tables during namespace drain while retaining reference and ownership checks.
-  - github_runner - retain typed nsfs namespace mount roots in cleanup inventories while rejecting their use as ordinary filesystem roots.
-  - github_runner - bind cleanup process identity to start ticks across ordinary live scheduling transitions and reacquire complete network reference scans after transient churn within the original time budget.
-  - github_runner - preserve the separately retired original partial preparation and all prior native histories when qualifying an exact subsequent Main transition; unknown effects remain unknown.
-  - github_runner - permit only an explicitly sealed, separately retired original partial-preparation bank during a code-only installation while retaining generic all-closed checks and the original unknown outcome.
+  - >-
+      github_runner - activate the deny-all private namespace links before adding the Incus backend route.
+  - >-
+      github_runner - inspect independent empty thread descriptor tables during namespace drain while retaining
+      reference and ownership checks.
+  - >-
+      github_runner - retain typed nsfs namespace mount roots in cleanup inventories while rejecting their use
+      as ordinary filesystem roots.
+  - >-
+      github_runner - bind cleanup process identity to start ticks across ordinary live scheduling transitions
+      and reacquire complete network reference scans after transient churn within the original time budget.
+  - >-
+      github_runner - preserve the separately retired original partial preparation and all prior native
+      histories when qualifying an exact subsequent Main transition; unknown effects remain unknown.
+  - >-
+      github_runner - permit only an explicitly sealed, separately retired original partial-preparation bank
+      during a code-only installation while retaining generic all-closed checks and the original unknown
+      outcome.
+  - >-
+      github_runner - reacquire complete storage-consumer observations after bounded task or process churn under
+      the original deadline; retain global inventory limits and immediate denial for real references or
+      visibility failures.

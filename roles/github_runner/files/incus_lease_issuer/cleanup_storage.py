@@ -6,25 +6,34 @@ untrusted: traversal uses directory FDs, never follows links or crosses mounts.
 No prefix scan, arbitrary path, mount teardown or destructive retry is exposed.
 The separately bounded public-evidence sibling is deliberately retained.
 """
-from dataclasses import dataclass
-from contextlib import contextmanager
+import ctypes
 import hashlib
 import os
-from pathlib import Path, PurePosixPath
-import stat
-import time
-import ctypes
 import platform
 import re
-import threading
+import stat
 import struct
+import threading
+import time
 import weakref
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from . import (cell_contract, engine_executor, engine_policy as engine, identity,
-               installation, ledger, preparation, signed_context, storage_quota)
+from . import (
+    cell_contract,
+    engine_executor,
+    identity,
+    installation,
+    ledger,
+    preparation,
+    signed_context,
+    storage_quota,
+)
+from . import engine_policy as engine
 from .identity import Denied, require
 
 
@@ -440,8 +449,37 @@ def _same_live_process(before, after):
     return (before[0] == after[0] and before[1] in live and after[1] in live)
 
 
+def _consumer_tasks(leader, maximum, end):
+    tasks = []
+    for task in (leader / "task").iterdir():
+        _deadline(end)
+        require(task.name.isdecimal() and len(tasks) < maximum, "cleanup-consumers-task-bound")
+        tasks.append(task)
+    require(tasks, "cleanup-consumers-task-inventory")
+    return tuple(tasks)
+
+
 def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
                   original_process=None, *, forbidden_namespace=None):
+    """Acquire a whole stable observation; churn never becomes an absence proof."""
+    churn = {"cleanup-consumers-task-inventory-changed", "cleanup-consumers-process-replaced",
+             "cleanup-consumers-observation-race"}
+    for _ in range(8):
+        _deadline(end)
+        try:
+            _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
+                               original_process, forbidden_namespace=forbidden_namespace)
+        except Denied as error:
+            if str(error) not in churn:
+                raise
+        else:
+            _deadline(end)
+            return
+    raise Denied("cleanup-consumers-acquire-unstable")
+
+
+def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
+                       original_process=None, *, forbidden_namespace=None):
     require(forbidden_namespace is None or type(forbidden_namespace) is tuple
             and len(forbidden_namespace) == 2
             and all(type(value) is int and 0 < value < 2**63 for value in forbidden_namespace)
@@ -461,14 +499,6 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
         require(len(suffix) == 2 and len(suffix[1].split()) >= 20, "cleanup-consumers-process-stat")
         fields = suffix[1].split()
         return fields[19], fields[0]
-    def task_inventory(leader, maximum):
-        tasks = []
-        for task in (leader / "task").iterdir():
-            _deadline(end)
-            require(task.name.isdecimal() and len(tasks) < maximum, "cleanup-consumers-task-bound")
-            tasks.append(task)
-        require(tasks, "cleanup-consumers-task-inventory")
-        return tuple(tasks)
     observer = threading.get_native_id()
     count = total_fds = leaders = 0
     namespaces = set()
@@ -484,7 +514,7 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
                 raw = read(leader / "stat", 65536).rsplit(b")", 1)[1].split()
                 require(leader_stamp[0] != str(original_process["start_ticks"]).encode() or raw[0] == b"Z",
                         "cleanup-storage-engine-process-live")
-            tasks = task_inventory(leader, 65536 - count)
+            tasks = _consumer_tasks(leader, 65536 - count, end)
         except (FileNotFoundError, ProcessLookupError):
             require(not leader.exists(), "cleanup-consumers-observation-race")
             continue
@@ -576,7 +606,7 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
             after_leader = stamp(leader)
             require((leader_stamp == after_leader if leader_stamp[1] == b"Z" else
                      _same_live_process(leader_stamp, after_leader))
-                    and {p.name for p in tasks} == {p.name for p in task_inventory(leader, len(tasks))},
+                    and {p.name for p in tasks} == {p.name for p in _consumer_tasks(leader, 65536 - count + len(tasks), end)},
                     "cleanup-consumers-task-inventory-changed")
         except (FileNotFoundError, ProcessLookupError):
             require(not leader.exists(), "cleanup-consumers-observation-race")
@@ -653,7 +683,7 @@ def _consume_reconciliation(proof, store, identifier, effect_id):
 
 def reconcile_postchecks(session, owner, store, config, cleanup):
     """GET-only original-scope resolution, never a repeated delete or timing PASS."""
-    from . import root_session, kernel
+    from . import kernel, root_session
     require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
     record = _fresh(owner, store, config)
     from . import operating_custody
