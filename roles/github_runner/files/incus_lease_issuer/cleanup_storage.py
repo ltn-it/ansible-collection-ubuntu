@@ -368,14 +368,20 @@ def _consumer_mount_rows(raw, end=None):
         fields = line.split()
         require(len(fields) >= 10 and "-" in fields and fields[0].isdecimal()
                 and re.fullmatch(r"[0-9]+:[0-9]+", fields[2]), "cleanup-consumers-mount-shape")
+        separator = fields.index("-")
+        require(separator >= 6 and len(fields) == separator + 4,
+                "cleanup-consumers-mount-shape")
+        major, minor = map(int, fields[2].split(":"))
         paths = []
-        for value in fields[3:5]:
+        for index, value in enumerate(fields[3:5]):
             require(not re.search(r"\\(?!040|011|012|134)", value), "cleanup-consumers-mount-escape")
             value = re.sub(r"\\(040|011|012|134)", lambda m: chr(int(m[1], 8)), value).removesuffix(" (deleted)")
-            require(value.startswith("/") and ".." not in PurePosixPath(value).parts,
-                    "cleanup-consumers-mount-path")
+            namespace_root = (index == 0 and fields[separator + 1] == "nsfs"
+                              and major == 0 and minor > 0
+                              and re.fullmatch(r"(?:net|mnt|uts|ipc|pid|user|cgroup|time):\[[1-9][0-9]*\]", value))
+            require((value.startswith("/") and ".." not in PurePosixPath(value).parts)
+                    or namespace_root, "cleanup-consumers-mount-path")
             paths.append(value)
-        major, minor = map(int, fields[2].split(":"))
         rows.append((int(fields[0]), os.makedev(major, minor), *paths))
     require(len({r[0] for r in rows}) == len(rows), "cleanup-consumers-mount-duplicate")
     return rows
@@ -388,6 +394,7 @@ def _consumer_mount_targets(rows, pinned):
         found = [row for row in rows if row[0] == mount_id and row[1] == device]
         require(len(found) == 1, "cleanup-consumers-original-mount")
         row = found[0]
+        require(row[2].startswith("/"), "cleanup-consumers-original-filesystem-root")
         require(path == row[3] or path.startswith(row[3].rstrip("/") + "/"),
                 "cleanup-consumers-original-path")
         relative = str(PurePosixPath(row[2]) / PurePosixPath(path).relative_to(row[3]))
@@ -422,7 +429,24 @@ def _same_fd_table(tid, observer):
     return result == 0
 
 
-def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, mount_targets, original_process=None):
+def _same_live_process(before, after):
+    """Scheduling state may change; start ticks bind the observed generation.
+
+    Terminal/unknown states require the separate absence path, never a live
+    process witness. PID/TID, complete task and mount-namespace checks remain
+    mandatory at the calling observation boundary.
+    """
+    live = {b"R", b"S", b"D", b"T", b"t", b"I", b"W", b"K", b"P"}
+    return (before[0] == after[0] and before[1] in live and after[1] in live)
+
+
+def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
+                  original_process=None, *, forbidden_namespace=None):
+    require(forbidden_namespace is None or type(forbidden_namespace) is tuple
+            and len(forbidden_namespace) == 2
+            and all(type(value) is int and 0 < value < 2**63 for value in forbidden_namespace)
+            and os.major(forbidden_namespace[0]) == 0 and os.minor(forbidden_namespace[0]) > 0,
+            "cleanup-consumers-forbidden-namespace")
     protected = (data["engine"]["storage_root"], data["engine"]["runroot"],
                  data["output_path"], data["context_path"], descriptor_path)
     allowed = {str(fd): _identity(os.fstat(fd)) for fd in opened if stat.S_ISDIR(os.fstat(fd).st_mode)}
@@ -536,17 +560,22 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
                     require(len(namespaces) <= 4096, "cleanup-consumers-namespace-bound")
                     mountinfo = read(proc / "mountinfo", 4 * 1024**2)
                     rows = _consumer_mount_rows(mountinfo, end)
+                    require(forbidden_namespace is None or not any(
+                        row[1] == forbidden_namespace[0] and row[2] == "net:[" + str(forbidden_namespace[1]) + "]"
+                        for row in rows), "cleanup-consumers-namespace-mount-reference")
                     require(not any(referenced(row[3]) for row in rows), "cleanup-consumers-mount-reference")
                     _consumer_mount_aliases(rows, mount_targets, end)
                 require(not shared or _same_fd_table(int(proc.name), observer),
                         "cleanup-consumers-fd-table-changed")
                 after_ns = (proc / "ns/mnt").stat()
-                require(before == stamp(proc) and namespace == (after_ns.st_dev, after_ns.st_ino),
+                require(_same_live_process(before, stamp(proc)) and namespace == (after_ns.st_dev, after_ns.st_ino),
                         "cleanup-consumers-process-replaced")
             except (FileNotFoundError, ProcessLookupError):
                 require(not proc.exists(), "cleanup-consumers-observation-race")
         try:
-            require(leader_stamp == stamp(leader)
+            after_leader = stamp(leader)
+            require((leader_stamp == after_leader if leader_stamp[1] == b"Z" else
+                     _same_live_process(leader_stamp, after_leader))
                     and {p.name for p in tasks} == {p.name for p in task_inventory(leader, len(tasks))},
                     "cleanup-consumers-task-inventory-changed")
         except (FileNotFoundError, ProcessLookupError):

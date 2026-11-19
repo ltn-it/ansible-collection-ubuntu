@@ -371,15 +371,25 @@ class RootFenceComponentTests(unittest.TestCase):
             popen.assert_not_called()
 
     @contextmanager
-    def kernel_fixture(self, *, fail_on=None):
+    def kernel_fixture(self, *, fail_on=None, require_gateway_up=False):
         """Modeled private+host kernel observations, NOT persistent baseline proof."""
         self.commands, self.nft_calls = [], []
+        up = set()
         info = os.stat(self.path)
         @contextmanager
         def namespace(prepared):
             yield -1, info
         def command(policy, program, argv, *, payload=None):
             self.commands.append((program, tuple(argv), payload))
+            if require_gateway_up:
+                command = argv[2:] if argv[:1] == ["-n"] else argv
+                if command[:2] in (["link", "add"], ["link", "set"], ["address", "add"], ["route", "add"]):
+                    self.assertTrue(self.nft_calls, "deny-all must precede link effects")
+                if command[:2] == ["link", "set"] and command[-1:] == ["up"]:
+                    up.add(command[-2])
+                if command[:2] == ["route", "add"]:
+                    _, host, peer, _ = fence._names(self.prepared)
+                    identity.require({"lo", host, peer} <= up, "modeled-gateway-not-up")
             if fail_on is not None and len(self.commands) == fail_on:
                 raise Denied("synthetic possible kernel effect")
             return b"[]"
@@ -398,6 +408,50 @@ class RootFenceComponentTests(unittest.TestCase):
              mock.patch.object(fence.installation, "_open_directory", side_effect=lambda path:
                  real_open(str(self.root) if path == "/run/netns" else path)):
             yield info
+
+    def test_gateway_is_up_under_deny_all_before_route_and_verified_journal(self):
+        # The independent native kernel fixture reproduces Linux's invalid
+        # gateway denial. This modeled journal test exercises the real create
+        # entry point and refuses the same ordering error before verification.
+        with self.kernel_fixture(require_gateway_up=True):
+            receipt = self.call(fence.create)
+        self.assertEqual(receipt.operation, "fence-create")
+        effects = [e for e in self.effects() if e["operation"] == "fence-create"]
+        self.assertEqual(len(effects), 1)
+        self.assertEqual(effects[0]["state"], "verified")
+        self.assertEqual(len(self.nft_calls), 1)
+        self.assertEqual(self.nft_calls[0][1], ledger.canonical(fence._rules(self.policy, self.prepared)))
+        routes = [argv for _, argv, _ in self.commands if "route" in argv and "add" in argv]
+        self.assertEqual(len(routes), 1)
+
+    def test_route_reply_failure_stays_unknown_without_binding_cleanup_or_replay(self):
+        with self.kernel_fixture(require_gateway_up=True):
+            command = fence._run.side_effect
+            def route_reply_lost(policy, program, argv, **kwargs):
+                result = command(policy, program, argv, **kwargs)
+                if "route" in argv and "add" in argv:
+                    raise Denied("modeled lost route response")
+                return result
+            fence._run.side_effect = route_reply_lost
+            with self.assertRaisesRegex(fence.FenceUnknown, "^fence-effect-unknown$"):
+                self.call(fence.create)
+            host_fence.bind_creator.assert_not_called()
+            self.assertEqual(self.effects()[-1]["state"], "unknown")
+            mutations = sum("add" in argv for _, argv, _ in self.commands)
+            with self.assertRaises(Denied):
+                self.call(fence.create)
+            self.assertEqual(sum("add" in argv for _, argv, _ in self.commands), mutations)
+            self.assertFalse(any("delete" in argv or "del" in argv for _, argv, _ in self.commands))
+
+    def test_post_route_link_readback_failure_never_verifies_or_binds_creator(self):
+        with self.kernel_fixture(require_gateway_up=True), \
+             mock.patch.object(fence, "_links", side_effect=Denied("modeled post-route drift")):
+            with self.assertRaisesRegex(fence.FenceUnknown, "^fence-effect-unknown$"):
+                self.call(fence.create)
+            host_fence.bind_creator.assert_not_called()
+        self.assertEqual(self.effects()[-1]["state"], "unknown")
+        self.assertTrue(any("route" in argv and "add" in argv for _, argv, _ in self.commands))
+        self.assertFalse(any("delete" in argv or "del" in argv for _, argv, _ in self.commands))
 
     def test_actual_prepared_cell_create_journals_before_mutation_and_starts_denied(self):
         with self.kernel_fixture() as info:
