@@ -88,6 +88,8 @@ github_runner_runtime_v2_module_sha256: {}
 github_runner_runtime_v2_client_sha256: {}
 # Exact nonsecret Root-observed terminal failures; empty keeps strict inactive/dead guards.
 github_runner_runtime_v2_terminal_history: {}
+# Optional sealed complete retirement proof for a code-only migration; never an active lease exception.
+github_runner_runtime_v2_retired_preparation: {}
 github_runner_runtime_v2_operating_install: false
 github_runner_runtime_v2_watchdog_configuration_path: ""
 github_runner_runtime_v2_watchdog_configuration_sha256: ""

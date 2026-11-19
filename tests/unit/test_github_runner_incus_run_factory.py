@@ -15,6 +15,7 @@ import socket
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -150,6 +151,65 @@ class RootBootstrapTests(unittest.TestCase):
         self.assertNotIn(token, repr(proof))
         with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
             with store._transaction() as state: self.assertEqual(state["leases"], {})
+
+    def test_invalid_workflow_cannot_trigger_final_job_read(self):
+        challenge = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector)
+        self.native.claims["aud"] = challenge["audience"]
+        selected = factory.derive_selection(self.bootstrap, self.selector, self.native.claims["sha"])
+        reader = identity.HTTPSReader()
+        original = reader.read
+        job_reads = []
+
+        def invalid_workflow(url, **kwargs):
+            if "/actions/jobs/" in url:
+                job_reads.append(url)
+            if "/contents/" in url:
+                return b'{}'
+            return original(url, **kwargs)
+
+        with mock.patch.object(reader, "read", side_effect=invalid_workflow):
+            with self.assertRaisesRegex(Denied, "bootstrap-workflow-file"):
+                factory._native(self.server, selected, challenge["nonce"], self.native.token(), "synthetic-job-token")
+        self.assertEqual(len(job_reads), 1)
+        collector.discard_worker_acquisition.assert_called_once()
+        collector.finish_worker_acquisition.assert_not_called()
+
+    def test_immutable_commit_read_joins_on_failed_origin_before_validation(self):
+        challenge = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector)
+        self.native.claims["aud"] = challenge["audience"]
+        selected = factory.derive_selection(self.bootstrap, self.selector, self.native.claims["sha"])
+        successor = {"source_sha": selected.identity.caller_sha, "run_id": self.native.run["id"],
+                     "reusable_sha": selected.identity.reusable_sha}
+        qualification = ({"schema": 9, "successor": successor, "qualification": {"sha256": "a" * 64}}, {}, None, (1,))
+        read_started = threading.Event()
+        origin_checked = threading.Event()
+        read_finished = threading.Event()
+        reader = identity.HTTPSReader()
+        read = reader.read
+
+        def read_commit(url, **kwargs):
+            if "/git/commits/" in url:
+                read_started.set()
+                self.assertTrue(origin_checked.wait(timeout=5))
+                read_finished.set()
+            return read(url, **kwargs)
+
+        def fail_origin(*args):
+            self.assertTrue(read_started.wait(timeout=5))
+            origin_checked.set()
+            raise Denied("origin-drift")
+
+        with mock.patch.object(reader, "read", side_effect=read_commit), \
+             mock.patch.object(factory, "_continuation_receipt", return_value=qualification), \
+             mock.patch.object(factory, "_continuation_origin_absent", side_effect=fail_origin), \
+             mock.patch.object(factory.operating_cells, "validate_continuation_commit") as validate:
+            with self.assertRaisesRegex(Denied, "origin-drift"):
+                factory._native(self.server, selected, challenge["nonce"], self.native.token(),
+                                "synthetic-job-token", check_origin=False)
+        self.assertTrue(read_finished.is_set())
+        validate.assert_not_called()
+        collector.finish_worker_acquisition.assert_not_called()
+        collector.discard_worker_acquisition.assert_called_once()
 
     def test_unverified_sha_locator_or_forged_dataclass_is_not_authority(self):
         selected = factory.derive_selection(self.bootstrap, self.selector, "9" * 40)

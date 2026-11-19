@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import ctypes
 import datetime as dt
+import errno
 import fcntl
 import ipaddress
 import os
@@ -576,11 +577,14 @@ def create(root_policy_path, expected_sha256, prepared, store, worker, root_conf
             _run(policy, IP, ["-n", namespace, "link", "set", "dev", peer, "addrgenmode", "none"])
             _run(policy, IP, ["address", "add", policy.host, "broadcast", "+", "dev", host])
             _run(policy, IP, ["-n", namespace, "address", "add", policy.peer, "broadcast", "+", "dev", peer])
-            _run(policy, IP, ["-n", namespace, "route", "add", policy.backend + "/32", "via",
-                              str(ipaddress.IPv4Interface(policy.host).ip), "dev", peer])
+            # Establish the connected gateway route while the namespace still
+            # has its empty admission set and deny-all rules. Linux rejects the
+            # backend route while the peer link is DOWN.
             _run(policy, IP, ["-n", namespace, "link", "set", "lo", "up"])
             _run(policy, IP, ["-n", namespace, "link", "set", peer, "up"])
             _run(policy, IP, ["link", "set", host, "up"])
+            _run(policy, IP, ["-n", namespace, "route", "add", policy.backend + "/32", "via",
+                              str(ipaddress.IPv4Interface(policy.host).ip), "dev", peer])
             left, right = _links(policy, prepared)
             handle, expires, _, deadline = _rules_readback(policy, prepared, expected_deadline=0)
             require(expires == 0 and deadline == 0, "fence-create-not-denied")
@@ -892,7 +896,12 @@ def _fd_table(fd, deadline):
 
 def _borrow_socket(pid, pidfd, number):
     if pid == os.getpid():
-        return os.dup(number)
+        try:
+            return os.dup(number)
+        except OSError as error:
+            if error.errno == errno.EBADF:
+                raise Denied("fence-proc-fds-changed") from error
+            raise
     require(platform.machine() in {"x86_64", "aarch64"}, "fence-pidfd-unsupported")
     # pidfd_getfd(2), syscall438 on these Linux ABIs. It duplicates, never
     # changes/closes the target's descriptor; PTRACE_REALCREDS permission needed.
@@ -902,7 +911,53 @@ def _borrow_socket(pid, pidfd, number):
     return value
 
 
+def _thread_file_table_drained(task, tid, pid, deadline):
+    """Observe sharing atomically; independent tables must be stably empty.
+
+    Sequential FD snapshots do not establish CLONE_FILES sharing. A distinct
+    empty table contains no namespace/socket references, but a nonempty one
+    cannot be borrowed through the leader pidfd and remains a hold.
+    """
+    from .cleanup_storage import _same_fd_table
+    shared = _same_fd_table(tid, pid)
+    require(type(shared) is bool, "fence-thread-file-table-observation")
+    if not shared:
+        descriptors = os.open("fd", engine.DIR, dir_fd=task)
+        try:
+            require(_fd_table(descriptors, deadline) == {}, "fence-thread-private-fds-live")
+            require(_fd_table(descriptors, deadline) == {}, "fence-thread-private-fds-live")
+        finally:
+            os.close(descriptors)
+    again = _same_fd_table(tid, pid)
+    require(type(again) is bool and again == shared, "fence-thread-fd-table-changed")
+
+
+def _require_drained_socket(borrowed, observed, cookie):
+    current = os.fstat(borrowed)
+    require((current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode)) == observed,
+            "fence-proc-fds-changed")
+    require(_socket_cookie(borrowed) != cookie, "fence-namespace-socket-live")
+
+
 def _namespace_refs_drained(witness_fd, info, cookie):
+    """Reacquire whole observations after churn within one original budget."""
+    deadline = time.monotonic() + 10
+    transient = {"fence-proc-fds-changed", "fence-proc-changed", "fence-proc-task-changed"}
+    for _ in range(8):
+        require(time.monotonic() < deadline, "fence-proc-bounds")
+        try:
+            _namespace_refs_drained_once(witness_fd, info, cookie, deadline)
+            require(time.monotonic() < deadline, "fence-proc-bounds")
+            return
+        except (FileNotFoundError, ProcessLookupError):
+            pass  # Discard every partial observation; all FDs close in finally.
+        except Denied as error:
+            if str(error) not in transient:
+                raise
+    raise KernelHold("fence-proc-acquire-unstable")
+
+
+def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
     """Bounded current proc references under the qualified private-EE boundary.
 
     No global refcount/anti-Root attestation: queued SCM_RIGHTS or io_uring
@@ -910,7 +965,7 @@ def _namespace_refs_drained(witness_fd, info, cookie):
     UID/AppArmor/IPC isolation must prevent such untrusted outside retention.
     Unknown proc/ptrace/cookie/thread-FD observations HOLD, never assume absence.
     """
-    deadline, target, count = time.monotonic() + 10, (info.st_dev, info.st_ino), 0
+    target, count = (info.st_dev, info.st_ino), 0
     proc = os.open("/proc", engine.DIR)
     try:
         with os.scandir(proc) as processes:
@@ -939,9 +994,7 @@ def _namespace_refs_drained(witness_fd, info, cookie):
                             namespace = os.stat("ns/net", dir_fd=task)
                             require((namespace.st_dev, namespace.st_ino) != target, "fence-namespace-task-live")
                             if int(tid) != pid:
-                                thread_fds = os.open("fd", engine.DIR, dir_fd=task)
-                                require(_fd_table(thread_fds, deadline) == original, "fence-thread-fd-divergence")
-                                require(_fd_table(thread_fds, deadline) == original, "fence-thread-fd-divergence")
+                                _thread_file_table_drained(task, int(tid), pid, deadline)
                             task_after = _process_stat(task, int(tid))
                             require((task_before.pid, task_before.start_ticks) == (task_after.pid, task_after.start_ticks),
                                     "fence-proc-task-changed")
@@ -955,9 +1008,7 @@ def _namespace_refs_drained(witness_fd, info, cookie):
                         if observed[2] == stat.S_IFSOCK:
                             borrowed = _borrow_socket(pid, pidfd, number)
                             try:
-                                current = os.fstat(borrowed)
-                                require((current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode)) == observed
-                                        and _socket_cookie(borrowed) != cookie, "fence-namespace-socket-live")
+                                _require_drained_socket(borrowed, observed, cookie)
                             finally:
                                 os.close(borrowed)
                     after = _process_stat(process, pid)

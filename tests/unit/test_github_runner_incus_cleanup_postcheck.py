@@ -218,6 +218,24 @@ class CleanupPostcheckTests(unittest.TestCase):
             with self.assertRaises(Denied):
                 reopened.require_cleanup_postchecks(lease)
 
+    def test_sibling_maps_parse_rechecks_identities_paths_deadline_and_changed_bytes(self):
+        end = time.monotonic() + 10
+        mapping = b"1000-1100 r--p 0 08:01 42 /fixture"
+        different = mapping.replace(b"42", b"43")
+        forbidden = {(os.makedev(8, 1), 42)}
+        parsed = storage._check_task_maps(mapping, (), set(), end, None)
+        self.assertIs(storage._check_task_maps(bytes(bytearray(mapping)), (), set(), end, parsed), parsed)
+        with self.assertRaisesRegex(Denied, "cleanup-consumers-mapped-reference"):
+            storage._check_task_maps(mapping, (), forbidden, end, parsed)
+        with self.assertRaisesRegex(Denied, "cleanup-consumers-mapped-reference"):
+            storage._check_task_maps(mapping, (b"/fixture",), set(), end, parsed)
+        with self.assertRaisesRegex(Denied, "cleanup-storage-budget"):
+            storage._check_task_maps(mapping, (), set(), time.monotonic() - 1, parsed)
+        self.assertEqual(storage._check_task_maps(different, (), forbidden, end, parsed)[0], different)
+        with self.assertRaisesRegex(Denied, "cleanup-consumers-maps-shape"):
+            storage._check_task_maps(mapping + b"\nbad", (), set(), end, parsed)
+        self.assertIsNone(storage._check_task_maps(mapping + b"x" * (128 * 1024), (), set(), end, parsed))
+
     def test_unreaped_terminal_task_requires_real_empty_resources_and_keeps_task_scan(self):
         root = self.fixture.path
         data = {"engine": {"storage_root": str(root / "graph"), "runroot": str(root / "run")},

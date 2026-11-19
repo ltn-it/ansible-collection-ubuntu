@@ -602,6 +602,26 @@ requires actual job authentication and a second fresh native authorization befor
 lease creation; installation cannot manufacture those proofs.
 
 The installer normally requires every runtime instance to be inactive/dead.
+`github_runner_runtime_v2_retired_preparation` defaults to an empty mapping.
+An explicitly commissioned code-only migration may supply a Root-private
+`path`/`sha256` reference to a complete separately retired partial-preparation
+qualification. The installer pins the complete canonical qualification, including the
+preceding history and native provider graph. The ordinary preflight still requires every lease to be closed.
+The opt-in path requires the exact unchanged bootstrap and sole original
+prepared record, bank identity and full state hash, seven verified preparation
+effects plus one preserved unknown fence effect, the completed four-hour
+retention, and all original retirement journals. It never resolves the unknown,
+creates a lease, admits an operating job, or permits an active VM. The trusted
+cold controller must independently re-collect complete history and resource
+absence before and after installation and preserve the original bank bytes.
+For the ninth retirement, a separate later census accounted for every allocated
+inode on the private ext4 volume. Its only two regular files were authenticated
+journals predating that run. Each subsequent check binds this evidence to the
+original boot, protected quota policy, backing file, filesystem UUID and
+non-reusable mount ID. A changed mount requires a new assessment.
+Clear the migration reference for a later configuration with a different bank;
+a stale reference fails closed.
+
 `github_runner_runtime_v2_terminal_history` optionally supplies an explicit,
 nonsecret Root-observed snapshot of preserved terminal failures during cold
 maintenance. It defaults to `{}` and never discovers, adopts or resets failures.

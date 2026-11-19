@@ -212,9 +212,7 @@ def _terminal(operation, lease_id, record, exported=None):
 
 def _receipt(registry, selector, store, lease_id):
     selected = registry.select(selector)
-    _, raw, _ = installation._file(selected.cell_config_path, 65536, private=True, keep=True)
-    require(hashlib.sha256(raw).hexdigest() == selected.cell_sha256, "runtime-cell-drift")
-    cell = identity.decode_json(raw)
+    cell, _, _ = cell_contract._sealed(selected.cell_config_path, selected.cell_sha256)
     context = cell["engine"]["paths"]["context"] + "/" + lease_id
     raw, proof = signed_context._sealed(context + "/binding.json", 32768)
     binding = identity.decode_json(raw)

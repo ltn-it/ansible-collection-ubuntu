@@ -17,6 +17,8 @@ import time
 import unittest
 from unittest import mock
 
+from test_github_runner_incus_ledger import validated_fixture_parent
+
 import test_github_runner_incus_refresh as fixtures
 import test_github_runner_incus_admission as admission_fixtures
 
@@ -321,6 +323,57 @@ class RootPublicCaptureStreamTests(unittest.TestCase):
             with self.assertRaises(Denied):
                 runtime_rpc._stream(None, self.fixture.lease, self.exported)
         self.assertEqual([row["type"] for row in attempted], ["capture-manifest"])
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
+class RootReceiptCellReaderTests(unittest.TestCase):
+    """Actual Root file/hash/size checks; binding remains an untrusted locator."""
+    def setUp(self):
+        import base64
+        import tempfile
+        from types import SimpleNamespace
+        self.temp = tempfile.TemporaryDirectory(dir=validated_fixture_parent(Path("/run/proof"), private=True))
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        context = self.root / "context"
+        context.mkdir(mode=0o700)
+        self.lease = "1" * 32
+        lease_context = context / self.lease
+        lease_context.mkdir(mode=0o700)
+        claims = base64.urlsafe_b64encode(ledger.canonical({"engine_policy_sha256": "a" * 64})).decode().rstrip("=")
+        binding = lease_context / "binding.json"
+        binding.write_bytes(ledger.canonical({"admission": "e30." + claims + ".untrusted-locator"}))
+        binding.chmod(0o600)
+        self.binding_sha = hashlib.sha256(binding.read_bytes()).hexdigest()
+        self.cell = self.root / "cell.json"
+        self.raw = ledger.canonical({"engine": {"paths": {"context": str(context)}}}) + b" " * 70000
+        self.selected = SimpleNamespace(cell_config_path=str(self.cell), cell_sha256=None)
+        self.registry = SimpleNamespace(select=lambda selector: self.selected)
+        self.store = SimpleNamespace(read=lambda lease: {"expires_at": 123456})
+        self.seal(self.raw)
+
+    def seal(self, raw):
+        self.cell.write_bytes(raw)
+        self.cell.chmod(0o600)
+        self.selected.cell_sha256 = hashlib.sha256(raw).hexdigest()
+
+    def test_receipt_reader_accepts_sealed_cell_above_legacy_64k(self):
+        self.assertGreater(len(self.raw), 65536)
+        receipt = runtime_rpc._receipt(self.registry, "fixture", self.store, self.lease)
+        self.assertEqual(receipt.cell_sha256, self.selected.cell_sha256)
+        self.assertEqual(receipt.engine_policy_sha256, "a" * 64)
+        self.assertEqual(receipt.binding_sha256, self.binding_sha)
+
+    def test_large_cell_hash_drift_still_denies_before_binding(self):
+        self.cell.write_bytes(self.raw + b" ")
+        with self.assertRaisesRegex(Denied, "cell-bytes-drift"):
+            runtime_rpc._receipt(self.registry, "fixture", self.store, self.lease)
+
+    def test_cell_contract_maximum_is_not_relaxed(self):
+        from incus_lease_issuer import cell_contract
+        self.seal(self.raw + b" " * (cell_contract.MAX_CELL + 1 - len(self.raw)))
+        with self.assertRaisesRegex(Denied, "installation-file-limit"):
+            runtime_rpc._receipt(self.registry, "fixture", self.store, self.lease)
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")

@@ -5,8 +5,8 @@ These tests establish no live token, API latency, issuer or Incus authority.
 """
 import copy
 import inspect
-import json
 import ssl
+import threading
 import unittest
 from unittest import mock
 import urllib.error
@@ -24,23 +24,33 @@ FAKE_ACCESS_TOKEN = "synthetic-transport-only-token"
 
 
 class ScriptedReader:
-    """Accept only the expected fixed sequence, including bearer placement."""
-
+    """Fixed phases; only independent requests within one phase may reorder."""
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = []
+        self.lock = threading.Lock()
+        self.phases = [list(self.replies[:1]), list(self.replies[1:3])]
+        self.phases.extend([[row] for row in self.replies[3:-3]])
+        self.phases.extend((list(self.replies[-3:-1]), list(self.replies[-1:])))
 
     def read(self, url, *, bearer=None):
-        self.calls.append((url, bearer))
-        if not self.replies:
-            raise AssertionError("unexpected read")
-        wanted_url, payload = self.replies.pop(0)
-        if url != wanted_url:
-            raise AssertionError("wrong fixed route")
-        wanted_bearer = None if url == identity.JWKS_URL else FAKE_ACCESS_TOKEN
-        if bearer != wanted_bearer:
-            raise AssertionError("credential crossed origin boundary")
-        return payload if isinstance(payload, bytes) else fixtures.json_bytes(payload)
+        with self.lock:
+            self.calls.append((url, bearer))
+            while self.phases and not self.phases[0]:
+                self.phases.pop(0)
+            if not self.phases:
+                raise AssertionError("unexpected read")
+            matches = [row for row in self.phases[0] if row[0] == url]
+            if len(matches) != 1:
+                raise AssertionError("wrong fixed route phase")
+            row = matches[0]
+            self.phases[0].remove(row)
+            self.replies.remove(row)
+            payload = row[1]
+            wanted_bearer = None if url == identity.JWKS_URL else FAKE_ACCESS_TOKEN
+            if bearer != wanted_bearer:
+                raise AssertionError("credential crossed origin boundary")
+            return payload if isinstance(payload, bytes) else fixtures.json_bytes(payload)
 
 
 class GithubAssignmentTransportTests(unittest.TestCase):
@@ -90,8 +100,9 @@ class GithubAssignmentTransportTests(unittest.TestCase):
         self.assertEqual((result.run_id, result.check_run_id, result.job_id), (501, 731, 902))
         self.assertFalse(reader.replies)
         self.assertEqual(reader.calls[0], (identity.JWKS_URL, None))
-        self.assertEqual([url for url, _ in reader.calls],
-                         [identity.JWKS_URL, RUN_URL, PAGE_URL + "1", JOB_URL, RUN_URL, BRANCH_URL])
+        self.assertEqual([url for url, _ in reader.calls[:1]], [identity.JWKS_URL])
+        self.assertCountEqual([url for url, _ in reader.calls[1:3]], [RUN_URL, PAGE_URL + "1"])
+        self.assertCountEqual([url for url, _ in reader.calls[3:]], [JOB_URL, RUN_URL, BRANCH_URL])
         self.assertTrue(all(bearer == FAKE_ACCESS_TOKEN for _, bearer in reader.calls[1:]))
 
     def paginated_rows(self):
@@ -280,3 +291,145 @@ class HTTPSReaderBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JoinedNativeIdentityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        fixtures.CurrentJobIdentityTests.setUpClass()
+
+    def setUp(self):
+        self.subject = GithubAssignmentTransportTests()
+        self.subject.setUp()
+
+    def reader(self, fail=False):
+        class JoinedReader(ScriptedReader):
+            def __init__(inner):
+                super().__init__(self.subject.replies())
+                inner.pre = threading.Barrier(2, timeout=2)
+                inner.post = threading.Barrier(2, timeout=2)
+                inner.count_lock = threading.Lock()
+                inner.run_reads = inner.active = inner.maximum = 0
+                inner.finished = []
+            def read(inner, url, *, bearer=None):
+                if url == identity.JWKS_URL:
+                    return super().read(url, bearer=bearer)
+                with inner.count_lock:
+                    if url == RUN_URL:
+                        inner.run_reads += 1
+                    first_run = url == RUN_URL and inner.run_reads == 1
+                    group = inner.pre if first_run or url == PAGE_URL + '1' else inner.post
+                    inner.active += 1
+                    inner.maximum = max(inner.maximum, inner.active)
+                try:
+                    if url != BRANCH_URL:
+                        group.wait()
+                    if fail and url == BRANCH_URL:
+                        raise ValueError('modeled-readback-failure')
+                    return super().read(url, bearer=bearer)
+                finally:
+                    with inner.count_lock:
+                        inner.active -= 1
+                        inner.finished.append(url)
+        return JoinedReader()
+
+    def test_two_independent_pairs_join_before_final_branch_read(self):
+        reader = self.reader()
+        result = self.subject.verify(reader)
+        self.assertEqual(result.job_id, 902)
+        self.assertEqual(reader.maximum, 2)
+        self.assertEqual(reader.finished[-1], BRANCH_URL)
+        self.assertEqual(reader.active, 0)
+        self.assertEqual(len(reader.finished), 5)
+        self.assertFalse(reader.replies)
+
+    def test_workflow_read_starts_only_after_initial_assignment_is_valid(self):
+        subject = self.subject
+        jobs = [{"total_count": 0, "jobs": []}]
+        reader = ScriptedReader(subject.replies(pages=jobs))
+        with self.assertRaises(identity.Denied):
+            identity.verify_github_workflow_assignment(subject.fixture.token(), subject.fixture.policy,
+                audience=fixtures.AUDIENCE, peer_uid=2101, access_token=FAKE_ACCESS_TOKEN,
+                reader=reader, clock=lambda: fixtures.NOW)
+        self.assertCountEqual([url for url, _ in reader.calls], [identity.JWKS_URL, RUN_URL, PAGE_URL + "1"])
+
+    def test_only_commit_workflow_overlaps_validated_assignment_refresh(self):
+        workflow_url = PREFIX + "/contents/.github/workflows/collection-ci.yml?ref=" + fixtures.CALLER_SHA
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted):
+                rendezvous = threading.Barrier(2, timeout=5)
+                finished = threading.Event()
+                class Reader(ScriptedReader):
+                    def read(inner, url, *, bearer=None):
+                        if url == workflow_url:
+                            rendezvous.wait()
+                            finished.set()
+                            return b'{"type":"file"}'
+                        if url == JOB_URL:
+                            rendezvous.wait()
+                        return super().read(url, bearer=bearer)
+                reader = Reader(self.subject.replies(branch={"protected": accepted, "commit": {"sha": fixtures.CALLER_SHA}}))
+                def verify():
+                    return identity.verify_github_workflow_assignment(
+                        self.subject.fixture.token(), self.subject.fixture.policy, audience=fixtures.AUDIENCE,
+                        peer_uid=2101, access_token=FAKE_ACCESS_TOKEN, reader=reader, clock=lambda: fixtures.NOW)
+                if accepted:
+                    who, workflow = verify()
+                    self.assertEqual((who.job_id, workflow), (902, {"type": "file"}))
+                else:
+                    with self.assertRaisesRegex(identity.Denied, "current-protected-main"):
+                        verify()
+                self.assertTrue(finished.is_set())
+                self.assertFalse(reader.replies)
+                self.assertEqual(reader.calls[-1][0], BRANCH_URL)
+
+    def test_failed_branch_waits_for_workflow_and_keeps_its_error(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from unittest.mock import patch
+        workflow_started, branch_denied, release = (threading.Event() for _ in range(3))
+        require = identity.require
+
+        def observe_denial(condition, reason):
+            if not condition and reason == "current-protected-main":
+                branch_denied.set()
+            return require(condition, reason)
+
+        class Reader(ScriptedReader):
+            def read(inner, url, *, bearer=None):
+                if "/contents/" in url:
+                    workflow_started.set()
+                    release.wait(timeout=5)
+                    raise ValueError("workflow-read-failed")
+                return super().read(url, bearer=bearer)
+
+        reader = Reader(self.subject.replies(branch={"protected": False}))
+        with patch.object(identity, "require", side_effect=observe_denial), ThreadPoolExecutor(max_workers=1) as pool:
+            verification = pool.submit(identity.verify_github_workflow_assignment,
+                self.subject.fixture.token(), self.subject.fixture.policy, audience=fixtures.AUDIENCE,
+                peer_uid=2101, access_token=FAKE_ACCESS_TOKEN, reader=reader, clock=lambda: fixtures.NOW)
+            try:
+                self.assertTrue(workflow_started.wait(timeout=3))
+                self.assertTrue(branch_denied.wait(timeout=3))
+                self.assertFalse(verification.done())
+            finally:
+                release.set()
+            with self.assertRaisesRegex(identity.Denied, "current-protected-main"):
+                verification.result(timeout=3)
+
+    def test_tip_advance_during_final_job_read_is_observed(self):
+        subject = self.subject
+        class AdvancingReader(ScriptedReader):
+            def read(inner, url, *, bearer=None):
+                response = super().read(url, bearer=bearer)
+                if url == JOB_URL:
+                    subject.branch["commit"]["sha"] = "f" * 40
+                return response
+        with self.assertRaisesRegex(identity.Denied, "current-protected-main"):
+            subject.verify(AdvancingReader(subject.replies()))
+
+    def test_read_failure_joins_all_other_readbacks_without_a_proof(self):
+        reader = self.reader(fail=True)
+        with self.assertRaisesRegex(ValueError, 'modeled-readback-failure'):
+            self.subject.verify(reader)
+        self.assertEqual(reader.active, 0)
+        self.assertEqual(len(reader.finished), 5)
