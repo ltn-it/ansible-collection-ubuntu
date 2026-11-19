@@ -155,3 +155,32 @@ class StorageConsumerChurnTests(unittest.TestCase):
             (leader / 'task/unclassified').mkdir()
             with self.assertRaisesRegex(Denied, 'cleanup-consumers-task-bound'):
                 cleanup_storage._consumer_tasks(leader, 65536, time.monotonic() + 10)
+
+
+class BorrowedSocketIdentityTests(unittest.TestCase):
+    def test_reused_real_fd_slot_is_churn_without_claiming_target_cookie(self):
+        import os
+        import socket
+        import stat
+        left, right = socket.socketpair()
+        self.addCleanup(left.close); self.addCleanup(right.close)
+        observed = os.fstat(left.fileno())
+        expected = observed.st_dev, observed.st_ino, stat.S_IFMT(observed.st_mode)
+        with mock.patch.object(network_fence, '_socket_cookie') as cookie:
+            with self.assertRaisesRegex(Denied, 'fence-proc-fds-changed'):
+                network_fence._require_drained_socket(right.fileno(), expected, 25882)
+            cookie.assert_not_called()
+
+    def test_same_fd_with_forbidden_cookie_is_an_immediate_live_reference(self):
+        import os
+        import socket
+        import stat
+        left, right = socket.socketpair()
+        self.addCleanup(left.close); self.addCleanup(right.close)
+        row = os.fstat(left.fileno())
+        expected = row.st_dev, row.st_ino, stat.S_IFMT(row.st_mode)
+        with mock.patch.object(network_fence, '_socket_cookie', return_value=25882):
+            with self.assertRaisesRegex(Denied, 'fence-namespace-socket-live'):
+                network_fence._require_drained_socket(left.fileno(), expected, 25882)
+        with mock.patch.object(network_fence, '_socket_cookie', return_value=25883):
+            self.assertIsNone(network_fence._require_drained_socket(left.fileno(), expected, 25882))

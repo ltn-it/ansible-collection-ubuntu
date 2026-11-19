@@ -5,8 +5,8 @@ These tests establish no live token, API latency, issuer or Incus authority.
 """
 import copy
 import inspect
-import json
 import ssl
+import threading
 import unittest
 from unittest import mock
 import urllib.error
@@ -24,23 +24,33 @@ FAKE_ACCESS_TOKEN = "synthetic-transport-only-token"
 
 
 class ScriptedReader:
-    """Accept only the expected fixed sequence, including bearer placement."""
-
+    """Fixed phases; only independent requests within one phase may reorder."""
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = []
+        self.lock = threading.Lock()
+        self.phases = [list(self.replies[:1]), list(self.replies[1:3])]
+        self.phases.extend([[row] for row in self.replies[3:-3]])
+        self.phases.append(list(self.replies[-3:]))
 
     def read(self, url, *, bearer=None):
-        self.calls.append((url, bearer))
-        if not self.replies:
-            raise AssertionError("unexpected read")
-        wanted_url, payload = self.replies.pop(0)
-        if url != wanted_url:
-            raise AssertionError("wrong fixed route")
-        wanted_bearer = None if url == identity.JWKS_URL else FAKE_ACCESS_TOKEN
-        if bearer != wanted_bearer:
-            raise AssertionError("credential crossed origin boundary")
-        return payload if isinstance(payload, bytes) else fixtures.json_bytes(payload)
+        with self.lock:
+            self.calls.append((url, bearer))
+            while self.phases and not self.phases[0]:
+                self.phases.pop(0)
+            if not self.phases:
+                raise AssertionError("unexpected read")
+            matches = [row for row in self.phases[0] if row[0] == url]
+            if len(matches) != 1:
+                raise AssertionError("wrong fixed route phase")
+            row = matches[0]
+            self.phases[0].remove(row)
+            self.replies.remove(row)
+            payload = row[1]
+            wanted_bearer = None if url == identity.JWKS_URL else FAKE_ACCESS_TOKEN
+            if bearer != wanted_bearer:
+                raise AssertionError("credential crossed origin boundary")
+            return payload if isinstance(payload, bytes) else fixtures.json_bytes(payload)
 
 
 class GithubAssignmentTransportTests(unittest.TestCase):
@@ -90,8 +100,9 @@ class GithubAssignmentTransportTests(unittest.TestCase):
         self.assertEqual((result.run_id, result.check_run_id, result.job_id), (501, 731, 902))
         self.assertFalse(reader.replies)
         self.assertEqual(reader.calls[0], (identity.JWKS_URL, None))
-        self.assertEqual([url for url, _ in reader.calls],
-                         [identity.JWKS_URL, RUN_URL, PAGE_URL + "1", JOB_URL, RUN_URL, BRANCH_URL])
+        self.assertEqual([url for url, _ in reader.calls[:1]], [identity.JWKS_URL])
+        self.assertCountEqual([url for url, _ in reader.calls[1:3]], [RUN_URL, PAGE_URL + "1"])
+        self.assertCountEqual([url for url, _ in reader.calls[3:]], [JOB_URL, RUN_URL, BRANCH_URL])
         self.assertTrue(all(bearer == FAKE_ACCESS_TOKEN for _, bearer in reader.calls[1:]))
 
     def paginated_rows(self):
@@ -280,3 +291,59 @@ class HTTPSReaderBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JoinedNativeIdentityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        fixtures.CurrentJobIdentityTests.setUpClass()
+
+    def setUp(self):
+        self.subject = GithubAssignmentTransportTests()
+        self.subject.setUp()
+
+    def reader(self, fail=False):
+        class JoinedReader(ScriptedReader):
+            def __init__(inner):
+                super().__init__(self.subject.replies())
+                inner.pre = threading.Barrier(2, timeout=2)
+                inner.post = threading.Barrier(3, timeout=2)
+                inner.count_lock = threading.Lock()
+                inner.run_reads = inner.active = inner.maximum = 0
+                inner.finished = []
+            def read(inner, url, *, bearer=None):
+                if url == identity.JWKS_URL:
+                    return super().read(url, bearer=bearer)
+                with inner.count_lock:
+                    if url == RUN_URL:
+                        inner.run_reads += 1
+                    first_run = url == RUN_URL and inner.run_reads == 1
+                    group = inner.pre if first_run or url == PAGE_URL + '1' else inner.post
+                    inner.active += 1
+                    inner.maximum = max(inner.maximum, inner.active)
+                try:
+                    group.wait()
+                    if fail and url == BRANCH_URL:
+                        raise ValueError('modeled-readback-failure')
+                    return super().read(url, bearer=bearer)
+                finally:
+                    with inner.count_lock:
+                        inner.active -= 1
+                        inner.finished.append(url)
+        return JoinedReader()
+
+    def test_two_then_three_real_read_phases_overlap_and_join(self):
+        reader = self.reader()
+        result = self.subject.verify(reader)
+        self.assertEqual(result.job_id, 902)
+        self.assertEqual(reader.maximum, 3)
+        self.assertEqual(reader.active, 0)
+        self.assertEqual(len(reader.finished), 5)
+        self.assertFalse(reader.replies)
+
+    def test_read_failure_joins_all_other_readbacks_without_a_proof(self):
+        reader = self.reader(fail=True)
+        with self.assertRaisesRegex(ValueError, 'modeled-readback-failure'):
+            self.subject.verify(reader)
+        self.assertEqual(reader.active, 0)
+        self.assertEqual(len(reader.finished), 5)

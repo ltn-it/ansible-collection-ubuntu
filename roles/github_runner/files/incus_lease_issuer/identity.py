@@ -506,11 +506,27 @@ def verify_github_assignment(token, policy, *, audience, peer_uid, access_token,
     def get(url):
         return decode_json(reader.read(url, bearer=access_token))
 
+    def joined_reads(urls):
+        # Read-only independent endpoints, with all results joined before the
+        # next validation phase. No response cache or background work survives.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            tasks = [pool.submit(get, url) for url in urls]
+            values, failures = [], []
+            for task in tasks:
+                try:
+                    values.append(task.result())
+                except Exception as error:
+                    failures.append(error)
+            if failures:
+                raise failures[0]
+        return values
+
     started = int(clock())
-    run = get(run_url)
+    run, first_page = joined_reads((run_url, run_url + "/attempts/1/jobs?per_page=100&page=1"))
     rows, total = [], None
     for page in range(1, 11):
-        payload = get(run_url + "/attempts/1/jobs?per_page=100&page=" + str(page))
+        payload = first_page if page == 1 else get(run_url + "/attempts/1/jobs?per_page=100&page=" + str(page))
         count, batch = payload.get("total_count"), payload.get("jobs")
         require(type(count) is int and 0 <= count <= 1000 and type(batch) is list
                 and len(batch) <= 100 and (total is None or count == total), "incomplete-job-inventory")
@@ -525,10 +541,9 @@ def verify_github_assignment(token, policy, *, audience, peer_uid, access_token,
     first = verify_current_job(token, jwks, policy, audience=audience, peer_uid=peer_uid, run=run,
                                jobs=frame, observed_at=started, now=int(clock()))
     # Re-read the actual joined job and run, not latest-attempt or a name match.
-    current_job = get(prefix + "/actions/jobs/" + str(first.job_id))
+    current_job, current_run, branch = joined_reads((prefix + "/actions/jobs/" + str(first.job_id),
+                                                   run_url, prefix + "/branches/main"))
     require(type(current_job.get("id")) is int and current_job["id"] == first.job_id, "native-job-readback")
-    current_run = get(run_url)
-    branch = get(prefix + "/branches/main")
     require(branch.get("protected") is True and type(branch.get("commit")) is dict
             and branch["commit"].get("sha") == policy.caller_sha,
             "current-protected-main")

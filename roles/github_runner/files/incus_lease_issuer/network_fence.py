@@ -926,6 +926,13 @@ def _thread_file_table_drained(task, tid, pid, deadline):
     require(type(again) is bool and again == shared, "fence-thread-fd-table-changed")
 
 
+def _require_drained_socket(borrowed, observed, cookie):
+    current = os.fstat(borrowed)
+    require((current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode)) == observed,
+            "fence-proc-fds-changed")
+    require(_socket_cookie(borrowed) != cookie, "fence-namespace-socket-live")
+
+
 def _namespace_refs_drained(witness_fd, info, cookie):
     """Reacquire whole observations after churn within one original budget."""
     deadline = time.monotonic() + 10
@@ -995,9 +1002,7 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
                         if observed[2] == stat.S_IFSOCK:
                             borrowed = _borrow_socket(pid, pidfd, number)
                             try:
-                                current = os.fstat(borrowed)
-                                require((current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode)) == observed
-                                        and _socket_cookie(borrowed) != cookie, "fence-namespace-socket-live")
+                                _require_drained_socket(borrowed, observed, cookie)
                             finally:
                                 os.close(borrowed)
                     after = _process_stat(process, pid)

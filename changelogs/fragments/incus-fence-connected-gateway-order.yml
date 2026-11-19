@@ -22,3 +22,9 @@ bugfixes:
       github_runner - reacquire complete storage-consumer observations after bounded task or process churn under
       the original deadline; retain global inventory limits and immediate denial for real references or
       visibility failures.
+  - >-
+      github_runner - join independent GitHub readback requests and all four complete process-view checks,
+      preserving both observation rounds, joined failures, host-file equality and aggregate byte limits.
+  - >-
+      github_runner - distinguish a changed borrowed socket descriptor from a stable forbidden namespace socket;
+      only descriptor churn may trigger complete reacquisition within the existing deadline.

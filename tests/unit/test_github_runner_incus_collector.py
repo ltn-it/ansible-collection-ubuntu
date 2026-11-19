@@ -134,12 +134,15 @@ class CollectorCompositionTests(unittest.TestCase):
         result, controls, chain, closure = self.compose()
         self.assertEqual((result.pid, result.start_ticks, result.runner_id, result.uid), (104, 10400, 61, 2101))
         for call in closure.call_args_list:
-            self.assertEqual({key: call.args[4][key] for key in self.proof.files}, dict(self.proof.trusted_files))
+            self.assertEqual({key: call.args[4].files[key] for key in self.proof.files}, dict(self.proof.trusted_files))
         self.assertEqual(len({id(call.args[5]) for call in closure.call_args_list}), 1)
         self.assertIs(closure.call_args_list[0].args[5].proof, self.proof)
         self.assertEqual(chain.call_count, 2)
         self.assertEqual(controls.call_count, 2)
-        self.assertEqual([call.args[0] for call in closure.call_args_list], [104, 103, 102, 101] * 2)
+        self.assertEqual(len(closure.call_args_list), 8)
+        for offset in (0, 4):
+            self.assertCountEqual([call.args[0] for call in closure.call_args_list[offset:offset + 4]],
+                                  [104, 103, 102, 101])
 
     def test_missing_or_partial_same_call_stock_file_evidence_is_not_reusable(self):
         for changed in (replace(self.proof, trusted_files=MappingProxyType({})),
@@ -293,3 +296,69 @@ class CollectorRealFilesystemTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JoinedClosureAccountingTests(unittest.TestCase):
+    def exercise(self, limit=100, failure=False):
+        import threading
+        from types import SimpleNamespace
+        proof = SimpleNamespace(runner_root='/runner', files={})
+        initial = {'/seed': SimpleNamespace(size=1)}
+        hosts = dict(initial)
+        order = [11, 12, 13, 14]
+        snapshots = {pid: object() for pid in order}
+        gate = threading.Barrier(4, timeout=2)
+        done, identities = set(), set()
+        guard = threading.Lock()
+        shared_values = []
+        def trusted(path):
+            return SimpleNamespace(size=2, sha256='a' * 64)
+        def closure(pid, snapshot, received, policy, shared, layout):
+            self.assertIs(received, proof)
+            self.assertIs(snapshot, snapshots[pid])
+            try:
+                gate.wait()
+                with guard: identities.add(threading.get_native_id())
+                shared.file('/host/' + str(pid))
+                value = shared.file('/host/shared')
+                with guard: shared_values.append(value)
+                if failure and pid == 12:
+                    raise Denied('modeled-closure-denial')
+                return ('complete-view', pid)
+            finally:
+                with guard: done.add(pid)
+        with patch.object(collector, 'MAX_HOST_BYTES', limit), \
+             patch.object(collector.installation, 'trusted_file', side_effect=trusted) as read, \
+             patch.object(collector, '_closure', side_effect=closure):
+            try:
+                result = collector._joined_closures(order, snapshots, proof, 'policy', hosts, 'layout')
+            finally:
+                self.assertEqual(done, set(order))
+                self.assertEqual(len(identities), 4)
+                if failure or limit < 11:
+                    self.assertEqual(hosts, initial)
+        self.assertEqual(list(result), order)
+        self.assertEqual(result, {pid: ('complete-view', pid) for pid in order})
+        self.assertEqual(read.call_count, 5)
+        self.assertTrue(all(value is shared_values[0] for value in shared_values))
+        self.assertEqual(sum(value.size for value in hosts.values()), 11)
+
+    def test_every_full_view_overlaps_with_one_host_budget_and_no_duplicate_host_reads(self):
+        self.exercise()
+
+    def test_aggregate_limit_across_individually_small_workers_is_still_a_hold(self):
+        with self.assertRaisesRegex(Denied, 'collector-host-file-limit'):
+            self.exercise(limit=10)
+
+    def test_failed_view_joins_all_workers_and_does_not_publish_host_results(self):
+        with self.assertRaisesRegex(Denied, 'modeled-closure-denial'):
+            self.exercise(failure=True)
+
+    def test_wrong_proof_host_or_unsealed_runner_path_never_enters_registry(self):
+        from types import SimpleNamespace
+        proof = SimpleNamespace(runner_root='/runner', files={})
+        shared = collector._HostFiles({}, proof)
+        with patch.object(collector.installation, 'trusted_file') as read:
+            with self.assertRaisesRegex(Denied, 'mapped-runner-file-not-sealed'):
+                shared.file('/runner/unsealed')
+            read.assert_not_called()
