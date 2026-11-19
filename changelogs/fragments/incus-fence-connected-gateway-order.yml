@@ -22,3 +22,6 @@ bugfixes:
       github_runner - reacquire complete storage-consumer observations after bounded task or process churn under
       the original deadline; retain global inventory limits and immediate denial for real references or
       visibility failures.
+  - >-
+      github_runner - join independent complete historical and current retirement reads in two bounded workers,
+      preserving original bank and bootstrap checks across the complete observation.
