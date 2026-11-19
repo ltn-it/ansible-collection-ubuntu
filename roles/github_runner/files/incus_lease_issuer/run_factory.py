@@ -1832,8 +1832,31 @@ def _ninth_original_resources_absent(old, configuration):
 
 
 
-def _ninth_retired_local_projection(old, previous_qualification, *, revalidating, defer_catalogues):
-    """One complete independent original-scope pass; no provider or write effect."""
+def _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap, previous_qualification, *,
+                                       revalidating=False, defer_catalogues=False):
+    """Compose all eight histories and the separate ninth retirement, read-only."""
+    require(type(revalidating) is bool and type(defer_catalogues) is bool
+            and (not defer_catalogues or revalidating), "continuation-ninth-catalogue-composition")
+    fixed = operating_cells.NINTH_RETIRED_PARTIAL
+    operating_cells._validate_eighth_prelease_qualification(previous_qualification)
+    require(ledger.digest(previous_qualification) == operating_cells.NINTH_PREVIOUS_QUALIFICATION,
+            "continuation-ninth-exact-previous-qualification")
+    require(ledger.canonical(original_bootstrap) == ledger.canonical(fixed["original_bootstrap"]),
+            "continuation-ninth-immutable-original-bootstrap-reference")
+    old = load_bootstrap(original_bootstrap["path"], original_bootstrap["sha256"])
+    require(old.file_stamp[:2] == (original_bootstrap["device"], original_bootstrap["inode"]),
+            "continuation-ninth-immutable-original-bootstrap-identity")
+    qualified = _continuation_receipt(old.value)
+    require(qualified is not None and qualified[0]["schema"] == 8 and qualified[1] == previous_qualification
+            and qualified[0]["successor"]["source_sha"] == operating_cells.NINTH_MAIN
+            and qualified[0]["successor"]["run_id"] == operating_cells.NINTH_RUN
+            and qualified[0]["successor"]["reusable_sha"] == operating_cells.NINTH_REUSABLE,
+            "continuation-ninth-original-bootstrap")
+    original = _ninth_original_bank(old, successor_ledger_path)
+    require(_eighth_failed_prefix_projection(successor_ledger_path,
+                previous_qualification["failed_prefix"]["original_bootstrap"],
+                previous_qualification["previous_qualification"], revalidating=True, defer_catalogues=True)
+            == previous_qualification["failed_prefix"], "continuation-ninth-preserved-eighth-prefix")
     entries = _ninth_original_entries(old, revalidating=revalidating)
     journals = _ninth_preserved_journals()
     configuration, _ = _read_complete(Path(ROOT) / entries["configuration"]["name"])
@@ -1864,54 +1887,8 @@ def _ninth_retired_local_projection(old, previous_qualification, *, revalidating
         finally:
             os.close(root)
     _ninth_original_resources_absent(old, configuration)
-    require(_ninth_preserved_journals() == journals,
-            "continuation-ninth-original-read-drift")
-    return entries, journals, catalogues
-
-
-def _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap, previous_qualification, *,
-                                       revalidating=False, defer_catalogues=False):
-    """Compose all eight histories and the separate ninth retirement, read-only."""
-    require(type(revalidating) is bool and type(defer_catalogues) is bool
-            and (not defer_catalogues or revalidating), "continuation-ninth-catalogue-composition")
-    fixed = operating_cells.NINTH_RETIRED_PARTIAL
-    operating_cells._validate_eighth_prelease_qualification(previous_qualification)
-    require(ledger.digest(previous_qualification) == operating_cells.NINTH_PREVIOUS_QUALIFICATION,
-            "continuation-ninth-exact-previous-qualification")
-    require(ledger.canonical(original_bootstrap) == ledger.canonical(fixed["original_bootstrap"]),
-            "continuation-ninth-immutable-original-bootstrap-reference")
-    old = load_bootstrap(original_bootstrap["path"], original_bootstrap["sha256"])
-    require(old.file_stamp[:2] == (original_bootstrap["device"], original_bootstrap["inode"]),
-            "continuation-ninth-immutable-original-bootstrap-identity")
-    qualified = _continuation_receipt(old.value)
-    require(qualified is not None and qualified[0]["schema"] == 8 and qualified[1] == previous_qualification
-            and qualified[0]["successor"]["source_sha"] == operating_cells.NINTH_MAIN
-            and qualified[0]["successor"]["run_id"] == operating_cells.NINTH_RUN
-            and qualified[0]["successor"]["reusable_sha"] == operating_cells.NINTH_REUSABLE,
-            "continuation-ninth-original-bootstrap")
-    original = _ninth_original_bank(old, successor_ledger_path)
-    # The immutable eighth history and the disjoint ninth resource/catalogue
-    # scope have no data dependency. Both complete fresh passes are joined;
-    # failure never permits a partial return or a surviving background reader.
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        prior = pool.submit(_eighth_failed_prefix_projection, successor_ledger_path,
-            previous_qualification["failed_prefix"]["original_bootstrap"],
-            previous_qualification["previous_qualification"], revalidating=True, defer_catalogues=True)
-        current = pool.submit(_ninth_retired_local_projection, old, previous_qualification,
-                              revalidating=revalidating, defer_catalogues=defer_catalogues)
-        values, failures = [], []
-        for task in (prior, current):
-            try:
-                values.append(task.result())
-            except Exception as error:
-                failures.append(error)
-        if failures:
-            raise failures[0]
-        prefix_result, (entries, journals, catalogues) = values
-    require(prefix_result == previous_qualification["failed_prefix"],
-            "continuation-ninth-preserved-eighth-prefix")
-    require(_ninth_original_bank(old, successor_ledger_path) == original
+    require(_ninth_preserved_journals() == journals
+            and _ninth_original_bank(old, successor_ledger_path) == original
             and load_bootstrap(old.path, old.sha256) == old, "continuation-ninth-original-read-drift")
     result = {"schema": 1, "kind": "original-ninth-partial-separately-retired-unknown-preserved",
               "original_bootstrap": original_bootstrap, **original, **entries, **journals,
