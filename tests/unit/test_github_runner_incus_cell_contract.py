@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -164,6 +165,28 @@ class RootCellContractTests(unittest.TestCase):
         self.assertEqual(paths, self.value["engine"]["paths"])
         self.assertEqual((Path(self.io.fixture.store_path) / "state.json").read_bytes(), before)
         self.assertEqual({path: tuple(sorted(os.listdir(path))) for path in paths.values()}, directories)
+
+    def test_executable_check_joins_on_input_failure_and_keeps_error_order(self):
+        native = self.registry.select("approved").identity
+        env = cell._environment(self.value, native, {"run_id": 501})
+        directory_checked = threading.Event()
+        executable_finished = threading.Event()
+
+        def fail_executable(*args, **kwargs):
+            self.assertTrue(directory_checked.wait(timeout=5))
+            executable_finished.set()
+            raise Denied("engine-file-drift")
+
+        def fail_directory(*args, **kwargs):
+            directory_checked.set()
+            raise Denied("engine-private-directory")
+
+        now = int(cell.time.time())
+        with mock.patch.object(engine, "_file", side_effect=fail_executable), \
+             mock.patch.object(engine, "_directory", side_effect=fail_directory):
+            with self.assertRaisesRegex(Denied, "engine-file-drift"):
+                cell._validate_engine_template(self.value["engine"], env, native, now + 5400, now)
+        self.assertTrue(executable_finished.is_set())
 
     def test_descriptor_projection_unchanged_after_static_validation_extraction(self):
         selected = self.registry.select("approved")

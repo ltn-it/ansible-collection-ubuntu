@@ -9,6 +9,7 @@ or native namespace/runtime proof are supplied by this semantic component.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 import ipaddress
@@ -300,19 +301,26 @@ def _validate_engine_template(template, env, native, deadline, created_at):
     engine._integer(capture["total_limit"], 1, stdout_limit + stderr_limit)
     binary = engine._keys(template["engine"], {"executable", "executable_sha256"})
     require(binary["executable"] == engine.ENGINE, "cell-engine-executable")
-    engine._file(engine.ENGINE, binary["executable_sha256"], maximum=128 * 1024 * 1024)
-    paths = engine._keys(template["paths"], PATH_KEYS)
-    for path in paths.values():
-        fd = engine._directory(path, private=True)
-        os.close(fd)
-    require(len(set(paths.values())) == len(PATH_KEYS), "cell-path-overlap")
-    archives = engine._keys(template["archives"], {"controller", "candidate"})
-    for item in archives.values():
-        engine._keys(item, {"path", "sha256"})
-        engine._file(item["path"], item["sha256"])
-    trees = engine._keys(template["trees"], {"workspace", "controller", "candidate"})
-    for item in trees.values():
-        engine._tree(item)
+    # The executable is fixed by root policy. Read its digest concurrently
+    # with the independent sealed inputs, and join before deriving a descriptor.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        executable = pool.submit(engine._file, engine.ENGINE, binary["executable_sha256"], maximum=128 * 1024 * 1024)
+        try:
+            paths = engine._keys(template["paths"], PATH_KEYS)
+            for path in paths.values():
+                fd = engine._directory(path, private=True)
+                os.close(fd)
+            require(len(set(paths.values())) == len(PATH_KEYS), "cell-path-overlap")
+            archives = engine._keys(template["archives"], {"controller", "candidate"})
+            for item in archives.values():
+                engine._keys(item, {"path", "sha256"})
+                engine._file(item["path"], item["sha256"])
+            trees = engine._keys(template["trees"], {"workspace", "controller", "candidate"})
+            for item in trees.values():
+                engine._tree(item)
+        finally:
+            # Preserve the original precedence if both validations fail.
+            executable.result()
     roots = list(paths.values()) + [v["path"] for v in trees.values()] + [v["path"] for v in archives.values()]
     require(len(set(roots)) == len(roots) and not any(a.startswith(b + "/") for a in roots for b in roots if a != b), "cell-path-overlap")
     engine._environment(env, native.service_uid, uid, gid)
