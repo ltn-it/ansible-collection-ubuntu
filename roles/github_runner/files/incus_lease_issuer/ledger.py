@@ -324,7 +324,7 @@ _HISTORICAL_READ = ContextVar("ledger_historical_read", default=None)
 
 @contextlib.contextmanager
 def _observe_historical_bank(path, device, inode):
-    """Permit bounded shared reads of this pinned bank during strict collection."""
+    """Permit bounded shared reads of the pinned historical bank."""
     require(_HISTORICAL_READ.get() is None, "ledger-history-already-active")
     token = _HISTORICAL_READ.set(_HistoricalBankRead(Path(path), device, inode))
     try:

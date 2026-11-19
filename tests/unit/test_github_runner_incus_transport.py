@@ -31,7 +31,7 @@ class ScriptedReader:
         self.lock = threading.Lock()
         self.phases = [list(self.replies[:1]), list(self.replies[1:3])]
         self.phases.extend([[row] for row in self.replies[3:-3]])
-        self.phases.append(list(self.replies[-3:]))
+        self.phases.extend((list(self.replies[-3:-1]), list(self.replies[-1:])))
 
     def read(self, url, *, bearer=None):
         with self.lock:
@@ -307,7 +307,7 @@ class JoinedNativeIdentityTests(unittest.TestCase):
             def __init__(inner):
                 super().__init__(self.subject.replies())
                 inner.pre = threading.Barrier(2, timeout=2)
-                inner.post = threading.Barrier(3, timeout=2)
+                inner.post = threading.Barrier(2, timeout=2)
                 inner.count_lock = threading.Lock()
                 inner.run_reads = inner.active = inner.maximum = 0
                 inner.finished = []
@@ -322,7 +322,8 @@ class JoinedNativeIdentityTests(unittest.TestCase):
                     inner.active += 1
                     inner.maximum = max(inner.maximum, inner.active)
                 try:
-                    group.wait()
+                    if url != BRANCH_URL:
+                        group.wait()
                     if fail and url == BRANCH_URL:
                         raise ValueError('modeled-readback-failure')
                     return super().read(url, bearer=bearer)
@@ -332,14 +333,26 @@ class JoinedNativeIdentityTests(unittest.TestCase):
                         inner.finished.append(url)
         return JoinedReader()
 
-    def test_two_then_three_real_read_phases_overlap_and_join(self):
+    def test_two_independent_pairs_join_before_final_branch_read(self):
         reader = self.reader()
         result = self.subject.verify(reader)
         self.assertEqual(result.job_id, 902)
-        self.assertEqual(reader.maximum, 3)
+        self.assertEqual(reader.maximum, 2)
+        self.assertEqual(reader.finished[-1], BRANCH_URL)
         self.assertEqual(reader.active, 0)
         self.assertEqual(len(reader.finished), 5)
         self.assertFalse(reader.replies)
+
+    def test_tip_advance_during_final_job_read_is_observed(self):
+        subject = self.subject
+        class AdvancingReader(ScriptedReader):
+            def read(inner, url, *, bearer=None):
+                response = super().read(url, bearer=bearer)
+                if url == JOB_URL:
+                    subject.branch["commit"]["sha"] = "f" * 40
+                return response
+        with self.assertRaisesRegex(identity.Denied, "current-protected-main"):
+            subject.verify(AdvancingReader(subject.replies()))
 
     def test_read_failure_joins_all_other_readbacks_without_a_proof(self):
         reader = self.reader(fail=True)

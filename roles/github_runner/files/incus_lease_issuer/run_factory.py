@@ -715,10 +715,12 @@ def _continuation_origin_absent(bootstrap, qualified):
     """Product API reads only; call outside any nested Ledger transaction."""
     descriptor, receipt, counts, _ = qualified
     if descriptor["schema"] == 9:
-        require(_ninth_retired_partial_projection(bootstrap.value["ledger_path"],
-                    receipt["retirement"]["original_bootstrap"], receipt["previous_qualification"],
-                    revalidating=True, defer_catalogues=True) == receipt["retirement"],
-                "continuation-ninth-retired-partial-drift")
+        bank = operating_cells.NINTH_RETIRED_PARTIAL["original_bank"]
+        with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
+            require(_ninth_retired_partial_projection(bootstrap.value["ledger_path"],
+                        receipt["retirement"]["original_bootstrap"], receipt["previous_qualification"],
+                        revalidating=True, defer_catalogues=True) == receipt["retirement"],
+                    "continuation-ninth-retired-partial-drift")
         retired = receipt["retirement"]["catalogues"]
     elif descriptor["schema"] == 8:
         require(_eighth_failed_prefix_projection(bootstrap.value["ledger_path"],
@@ -821,19 +823,16 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
         reader = identity.HTTPSReader()
         prefix = identity.API + "/repos/" + SOURCE
         def get(path): return identity.decode_json(reader.read(prefix + path, bearer=api_token))
-        # Both endpoints are bound to the already verified assignment. Keep the
-        # original workflow-before-job validation order and join on every exit.
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            job_read = pool.submit(get, "/actions/jobs/" + str(who.job_id))
-            workflow = get("/contents/.github/workflows/collection-ci.yml?ref=" + who.caller_sha)
-            require(workflow.get("type") == "file" and workflow.get("path") == ".github/workflows/collection-ci.yml"
-                    and workflow.get("encoding") == "base64" and type(workflow.get("content")) is str
-                    and len(workflow["content"]) <= 524288, "bootstrap-workflow-file")
-            raw = base64.b64decode("".join(workflow["content"].split()), validate=True)
-            require(type(workflow.get("size")) is int and workflow["size"] == len(raw)
-                    and hashlib.sha256(raw).hexdigest() == selected.bootstrap.value["source_workflow_sha256"],
-                    "bootstrap-workflow-sha")
-            job = job_read.result()
+        workflow = get("/contents/.github/workflows/collection-ci.yml?ref=" + who.caller_sha)
+        require(workflow.get("type") == "file" and workflow.get("path") == ".github/workflows/collection-ci.yml"
+                and workflow.get("encoding") == "base64" and type(workflow.get("content")) is str
+                and len(workflow["content"]) <= 524288, "bootstrap-workflow-file")
+        raw = base64.b64decode("".join(workflow["content"].split()), validate=True)
+        require(type(workflow.get("size")) is int and workflow["size"] == len(raw)
+                and hashlib.sha256(raw).hexdigest() == selected.bootstrap.value["source_workflow_sha256"],
+                "bootstrap-workflow-sha")
+        # Observe the job after the immutable workflow has passed validation.
+        job = get("/actions/jobs/" + str(who.job_id))
         require(job.get("id") == who.job_id and job.get("run_id") == who.run_id and job.get("head_sha") == who.caller_sha
                 and job.get("status") == "in_progress" and job.get("conclusion") is None
                 and job.get("name") == selected.identity.required_native_job_name, "bootstrap-native-job")

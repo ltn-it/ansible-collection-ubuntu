@@ -510,7 +510,7 @@ def verify_github_assignment(token, policy, *, audience, peer_uid, access_token,
         # Read-only independent endpoints, with all results joined before the
         # next validation phase. No response cache or background work survives.
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             tasks = [pool.submit(get, url) for url in urls]
             values, failures = [], []
             for task in tasks:
@@ -541,8 +541,9 @@ def verify_github_assignment(token, policy, *, audience, peer_uid, access_token,
     first = verify_current_job(token, jwks, policy, audience=audience, peer_uid=peer_uid, run=run,
                                jobs=frame, observed_at=started, now=int(clock()))
     # Re-read the actual joined job and run, not latest-attempt or a name match.
-    current_job, current_run, branch = joined_reads((prefix + "/actions/jobs/" + str(first.job_id),
-                                                   run_url, prefix + "/branches/main"))
+    current_job, current_run = joined_reads((prefix + "/actions/jobs/" + str(first.job_id), run_url))
+    # Observe the protected tip after both assignment readbacks have finished.
+    branch = get(prefix + "/branches/main")
     require(type(current_job.get("id")) is int and current_job["id"] == first.job_id, "native-job-readback")
     require(branch.get("protected") is True and type(branch.get("commit")) is dict
             and branch["commit"].get("sha") == policy.caller_sha,

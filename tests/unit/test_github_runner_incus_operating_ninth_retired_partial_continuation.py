@@ -256,6 +256,30 @@ class NinthCollectorTests(unittest.TestCase):
         self.assertEqual(self.observe.call_count, 4)
         self.assertEqual((self.fixture.path / "state.json").read_bytes(), self.fixture.raw)
 
+    def test_live_origin_revalidation_allows_concurrent_historical_readers(self):
+        import fcntl
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        retirement = self.collect()
+        receipt = {"retirement": retirement, "previous_qualification": self.previous}
+        qualified = ({"schema": 9, "successor": {}}, receipt,
+                     {"native_intake_catalogue": {}, "native_run_configuration_catalogue": {}}, None)
+        bootstrap = SimpleNamespace(sha256="a" * 64, value={"ledger_path": str(self.next_bank), "cells": {}})
+        barrier = Barrier(2, timeout=5)
+        class Projected(Exception):
+            pass
+        def revalidate():
+            barrier.wait()
+            with self.assertRaises(Projected):
+                factory._continuation_origin_absent(bootstrap, qualified)
+        with (self.fixture.path / "lock").open("rb") as original, \
+                mock.patch.object(factory, "_continuation_catalogue", side_effect=Projected), ThreadPoolExecutor(max_workers=2) as pool:
+            fcntl.flock(original, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            readers = [pool.submit(revalidate) for _ in range(2)]
+            for reader in readers:
+                reader.result()
+        self.assertEqual((self.fixture.path / "state.json").read_bytes(), self.fixture.raw)
+
     def test_alias_to_same_bank_is_rejected_by_inode(self):
         real = factory.installation._open_directory
         def open_directory(path):
@@ -389,11 +413,14 @@ class NinthNativeDispatchTests(unittest.TestCase):
                                   "source_identity": {"runner_id": worker.runner_id, "service_uid": worker.uid}}),
                               identity=NS(required_native_job_name="modeled-native-job"), template_bytes=b"{}")
                 who = NS(caller_sha=successor["source_sha"], run_id=successor["run_id"], reusable_sha=successor["reusable_sha"], job_id=123)
+                job_state = {"status": "in_progress", "cancel_on_workflow": False}
                 def get(url, **kwargs):
                     if "/contents/" in url:
+                        if job_state["cancel_on_workflow"]:
+                            job_state["status"] = "completed"
                         return ledger.canonical({"type": "file", "path": ".github/workflows/collection-ci.yml", "encoding": "base64", "content": base64.b64encode(raw).decode(), "size": len(raw)})
                     if "/actions/jobs/" in url:
-                        return ledger.canonical({"id": 123, "run_id": who.run_id, "head_sha": who.caller_sha, "status": "in_progress", "conclusion": None, "name": "modeled-native-job", "started_at": "2026-11-16T23:18:15Z"})
+                        return ledger.canonical({"id": 123, "run_id": who.run_id, "head_sha": who.caller_sha, "status": job_state["status"], "conclusion": None, "name": "modeled-native-job", "started_at": "2026-11-16T23:18:15Z"})
                     return ledger.canonical({"sha": who.caller_sha, "parents": [{"sha": cells.NINTH_MAIN}]})
                 order, completed = [], []
                 expected_history = ["origin", "prior", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth"]
@@ -456,6 +483,11 @@ class NinthNativeDispatchTests(unittest.TestCase):
                     self.assertEqual(order, ["fresh-absence", "current-commit", "worker-finish"])
                     self.assertEqual((begin.call_count, finish.call_count, discard.call_count), (2, 2, 2))
                     self.assertTrue(all(call.args[0] is connected for call in begin.call_args_list))
+                    job_state["cancel_on_workflow"] = True
+                    with self.assertRaisesRegex(Denied, "bootstrap-native-job"):
+                        factory._native(connected, selected, "nonce", "modeled-auth", "modeled-api", check_origin=False)
+                    self.assertEqual(finish.call_count, 2)
+
 
 
     def test_unbound_live_descriptor_denies_and_modeled_pins_keep_exact_first_parent_attempt(self):
