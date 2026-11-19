@@ -819,15 +819,19 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
         reader = identity.HTTPSReader()
         prefix = identity.API + "/repos/" + SOURCE
         def get(path): return identity.decode_json(reader.read(prefix + path, bearer=api_token))
-        workflow = get("/contents/.github/workflows/collection-ci.yml?ref=" + who.caller_sha)
-        require(workflow.get("type") == "file" and workflow.get("path") == ".github/workflows/collection-ci.yml"
-                and workflow.get("encoding") == "base64" and type(workflow.get("content")) is str
-                and len(workflow["content"]) <= 524288, "bootstrap-workflow-file")
-        raw = base64.b64decode("".join(workflow["content"].split()), validate=True)
-        require(type(workflow.get("size")) is int and workflow["size"] == len(raw)
-                and hashlib.sha256(raw).hexdigest() == selected.bootstrap.value["source_workflow_sha256"],
-                "bootstrap-workflow-sha")
-        job = get("/actions/jobs/" + str(who.job_id))
+        # Both endpoints are bound to the already verified assignment. Keep the
+        # original workflow-before-job validation order and join on every exit.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            job_read = pool.submit(get, "/actions/jobs/" + str(who.job_id))
+            workflow = get("/contents/.github/workflows/collection-ci.yml?ref=" + who.caller_sha)
+            require(workflow.get("type") == "file" and workflow.get("path") == ".github/workflows/collection-ci.yml"
+                    and workflow.get("encoding") == "base64" and type(workflow.get("content")) is str
+                    and len(workflow["content"]) <= 524288, "bootstrap-workflow-file")
+            raw = base64.b64decode("".join(workflow["content"].split()), validate=True)
+            require(type(workflow.get("size")) is int and workflow["size"] == len(raw)
+                    and hashlib.sha256(raw).hexdigest() == selected.bootstrap.value["source_workflow_sha256"],
+                    "bootstrap-workflow-sha")
+            job = job_read.result()
         require(job.get("id") == who.job_id and job.get("run_id") == who.run_id and job.get("head_sha") == who.caller_sha
                 and job.get("status") == "in_progress" and job.get("conclusion") is None
                 and job.get("name") == selected.identity.required_native_job_name, "bootstrap-native-job")
@@ -848,10 +852,17 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             # still freshly checked on every revalidation; no shared cache exists.
             if check_origin:
                 _continuation_native_histories(get, descriptor, receipt)
-            _continuation_origin_absent(selected.bootstrap, qualified)
-            if descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9} or identity.decode_json(selected.template_bytes)["kind"] == "operating":
-                operating_cells.validate_continuation_commit(get("/git/commits/" + who.caller_sha), descriptor,
-                                                             who.caller_sha, who.run_id, who.reusable_sha)
+            needs_commit = descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9} or identity.decode_json(selected.template_bytes)["kind"] == "operating"
+            if needs_commit:
+                # Fetch only the immutable Git object during the local check.
+                # Validate it after the original origin check on the owning thread.
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    commit = pool.submit(get, "/git/commits/" + who.caller_sha)
+                    _continuation_origin_absent(selected.bootstrap, qualified)
+                    operating_cells.validate_continuation_commit(commit.result(), descriptor,
+                                                                 who.caller_sha, who.run_id, who.reusable_sha)
+            else:
+                _continuation_origin_absent(selected.bootstrap, qualified)
         elif identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_initial_main(get("/git/commits/" + who.caller_sha), who.caller_sha)
         admission._socket(connected)
