@@ -369,7 +369,15 @@ class NinthNativeDispatchTests(unittest.TestCase):
                 def finish_worker(*args):
                     barrier("worker-finish")
                     return worker
+                history_submissions = []
+                class RecordingPool(factory.ThreadPoolExecutor):
+                    def submit(self, helper, *args, **kwargs):
+                        if helper is factory._continuation_ninth_native or helper is factory._continuation_original_native:
+                            history_submissions.append(helper)
+                        return super().submit(helper, *args, **kwargs)
+
                 with ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(factory, "ThreadPoolExecutor", RecordingPool))
                     connected, peer = socket.socketpair()
                     stack.callback(connected.close)
                     stack.callback(peer.close)
@@ -398,6 +406,7 @@ class NinthNativeDispatchTests(unittest.TestCase):
                         (cells, "validate_continuation_commit", lambda *_: barrier("current-commit"))]:
                         stack.enter_context(mock.patch.object(obj, name, value))
                     factory._native(connected, selected, "nonce", "modeled-auth", "modeled-api")
+                    self.assertIs(history_submissions[0], factory._continuation_ninth_native)
                     self.assertCountEqual(order[:-3], expected_history)
                     self.assertEqual(order[-3:], ["fresh-absence", "current-commit", "worker-finish"])
                     order.clear(); completed.clear(); expected_history.clear()

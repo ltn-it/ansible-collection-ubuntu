@@ -37,3 +37,6 @@ bugfixes:
   - >-
       github_runner - pin the complete retirement qualification and the independently checked storage volume,
       inspect every task's mount view during retirement, and retry a full socket scan if a local descriptor closes.
+  - >-
+      github_runner - start the longest historical lookup in the first batch and reduce repeated
+      path and mapping work during full process scans within the existing authorization deadline.

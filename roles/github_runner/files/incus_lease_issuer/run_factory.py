@@ -796,11 +796,13 @@ def _continuation_native_histories(get, descriptor, receipt):
         families.append((_continuation_ninth_native, {}, receipt["native_ninth"],
                          "continuation-ninth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
-        pending = [executor.submit(helper, get, **arguments) for helper, arguments, _, _ in families]
-        # Declaration order decides the first failure, independently of finish
-        # order. Executor exit also joins every later family on any failure.
-        for future, (_, _, expected, reason) in zip(pending, families):
-            require(future.result() == expected, reason)
+        # The ninth family has ten dependent reads. Start it in the first
+        # batch while retaining the four-reader limit and validation order.
+        schedule = sorted(families, key=lambda family: family[0] is not _continuation_ninth_native)
+        pending = {reason: executor.submit(helper, get, **arguments)
+                   for helper, arguments, _, reason in schedule}
+        for _, _, expected, reason in families:
+            require(pending[reason].result() == expected, reason)
 
 
 @identity._diagnostic_step("native-current")

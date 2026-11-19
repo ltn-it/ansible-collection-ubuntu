@@ -493,15 +493,15 @@ def _check_task_maps(mappings, protected, identities, end, previous):
     _deadline(end)
     require(not any(root in mappings for root in protected), "cleanup-consumers-mapped-reference")
     if previous is not None and mappings == previous[0]:
-        for pair in previous[1]:
-            _deadline(end)
-            require(pair not in identities, "cleanup-consumers-mapped-reference")
+        # The decoded set is limited to 128 KiB of input. Check the
+        # caller's current identities even when sibling map bytes agree.
+        require(previous[1].isdisjoint(identities), "cleanup-consumers-mapped-reference")
         _deadline(end)
         return previous
 
     # Larger maps still take the original full validation path. Bound the
     # optional retained parser output independently of the kernel read limit.
-    parsed = [] if len(mappings) <= 128 * 1024 else None
+    parsed = set() if len(mappings) <= 128 * 1024 else None
     for line in mappings.decode("utf-8", "strict").splitlines():
         _deadline(end)
         fields = line.split(None, 5)
@@ -511,9 +511,9 @@ def _check_task_maps(mappings, protected, identities, end, previous):
         pair = os.makedev(major, minor), int(fields[4])
         require(pair not in identities, "cleanup-consumers-mapped-reference")
         if parsed is not None:
-            parsed.append(pair)
+            parsed.add(pair)
     _deadline(end)
-    return (mappings, tuple(parsed)) if parsed is not None else None
+    return (mappings, frozenset(parsed)) if parsed is not None else None
 
 
 def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
@@ -527,16 +527,18 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
                  data["output_path"], data["context_path"], descriptor_path)
     protected_bytes = tuple(path.encode() for path in protected)
     allowed = {str(fd): _identity(os.fstat(fd)) for fd in opened if stat.S_ISDIR(os.fstat(fd).st_mode)}
+    protected_roots = frozenset(protected)
+    protected_prefixes = tuple(root + "/" for root in protected)
     def referenced(value):
         value = value.removesuffix(" (deleted)")
-        return any(value == root or value.startswith(root + "/") for root in protected)
+        return value in protected_roots or value.startswith(protected_prefixes)
     def read(path, limit):
         return _consumer_read(path, limit, end)
     def stamp(proc):
         raw = read(proc / "stat", 65536)
         suffix = raw.rsplit(b")", 1)
-        require(len(suffix) == 2 and len(suffix[1].split()) >= 20, "cleanup-consumers-process-stat")
-        fields = suffix[1].split()
+        fields = suffix[-1].split(None, 20)
+        require(len(suffix) == 2 and len(fields) >= 20, "cleanup-consumers-process-stat")
         return fields[19], fields[0]
     observer = threading.get_native_id()
     count = total_fds = leaders = 0
@@ -596,23 +598,26 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
                 mappings = read(proc / "maps", 8 * 1024**2)
                 previous_maps = _check_task_maps(mappings, protected_bytes, identities, end, previous_maps)
                 fds = []
-                for descriptor in (proc / "fd").iterdir():
-                    _deadline(end)
-                    fds.append(descriptor)
-                    total_fds += 1
-                    require(len(fds) <= 65536 and total_fds <= 262144, "cleanup-consumers-fd-bound")
-                for descriptor in fds:
+                directory = str(proc / "fd")
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        _deadline(end)
+                        total_fds += 1
+                        require(len(fds) < 65536 and total_fds <= 262144, "cleanup-consumers-fd-bound")
+                        fds.append(entry.name)
+                for name in fds:
+                    descriptor = directory + "/" + name
                     _deadline(end)
                     try:
                         value = os.readlink(descriptor)
-                        observed = descriptor.stat()
+                        observed = os.stat(descriptor)
                     except FileNotFoundError:
                         # A descriptor closed during this observation is no longer
                         # a consumer. Visibility errors on live FDs still hold.
                         continue
                     if referenced(value) or (observed.st_dev, observed.st_ino) in identities:
-                        require(int(leader.name) == os.getpid() and descriptor.name in allowed
-                                and _identity(os.fstat(int(descriptor.name))) == allowed[descriptor.name]
+                        require(int(leader.name) == os.getpid() and name in allowed
+                                and _identity(os.fstat(int(name))) == allowed[name]
                                 and _same_fd_table(int(proc.name), observer),
                                 "cleanup-consumers-open-reference")
                         shared = True
