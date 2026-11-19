@@ -1761,6 +1761,40 @@ def _ninth_original_bank(old, successor_ledger_path):
 
 
 
+def _ninth_storage_census_continuity(config):
+    """Bind the later complete volume census to the same continuously mounted filesystem.
+
+    The original unlink journal retained root inodes only. The independent
+    post-retirement census accounted for every allocated ext4 inode, including
+    reserved and quota inodes. Its only regular files were two authenticated
+    single-link journal entries predating the ninth run. No retired data inode
+    remained at that point. Its evidence SHA256 is 73b1235911cfcbf1cde9fb92829df68b283ee9f1e6690493f20a03b874dc8bdd.
+    """
+    from . import cleanup_storage, storage_quota
+
+    policy_sha = config.storage_quota_policy_sha256
+    require(policy_sha == "7d5c3d95206f6ee455867b2038488bd442f7b44f86b17ac16b251c963135bccb", "continuation-ninth-census-policy")
+    policy_path = config.storage_quota_policy_path
+    # The pinned policy checks boot, namespace, mount, loop association and
+    # backing file on entry and exit. Replacing or remounting invalidates
+    # the census even if the filesystem or an ordinary mount ID is reused.
+    with storage_quota._acquire_paths(policy_path, policy_sha, ()):
+        policy, _, _ = storage_quota._policy(policy_path, policy_sha)
+        mount = installation._open_directory(policy["mount"]["path"])
+        try:
+            unique_mount = cleanup_storage._unique_mount_id(mount)
+        finally:
+            os.close(mount)
+        device = storage_quota._open_file(policy["loop_device"])
+        try:
+            # ext4 superblock offset 1024, s_uuid offset 0x68, 16 bytes.
+            uuid = os.pread(device, 16, 1024 + 0x68)
+        finally:
+            os.close(device)
+        require(len(uuid) == 16 and ledger.digest([policy_sha, unique_mount, uuid.hex()]) ==
+                "ccf207f4408979cf96465e8f6a696c8ffb36f5082dee79b192e7894432bbc001", "continuation-ninth-census-volume-changed")
+
+
 def _ninth_original_resources_absent(old, configuration):
     """Fresh original-scope product/process absence, without adopting its lease."""
     from types import SimpleNamespace
@@ -1773,6 +1807,7 @@ def _ninth_original_resources_absent(old, configuration):
             "continuation-ninth-original-resource-bank")
     config, _, _ = preparation._config(configuration.preparation_config_path,
                                        configuration.preparation_config_sha256)
+    _ninth_storage_census_continuity(config)
     with ledger.Ledger(selected.ledger_path, clock=time.time) as store:
         lease = fixed["original_record"]["lease_id"]
         row = store.read(lease)
@@ -1840,6 +1875,7 @@ def _ninth_original_resources_absent(old, configuration):
                             for item in certificates), "continuation-ninth-original-certificate-returned")
         cleanup_storage._absent((*paths, alias))
         require(store.read(lease) == row, "continuation-ninth-original-resource-record-drift")
+    _ninth_storage_census_continuity(config)
 
 
 

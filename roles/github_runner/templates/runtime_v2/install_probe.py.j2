@@ -14,6 +14,9 @@ import sys
 PRIVATE = "/usr/local/lib/lit-incus-runtime-v2"
 PUBLIC = "/usr/libexec/lightning-it"
 SOCKET = "/run/lightning-it/incus-runtime-v2/socket"
+# Canonical full qualification, including the independently validated predecessor
+# chain, provider graph, bank identity, catalogues and all retirement receipts.
+NINTH_RETIREMENT_SHA256 = "0c6dd360dcb6c2bdfd3fa9f1cd6a74bf43b4c6361daab26b293ac484d228ba3e"
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -262,7 +265,7 @@ def retired_preparation(runtime, config_digest, state, state_raw, reference):
     it does not replace fresh controller admission or permit active work.
     """
     require(type(reference) is dict and set(reference) == {"path","sha256"}
-            and type(reference["sha256"]) is str and SHA.fullmatch(reference["sha256"]))
+            and reference["sha256"] == NINTH_RETIREMENT_SHA256)
     raw = sealed(reference["path"],reference["sha256"])
     value = decode(raw)
     require(canonical(value) == raw and type(value.get("schema")) is int and value["schema"] == 9

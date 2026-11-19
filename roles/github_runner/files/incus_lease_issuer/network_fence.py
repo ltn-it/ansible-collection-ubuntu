@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import ctypes
 import datetime as dt
+import errno
 import fcntl
 import ipaddress
 import os
@@ -895,7 +896,12 @@ def _fd_table(fd, deadline):
 
 def _borrow_socket(pid, pidfd, number):
     if pid == os.getpid():
-        return os.dup(number)
+        try:
+            return os.dup(number)
+        except OSError as error:
+            if error.errno == errno.EBADF:
+                raise Denied("fence-proc-fds-changed") from error
+            raise
     require(platform.machine() in {"x86_64", "aarch64"}, "fence-pidfd-unsupported")
     # pidfd_getfd(2), syscall438 on these Linux ABIs. It duplicates, never
     # changes/closes the target's descriptor; PTRACE_REALCREDS permission needed.

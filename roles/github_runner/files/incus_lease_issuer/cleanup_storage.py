@@ -178,6 +178,16 @@ if _STATX is not None:
     _STATX.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.POINTER(_Statx)]
     _STATX.restype = ctypes.c_int
 
+def _unique_mount_id(fd):
+    # Linux 6.8 STATX_MNT_ID_UNIQUE is never reused during this boot.
+    value = _Statx()
+    require(_STATX is not None and ctypes.sizeof(value) == 256 and _Statx.mount_id.offset == 144,
+            "cleanup-storage-unique-mount-unavailable")
+    require(_STATX(fd, b"", 0x1000, 0x4000, ctypes.byref(value)) == 0
+            and value.mask & 0x4000 and value.mount_id > 0, "cleanup-storage-unique-mount-unavailable")
+    return value.mount_id
+
+
 def _relative_metadata(parent, name):
     """One no-follow relative stat+mount query; unsupported kernels fail closed."""
     require(type(name) is str and name not in {'', '.', '..'} and ('/' not in name) and ('\x00' not in name), 'cleanup-storage-entry')
@@ -531,6 +541,7 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
     observer = threading.get_native_id()
     count = total_fds = leaders = 0
     namespaces = set()
+    previous_mountinfo = None
     for leader in Path("/proc").iterdir():
         if not leader.name.isdecimal():
             continue
@@ -607,16 +618,20 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
                         shared = True
                 ns = (proc / "ns/mnt").stat()
                 namespace = (ns.st_dev, ns.st_ino)
-                if namespace not in namespaces:
+                if namespace not in namespaces or forbidden_namespace is not None:
                     namespaces.add(namespace)
                     require(len(namespaces) <= 4096, "cleanup-consumers-namespace-bound")
+                    # mountinfo is relative to this task's root, even when tasks
+                    # share a namespace. Compare only fully read task views.
                     mountinfo = read(proc / "mountinfo", 4 * 1024**2)
-                    rows = _consumer_mount_rows(mountinfo, end)
-                    require(forbidden_namespace is None or not any(
-                        row[1] == forbidden_namespace[0] and row[2] == "net:[" + str(forbidden_namespace[1]) + "]"
-                        for row in rows), "cleanup-consumers-namespace-mount-reference")
-                    require(not any(referenced(row[3]) for row in rows), "cleanup-consumers-mount-reference")
-                    _consumer_mount_aliases(rows, mount_targets, end)
+                    if mountinfo != previous_mountinfo:
+                        rows = _consumer_mount_rows(mountinfo, end)
+                        require(forbidden_namespace is None or not any(
+                            row[1] == forbidden_namespace[0] and row[2] == "net:[" + str(forbidden_namespace[1]) + "]"
+                            for row in rows), "cleanup-consumers-namespace-mount-reference")
+                        require(not any(referenced(row[3]) for row in rows), "cleanup-consumers-mount-reference")
+                        _consumer_mount_aliases(rows, mount_targets, end)
+                        previous_mountinfo = mountinfo
                 require(not shared or _same_fd_table(int(proc.name), observer),
                         "cleanup-consumers-fd-table-changed")
                 after_ns = (proc / "ns/mnt").stat()

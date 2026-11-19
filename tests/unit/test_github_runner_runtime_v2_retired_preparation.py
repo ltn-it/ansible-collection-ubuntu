@@ -89,12 +89,30 @@ class RetiredPreparationInstallTests(unittest.TestCase):
             path.write_bytes(raw);path.chmod(0o600);self.fixed[label]={"path":str(path),"sha256":digest(raw)}
         self.q = {"schema":9,"purpose":"g06-ninth-failed-partial-separate-retirement-complete-history",
                   "retirement":self.fixed,"native_ninth":cells.ninth_native_projection(*native())}
+        self.q["previous_qualification"] = {"schema": 8, "fixture": "modeled predecessor"}
         self.qualification = self.root / "qualification.json";self.save_qualification()
+        self.published_pin = self.scope["NINTH_RETIREMENT_SHA256"]
+        self.scope["NINTH_RETIREMENT_SHA256"] = self.reference["sha256"]
     def save_qualification(self):
         raw = ledger.canonical(self.q);self.qualification.write_bytes(raw);self.qualification.chmod(0o600)
         self.reference = {"path":str(self.qualification),"sha256":digest(raw)}
     def invoke(self):
         return self.scope["retired_preparation"](self.runtime,digest(self.bootstrap.read_bytes()),self.state,self.raw,self.reference)
+    def test_published_pin_rejects_a_self_consistent_foreign_bank(self):
+        self.scope["NINTH_RETIREMENT_SHA256"] = self.published_pin
+        with self.assertRaises(ValueError):
+            self.invoke()
+
+    def test_changed_or_omitted_predecessor_rejected_with_matching_caller_hash(self):
+        for previous in ({"schema": 8, "fixture": "different"}, None):
+            if previous is None:
+                self.q.pop("previous_qualification")
+            else:
+                self.q["previous_qualification"] = previous
+            self.save_qualification()
+            with self.assertRaises(ValueError):
+                self.invoke()
+
     def test_exact_retired_prepared_unknown_passes_without_changing_one_byte(self):
         before = {p:(p.read_bytes(),p.stat().st_ino)for p in self.root.rglob("*")if p.is_file()}
         self.invoke()
@@ -121,6 +139,7 @@ class RetiredPreparationInstallTests(unittest.TestCase):
             "fragment_path":fragment,"fragment_sha256":fragment_sha,"dropins":[],"installation":{"service_uid":995,"manifest_path":manifest}}})
         self.bootstrap.write_bytes(ledger.canonical(self.runtime))
         self.fixed["original_bootstrap"]["sha256"]=digest(self.bootstrap.read_bytes());self.save_qualification()
+        self.scope["NINTH_RETIREMENT_SHA256"] = self.reference["sha256"]
         account=SimpleNamespace(pw_name="fixture",pw_uid=995,pw_gid=996)
         def group(name):
             if name=="fixture":return SimpleNamespace(gr_gid=996,gr_mem=[])

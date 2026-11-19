@@ -1,4 +1,6 @@
 """Scheduling changes are not generations; failed scans never become proof."""
+import errno
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -22,6 +24,14 @@ class ObservationChurnTests(unittest.TestCase):
                               ((b'1', b'?'), (b'1', b'?'))]:
             with self.subTest(before=before, after=after):
                 self.assertFalse(cleanup_storage._same_live_process(before, after))
+
+    def test_closed_local_socket_triggers_new_scan_but_permission_failure_propagates(self):
+        with mock.patch.object(os, "dup", side_effect=OSError(errno.EBADF, "closed")):
+            with self.assertRaisesRegex(Denied, "fence-proc-fds-changed"):
+                network_fence._borrow_socket(os.getpid(), -1, 9)
+        with mock.patch.object(os, "dup", side_effect=PermissionError(errno.EACCES, "denied")):
+            with self.assertRaises(PermissionError):
+                network_fence._borrow_socket(os.getpid(), -1, 9)
 
     def test_complete_network_reacquire_uses_the_original_deadline(self):
         with mock.patch.object(network_fence.time, 'monotonic', side_effect=[10, 10, 11, 12]), \

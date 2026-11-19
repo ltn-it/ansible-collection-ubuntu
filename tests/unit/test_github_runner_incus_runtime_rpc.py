@@ -17,6 +17,8 @@ import time
 import unittest
 from unittest import mock
 
+from test_github_runner_incus_ledger import validated_fixture_parent
+
 import test_github_runner_incus_refresh as fixtures
 import test_github_runner_incus_admission as admission_fixtures
 
@@ -330,7 +332,7 @@ class RootReceiptCellReaderTests(unittest.TestCase):
         import base64
         import tempfile
         from types import SimpleNamespace
-        self.temp = tempfile.TemporaryDirectory(dir="/run/proof")
+        self.temp = tempfile.TemporaryDirectory(dir=validated_fixture_parent(Path("/run/proof"), private=True))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         context = self.root / "context"

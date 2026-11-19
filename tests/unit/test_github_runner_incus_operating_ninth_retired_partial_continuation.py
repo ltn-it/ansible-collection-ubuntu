@@ -1,13 +1,17 @@
 """Exact ninth terminal provider history; no Root or Heavy acceptance."""
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 import json
 import hashlib
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import unittest
 from unittest import mock
+
+from test_github_runner_incus_ledger import validated_fixture_parent
 
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
@@ -133,10 +137,111 @@ class NinthSeparateRetirementTests(unittest.TestCase):
                     cells._validate_ninth_retired_partial_qualification(changed)
 
 
+class NinthVolumeCensusTests(unittest.TestCase):
+    def test_only_the_censused_mount_and_filesystem_are_accepted(self):
+        from incus_lease_issuer import cleanup_storage, storage_quota
+        config = SimpleNamespace(storage_quota_policy_path="/fixture/policy",
+            storage_quota_policy_sha256="7d5c3d95206f6ee455867b2038488bd442f7b44f86b17ac16b251c963135bccb")
+        uuid = bytes.fromhex("2215e2cb23e44c78ac688bc469dfe575")
+        policy = {"mount": {"path": "/fixture/mount"}, "loop_device": "/fixture/loop"}
+        with ExitStack() as stack:
+            acquire = stack.enter_context(mock.patch.object(storage_quota, "_acquire_paths", side_effect=lambda *a: nullcontext()))
+            stack.enter_context(mock.patch.object(storage_quota, "_policy", return_value=(policy, None, None)))
+            stack.enter_context(mock.patch.object(factory.installation, "_open_directory", return_value=88))
+            stack.enter_context(mock.patch.object(storage_quota, "_open_file", return_value=89))
+            stack.enter_context(mock.patch.object(os, "close"))
+            mount = stack.enter_context(mock.patch.object(cleanup_storage, "_unique_mount_id", return_value=4323289150))
+            read = stack.enter_context(mock.patch.object(os, "pread", return_value=uuid))
+            factory._ninth_storage_census_continuity(config)
+            acquire.assert_called_once_with(config.storage_quota_policy_path, config.storage_quota_policy_sha256, ())
+            for mount_id, fs_uuid in ((371, uuid), (4323289150, bytes(16)), (4323289150, b"")):
+                mount.return_value, read.return_value = mount_id, fs_uuid
+                with self.subTest(mount_id=mount_id, fs_uuid=fs_uuid), self.assertRaisesRegex(Denied, "census-volume"):
+                    factory._ninth_storage_census_continuity(config)
+            acquire.side_effect = Denied("storage-quota-acquisition-denied")
+            with self.assertRaisesRegex(Denied, "storage-quota"):
+                factory._ninth_storage_census_continuity(config)
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
+class NinthCollectorTests(unittest.TestCase):
+    """Exercise both projections with actual ledger bytes and catalogue directories."""
+    def setUp(self):
+        from test_github_runner_runtime_v2_retired_preparation import RetiredPreparationInstallTests
+        fixture = RetiredPreparationInstallTests("runTest")
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        self.fixture = fixture
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        def patch(obj, name, **kw):
+            return self.stack.enter_context(mock.patch.object(obj, name, **kw))
+        fixed = {k: deepcopy(fixture.fixed[k]) for k in cells.NINTH_RETIRED_PARTIAL}
+        ref = fixed["original_bootstrap"]
+        info = fixture.bootstrap.stat()
+        ref.update(device=info.st_dev, inode=info.st_ino)
+        old = SimpleNamespace(path=ref["path"], sha256=ref["sha256"],
+                              file_stamp=(info.st_dev, info.st_ino), value=fixture.runtime)
+        self.ref = ref
+        self.next_bank = fixture.root / "successor"
+        self.next_bank.mkdir(mode=0o700)
+        self.previous = {"failed_prefix": {"original_bootstrap": {}, "catalogues": {
+            "native_intake_catalogue": {}, "native_run_configuration_catalogue": {}}}, "previous_qualification": {}}
+        patch(cells, "NINTH_RETIRED_PARTIAL", new=fixed)
+        patch(cells, "_validate_eighth_prelease_qualification", return_value={})
+        patch(cells, "NINTH_PREVIOUS_QUALIFICATION", new=ledger.digest(self.previous))
+        patch(factory, "load_bootstrap", return_value=old)
+        patch(factory, "_continuation_receipt", return_value=({"schema": 8, "successor": {
+            "source_sha": cells.NINTH_MAIN, "run_id": cells.NINTH_RUN, "reusable_sha": cells.NINTH_REUSABLE}}, self.previous))
+        patch(factory, "_eighth_failed_prefix_projection", return_value=self.previous["failed_prefix"])
+        patch(factory, "_ninth_preserved_journals", return_value={k: fixed[k] for k in (
+            "native_journal", "prior_journal", "veth_receipt", "certificate_receipt")})
+        patch(factory, "_ninth_original_entries", return_value={k: fixed[k] for k in ("intake", "configuration")})
+        patch(factory, "_read_complete", return_value=(object(), None))
+        self.observe = patch(factory, "_ninth_original_resources_absent")
+        for key, module in (("intake", factory.run_intake), ("configuration", factory)):
+            root = fixture.root / key
+            root.mkdir(mode=0o700)
+            (root / fixed[key]["name"]).write_text(fixed[key]["inventory_sha256"])
+            patch(module, "ROOT", new=str(root))
+        patch(factory, "_fifth_retired_entry", side_effect=lambda p: p.read_text())
+
+    def collect(self):
+        return factory.collect_ninth_retired_partial_history(str(self.next_bank), self.ref, self.previous)
+
+    def test_both_projections_retain_real_bank_bytes(self):
+        self.assertEqual(self.collect()["original_bank"]["state_file_sha256"], hashlib.sha256(self.fixture.raw).hexdigest())
+        self.assertEqual(self.observe.call_count, 4)
+        self.assertEqual((self.fixture.path / "state.json").read_bytes(), self.fixture.raw)
+
+    def test_alias_to_same_bank_is_rejected_by_inode(self):
+        real = factory.installation._open_directory
+        def open_directory(path):
+            return real(str(self.fixture.path) if path == str(self.next_bank) else path)
+        with mock.patch.object(factory.installation, "_open_directory", side_effect=open_directory):
+            with self.assertRaisesRegex(Denied, "aliased-original-bank"):
+                self.collect()
+        self.observe.assert_not_called()
+
+    def test_resource_returning_on_second_projection_stops_collection(self):
+        self.observe.side_effect = [None, None, Denied("continuation-ninth-original-resource-returned")]
+        with self.assertRaisesRegex(Denied, "resource-returned"):
+            self.collect()
+        self.assertEqual(self.observe.call_count, 3)
+
+    def test_catalogue_change_between_projections_is_rejected(self):
+        def change(*args):
+            if self.observe.call_count == 2:
+                (self.fixture.root / "intake" / ("f" * 64)).touch()
+        self.observe.side_effect = change
+        with self.assertRaisesRegex(Denied, "extra-catalogue-entry"):
+            self.collect()
+
+
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
 class NinthRealPrivateJournalTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir=validated_fixture_parent(Path("/run/proof"), private=True))
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.fixed = deepcopy(cells.NINTH_RETIRED_PARTIAL)
@@ -328,7 +433,7 @@ class NinthNativeDispatchTests(unittest.TestCase):
 class NinthCurrentCatalogueTests(unittest.TestCase):
     def test_retired_partial_is_never_loaded_as_current_and_unknown_extra_holds(self):
         from types import SimpleNamespace
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=validated_fixture_parent(Path("/run/proof"), private=True)) as temporary:
             root = Path(temporary)
             retired, current, unknown = "a" * 64, "b" * 64, "c" * 64
             (root / retired).mkdir(mode=0o700); (root / current).mkdir(mode=0o700)

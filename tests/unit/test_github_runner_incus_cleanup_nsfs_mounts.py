@@ -86,7 +86,7 @@ class NamespaceMountConsumerWalk(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(Denied, "forbidden-namespace"):
                 self.observe(value)
 
-    def test_later_distinct_observed_mount_namespace_is_not_skipped(self):
+    def test_every_task_mount_view_is_observed_in_shared_and_distinct_namespaces(self):
         readfd, writefd = os.pipe()
         child = os.fork()
         if child == 0:
@@ -107,9 +107,12 @@ class NamespaceMountConsumerWalk(unittest.TestCase):
                 return self.append_namespace(raw)
             return raw
         try:
-            with mock.patch.object(Path, "stat", stat), mock.patch.object(subject, "_consumer_read", side_effect=read):
-                with self.assertRaisesRegex(Denied, "namespace-mount-reference"):
-                    self.observe((4, 4026532529))
+            # Only the later task sees the extra mount in its root-relative view.
+            for task_stat in (actual_stat, stat):
+                with self.subTest(shared=task_stat is actual_stat), mock.patch.object(Path, "stat", task_stat), \
+                     mock.patch.object(subject, "_consumer_read", side_effect=read):
+                    with self.assertRaisesRegex(Denied, "namespace-mount-reference"):
+                        self.observe((4, 4026532529))
         finally:
             os.close(writefd)
             os.waitpid(child, 0)

@@ -34,3 +34,6 @@ bugfixes:
   - >-
       github_runner - serialize full runner-tree walks within each acquisition round
       while checking all four process roots.
+  - >-
+      github_runner - pin the complete retirement qualification and the independently checked storage volume,
+      inspect every task's mount view during retirement, and retry a full socket scan if a local descriptor closes.
