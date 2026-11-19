@@ -495,6 +495,17 @@ def verify_github_assignment(token, policy, *, audience, peer_uid, access_token,
     It must still consume its worker-bound challenge and replay ledger before
     any lease/TLS effect; this function alone never grants such authority.
     """
+    assignment, _ = _read_assignment(token, policy, audience, peer_uid, access_token, reader, clock, workflow=False)
+    return assignment
+
+
+@_diagnostic_step("native-assignment")
+def verify_github_workflow_assignment(token, policy, *, audience, peer_uid, access_token, reader=None, clock=time.time):
+    """Return the refreshed assignment and its commit-addressed workflow response."""
+    return _read_assignment(token, policy, audience, peer_uid, access_token, reader, clock, workflow=True)
+
+
+def _read_assignment(token, policy, audience, peer_uid, access_token, reader, clock, *, workflow):
     reader = reader or HTTPSReader()
     jwks = reader.read(JWKS_URL)
     claims = verify_claims(token, jwks, policy, audience, int(clock()))
@@ -540,15 +551,26 @@ def verify_github_assignment(token, policy, *, audience, peer_uid, access_token,
     frame = {"run_attempt": 1, "total_count": total, "jobs": rows}
     first = verify_current_job(token, jwks, policy, audience=audience, peer_uid=peer_uid, run=run,
                                jobs=frame, observed_at=started, now=int(clock()))
-    # Re-read the actual joined job and run, not latest-attempt or a name match.
-    current_job, current_run = joined_reads((prefix + "/actions/jobs/" + str(first.job_id), run_url))
-    # Observe the protected tip after both assignment readbacks have finished.
-    branch = get(prefix + "/branches/main")
-    require(type(current_job.get("id")) is int and current_job["id"] == first.job_id, "native-job-readback")
-    require(branch.get("protected") is True and type(branch.get("commit")) is dict
-            and branch["commit"].get("sha") == policy.caller_sha,
-            "current-protected-main")
-    refreshed = [{**j} if j["id"] != first.job_id else current_job for j in rows]
-    return verify_current_job(token, jwks, policy, audience=audience, peer_uid=peer_uid,
-                              run=current_run, jobs={**frame, "jobs": refreshed},
-                              observed_at=started, now=int(clock()))
+    def refresh():
+        # Re-read the actual joined job and run, not latest-attempt or a name match.
+        current_job, current_run = joined_reads((prefix + "/actions/jobs/" + str(first.job_id), run_url))
+        # Observe the protected tip after both assignment readbacks have finished.
+        branch = get(prefix + "/branches/main")
+        require(type(current_job.get("id")) is int and current_job["id"] == first.job_id, "native-job-readback")
+        require(branch.get("protected") is True and type(branch.get("commit")) is dict
+                and branch["commit"].get("sha") == policy.caller_sha,
+                "current-protected-main")
+        refreshed = [{**j} if j["id"] != first.job_id else current_job for j in rows]
+        return verify_current_job(token, jwks, policy, audience=audience, peer_uid=peer_uid,
+                                  run=current_run, jobs={**frame, "jobs": refreshed},
+                                  observed_at=started, now=int(clock()))
+
+    if not workflow:
+        return refresh(), None
+    # Only the commit-addressed file is immutable. Start its read after the
+    # signed assignment is first verified and consume it only after refresh.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(get, prefix + "/contents/.github/workflows/collection-ci.yml?ref=" + first.caller_sha)
+        current = refresh()
+        return current, pending.result()

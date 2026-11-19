@@ -818,12 +818,11 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
         worker.validate()
         base = selected.bootstrap.value["source_identity"]
         require(worker.runner_id == base["runner_id"] and worker.uid == base["service_uid"], "bootstrap-native-worker")
-        who = identity.verify_github_assignment(token, selected.identity, audience=ledger.AUDIENCE + nonce,
+        who, workflow = identity.verify_github_workflow_assignment(token, selected.identity, audience=ledger.AUDIENCE + nonce,
             peer_uid=worker.uid, access_token=api_token, clock=time.time)
         reader = identity.HTTPSReader()
         prefix = identity.API + "/repos/" + SOURCE
         def get(path): return identity.decode_json(reader.read(prefix + path, bearer=api_token))
-        workflow = get("/contents/.github/workflows/collection-ci.yml?ref=" + who.caller_sha)
         require(workflow.get("type") == "file" and workflow.get("path") == ".github/workflows/collection-ci.yml"
                 and workflow.get("encoding") == "base64" and type(workflow.get("content")) is str
                 and len(workflow["content"]) <= 524288, "bootstrap-workflow-file")

@@ -152,36 +152,25 @@ class RootBootstrapTests(unittest.TestCase):
         with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
             with store._transaction() as state: self.assertEqual(state["leases"], {})
 
-    def test_joined_workflow_and_job_reads_preserve_failure_precedence(self):
+    def test_invalid_workflow_cannot_trigger_final_job_read(self):
         challenge = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector)
         self.native.claims["aud"] = challenge["audience"]
         selected = factory.derive_selection(self.bootstrap, self.selector, self.native.claims["sha"])
-        assigned = threading.Event()
-        job_read = threading.Event()
-        check_assignment = identity.verify_github_assignment
         reader = identity.HTTPSReader()
-        read = reader.read
+        original = reader.read
+        job_reads = []
 
-        def assignment(*args, **kwargs):
-            result = check_assignment(*args, **kwargs)
-            assigned.set()
-            return result
-
-        def fail_both(url, **kwargs):
-            if assigned.is_set() and "/actions/jobs/" in url:
-                job_read.set()
-                raise Denied("job-read-failed")
+        def invalid_workflow(url, **kwargs):
+            if "/actions/jobs/" in url:
+                job_reads.append(url)
             if "/contents/" in url:
-                self.assertTrue(job_read.wait(timeout=5))
                 return b'{}'
-            return read(url, **kwargs)
+            return original(url, **kwargs)
 
-        with mock.patch.object(identity, "verify_github_assignment", side_effect=assignment), \
-             mock.patch.object(reader, "read", side_effect=fail_both):
+        with mock.patch.object(reader, "read", side_effect=invalid_workflow):
             with self.assertRaisesRegex(Denied, "bootstrap-workflow-file"):
-                factory._native(self.server, selected, challenge["nonce"], self.native.token(),
-                                "synthetic-job-token")
-        self.assertTrue(job_read.is_set())
+                factory._native(self.server, selected, challenge["nonce"], self.native.token(), "synthetic-job-token")
+        self.assertEqual(len(job_reads), 1)
         collector.discard_worker_acquisition.assert_called_once()
         collector.finish_worker_acquisition.assert_not_called()
 

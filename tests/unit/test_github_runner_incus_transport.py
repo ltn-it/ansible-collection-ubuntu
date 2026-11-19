@@ -343,6 +343,79 @@ class JoinedNativeIdentityTests(unittest.TestCase):
         self.assertEqual(len(reader.finished), 5)
         self.assertFalse(reader.replies)
 
+    def test_workflow_read_starts_only_after_initial_assignment_is_valid(self):
+        subject = self.subject
+        jobs = [{"total_count": 0, "jobs": []}]
+        reader = ScriptedReader(subject.replies(pages=jobs))
+        with self.assertRaises(identity.Denied):
+            identity.verify_github_workflow_assignment(subject.fixture.token(), subject.fixture.policy,
+                audience=fixtures.AUDIENCE, peer_uid=2101, access_token=FAKE_ACCESS_TOKEN,
+                reader=reader, clock=lambda: fixtures.NOW)
+        self.assertCountEqual([url for url, _ in reader.calls], [identity.JWKS_URL, RUN_URL, PAGE_URL + "1"])
+
+    def test_only_commit_workflow_overlaps_validated_assignment_refresh(self):
+        workflow_url = PREFIX + "/contents/.github/workflows/collection-ci.yml?ref=" + fixtures.CALLER_SHA
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted):
+                rendezvous = threading.Barrier(2, timeout=5)
+                finished = threading.Event()
+                class Reader(ScriptedReader):
+                    def read(inner, url, *, bearer=None):
+                        if url == workflow_url:
+                            rendezvous.wait()
+                            finished.set()
+                            return b'{"type":"file"}'
+                        if url == JOB_URL:
+                            rendezvous.wait()
+                        return super().read(url, bearer=bearer)
+                reader = Reader(self.subject.replies(branch={"protected": accepted, "commit": {"sha": fixtures.CALLER_SHA}}))
+                def verify():
+                    return identity.verify_github_workflow_assignment(
+                        self.subject.fixture.token(), self.subject.fixture.policy, audience=fixtures.AUDIENCE,
+                        peer_uid=2101, access_token=FAKE_ACCESS_TOKEN, reader=reader, clock=lambda: fixtures.NOW)
+                if accepted:
+                    who, workflow = verify()
+                    self.assertEqual((who.job_id, workflow), (902, {"type": "file"}))
+                else:
+                    with self.assertRaisesRegex(identity.Denied, "current-protected-main"):
+                        verify()
+                self.assertTrue(finished.is_set())
+                self.assertFalse(reader.replies)
+                self.assertEqual(reader.calls[-1][0], BRANCH_URL)
+
+    def test_failed_branch_waits_for_workflow_and_keeps_its_error(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from unittest.mock import patch
+        workflow_started, branch_denied, release = (threading.Event() for _ in range(3))
+        require = identity.require
+
+        def observe_denial(condition, reason):
+            if not condition and reason == "current-protected-main":
+                branch_denied.set()
+            return require(condition, reason)
+
+        class Reader(ScriptedReader):
+            def read(inner, url, *, bearer=None):
+                if "/contents/" in url:
+                    workflow_started.set()
+                    release.wait(timeout=5)
+                    raise ValueError("workflow-read-failed")
+                return super().read(url, bearer=bearer)
+
+        reader = Reader(self.subject.replies(branch={"protected": False}))
+        with patch.object(identity, "require", side_effect=observe_denial), ThreadPoolExecutor(max_workers=1) as pool:
+            verification = pool.submit(identity.verify_github_workflow_assignment,
+                self.subject.fixture.token(), self.subject.fixture.policy, audience=fixtures.AUDIENCE,
+                peer_uid=2101, access_token=FAKE_ACCESS_TOKEN, reader=reader, clock=lambda: fixtures.NOW)
+            try:
+                self.assertTrue(workflow_started.wait(timeout=3))
+                self.assertTrue(branch_denied.wait(timeout=3))
+                self.assertFalse(verification.done())
+            finally:
+                release.set()
+            with self.assertRaisesRegex(identity.Denied, "current-protected-main"):
+                verification.result(timeout=3)
+
     def test_tip_advance_during_final_job_read_is_observed(self):
         subject = self.subject
         class AdvancingReader(ScriptedReader):
