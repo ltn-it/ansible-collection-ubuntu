@@ -1976,7 +1976,9 @@ def _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap,
 def collect_ninth_retired_partial_history(successor_ledger_path, original_bootstrap, previous_qualification):
     """Strict whole-history collection twice; no reset, retry or new resources."""
     _root(); engine._path(successor_ledger_path)
-    before = _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap, previous_qualification)
-    require(_ninth_retired_partial_projection(successor_ledger_path, original_bootstrap, previous_qualification) == before,
-            "continuation-ninth-retirement-collection-drift")
-    return before
+    bank = operating_cells.NINTH_RETIRED_PARTIAL["original_bank"]
+    with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
+        before = _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap, previous_qualification)
+        require(_ninth_retired_partial_projection(successor_ledger_path, original_bootstrap, previous_qualification) == before,
+                "continuation-ninth-retirement-collection-drift")
+        return before

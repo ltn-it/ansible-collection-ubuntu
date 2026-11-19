@@ -44,3 +44,6 @@ bugfixes:
       github_runner - interrupt executable verification at the initial VM preparation deadline, check each task's
       mount view during ordinary cleanup, and verify the retired host interface and namespace alias before and
       after checking the original resources.
+  - >-
+      github_runner - allow strict retirement collection to share a read lock on the pinned historical ledger
+      and wait briefly for an active writer before taking a fresh snapshot.

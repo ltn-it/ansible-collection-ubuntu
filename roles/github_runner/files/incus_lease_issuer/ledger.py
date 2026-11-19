@@ -8,6 +8,7 @@ request JSON. Root policy archival records bytes, not operating acceptance.
 from __future__ import annotations
 
 import contextlib
+from contextvars import ContextVar
 import copy
 from dataclasses import asdict, dataclass
 import fcntl
@@ -286,6 +287,52 @@ class _CleanupPostcheck:
     nonce: str
 
 
+@dataclass
+class _HistoricalBankRead:
+    path: Path
+    device: int
+    inode: int
+    # Shared by both projections; other work never replenishes this allowance.
+    remaining: float = 0.25
+
+    def acquire(self, fd):
+        flags = fcntl.LOCK_SH | fcntl.LOCK_NB
+        try:
+            fcntl.flock(fd, flags)
+            return
+        except BlockingIOError:
+            pass
+        started = time.monotonic()
+        end = started + self.remaining
+        try:
+            while time.monotonic() < end:
+                time.sleep(min(0.005, max(0, end - time.monotonic())))
+                if time.monotonic() >= end:
+                    break
+                try:
+                    fcntl.flock(fd, flags)
+                    return
+                except BlockingIOError:
+                    continue
+            raise Denied("ledger-busy")
+        finally:
+            self.remaining = max(0, self.remaining - (time.monotonic() - started))
+
+
+_HISTORICAL_READ = ContextVar("ledger_historical_read", default=None)
+
+
+@contextlib.contextmanager
+def _observe_historical_bank(path, device, inode):
+    """Permit bounded shared reads of this pinned bank during strict collection."""
+    require(_HISTORICAL_READ.get() is None, "ledger-history-already-active")
+    token = _HISTORICAL_READ.set(_HistoricalBankRead(Path(path), device, inode))
+    try:
+        yield
+    finally:
+        _HISTORICAL_READ.reset(token)
+
+
 class Ledger:
     """Open a pre-provisioned private store; never create an operating store.
 
@@ -297,7 +344,7 @@ class Ledger:
     def __init__(self, path, *, owner_uid=0, clock=time.time):
         self._setup(path, owner_uid, clock)
         try:
-            with self._transaction():
+            with self._transaction(read_only=True):
                 pass
         except BaseException:
             self.shutdown()
@@ -447,11 +494,26 @@ class Ledger:
                 pass
 
     @contextlib.contextmanager
-    def _transaction(self):
+    def _transaction(self, *, read_only=False):
         require(self.fd >= 0, "ledger-closed")
-        self._private(os.fstat(self.fd), directory=True)
-        fd = self._open("lock", os.O_RDWR)
+        info = os.fstat(self.fd)
+        self._private(info, directory=True)
+        historical = _HISTORICAL_READ.get()
+        observing = historical is not None and self.path == historical.path
+        if observing:
+            require((info.st_dev, info.st_ino) == (historical.device, historical.inode), "ledger-history-bank-drift")
+            require(read_only, "ledger-history-read-only")
+        fd = self._open("lock", os.O_RDONLY if observing else os.O_RDWR)
         try:
+            if observing:
+                historical.acquire(fd)
+                lock = os.fstat(fd)
+                require(os.path.samestat(lock, os.stat("lock", dir_fd=self.fd, follow_symlinks=False)),
+                        "ledger-history-lock-drift")
+                yield self._load()
+                require(os.path.samestat(lock, os.stat("lock", dir_fd=self.fd, follow_symlinks=False)),
+                        "ledger-history-lock-drift")
+                return
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -794,7 +856,7 @@ class Ledger:
         Presence of archived references never establishes operating approval.
         """
         require(type(policy_sha256) is str and HEX.fullmatch(policy_sha256), "invalid-policy-digest")
-        with self._transaction() as state:
+        with self._transaction(read_only=True) as state:
             require(policy_sha256 in state["policies"], "unknown-custody-policy")
             return copy.deepcopy(state["policies"][policy_sha256])
 
@@ -1005,7 +1067,7 @@ class Ledger:
         return state["leases"][identifier]
 
     def read(self, identifier):
-        with self._transaction() as state:
+        with self._transaction(read_only=True) as state:
             return copy.deepcopy(self._lease(state, identifier))
 
     def defer_terminal_poll(self, identifier):
@@ -1125,7 +1187,7 @@ class Ledger:
 
     def lease_ids(self):
         """Root bounded snapshot locators, never admission authority."""
-        with self._transaction() as state:
+        with self._transaction(read_only=True) as state:
             require(len(state["leases"]) <= 4096, "custody-ledger-inventory-limit")
             return tuple(sorted(state["leases"]))
 

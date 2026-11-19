@@ -4,6 +4,7 @@ No live kernel collector, socket, credential, Incus executor, custody acceptance
 or test PASS is established by preparing/closing these component fixtures.
 """
 from dataclasses import asdict, replace
+import fcntl
 import hashlib
 import json
 import multiprocessing
@@ -12,6 +13,8 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import threading
+from unittest import mock
 import unittest
 
 
@@ -181,6 +184,81 @@ class IncusLedgerTests(unittest.TestCase):
             callable_(*args, **kwargs)
         self.assertIsInstance(caught.exception, ValueError)
         self.assertRegex(str(caught.exception), r"^[a-z][a-z0-9_-]{0,95}$")
+
+    def test_retired_bank_observer_shares_readers_and_forbids_writes(self):
+        bank = self.path.stat()
+        with self.open() as store, (self.path / "lock").open("rb") as other:
+            original = (self.path / "state.json").read_bytes()
+            fcntl.flock(other, fcntl.LOCK_SH)
+            with self.assertRaisesRegex(Denied, "ledger-busy"):
+                store.lease_ids()
+            with ledger._observe_historical_bank(self.path, bank.st_dev, bank.st_ino):
+                with self.open() as independent:
+                    self.assertEqual(independent.lease_ids(), ())
+                with self.assertRaisesRegex(Denied, "ledger-history-read-only"):
+                    store.challenge(self.worker)
+            with ledger._observe_historical_bank(self.path, bank.st_dev, bank.st_ino + 1):
+                with self.assertRaisesRegex(Denied, "ledger-history-bank-drift"):
+                    store.lease_ids()
+            self.assertEqual((self.path / "state.json").read_bytes(), original)
+
+    def test_historical_reader_waits_for_active_writer_then_reads_fresh_state(self):
+        bank = self.path.stat()
+        locked, seen = threading.Event(), threading.Event()
+        real_flock = fcntl.flock
+        with self.open() as store:
+            with store._transaction() as state:
+                state["policies"][ledger.digest(POLICY)] = dict(POLICY)
+            def writer():
+                with store._transaction() as state:
+                    locked.set()
+                    if seen.wait(5):
+                        state["policies"].pop(ledger.digest(POLICY))
+            def observe(fd, flags):
+                try:
+                    return real_flock(fd, flags)
+                except BlockingIOError:
+                    seen.set()
+                    raise
+            child = threading.Thread(target=writer)
+            child.start()
+            try:
+                self.assertTrue(locked.wait(5))
+                with mock.patch.object(fcntl, "flock", side_effect=observe), \
+                     ledger._observe_historical_bank(self.path, bank.st_dev, bank.st_ino):
+                    with self.assertRaisesRegex(Denied, "unknown-custody-policy"):
+                        store.read_policy(ledger.digest(POLICY))
+                self.assertTrue(seen.is_set())
+            finally:
+                seen.set()
+                child.join(5)
+            self.assertFalse(child.is_alive())
+
+    def test_retired_bank_reader_denies_replaced_lock_entry(self):
+        bank = self.path.stat()
+        with self.open() as store:
+            load = store._load
+            def replace_after_read():
+                state = load()
+                lock = self.path / "lock"
+                lock.rename(self.path / "removed-lock")
+                lock.touch(mode=0o600)
+                return state
+            with ledger._observe_historical_bank(self.path, bank.st_dev, bank.st_ino), \
+                 mock.patch.object(store, "_load", side_effect=replace_after_read), \
+                 self.assertRaisesRegex(Denied, "ledger-history-lock-drift"):
+                store.lease_ids()
+
+    def test_historical_reader_stays_held_when_writer_keeps_lock(self):
+        bank = self.path.stat()
+        with self.open() as store, (self.path / "lock").open("rb") as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            with ledger._observe_historical_bank(self.path, bank.st_dev, bank.st_ino):
+                with self.assertRaisesRegex(Denied, "ledger-busy"):
+                    store.lease_ids()
+                self.assertEqual(ledger._HISTORICAL_READ.get().remaining, 0)
+                with self.assertRaisesRegex(Denied, "ledger-busy"):
+                    store.lease_ids()
 
     def test_challenge_is_pending_worker_idempotent_and_lease_survives_restart(self):
         with self.open() as store:
