@@ -14,6 +14,9 @@ import sys
 PRIVATE = "/usr/local/lib/lit-incus-runtime-v2"
 PUBLIC = "/usr/libexec/lightning-it"
 SOCKET = "/run/lightning-it/incus-runtime-v2/socket"
+# Canonical full qualification, including the independently validated predecessor
+# chain, provider graph, bank identity, catalogues and all retirement receipts.
+NINTH_RETIREMENT_SHA256 = "0c6dd360dcb6c2bdfd3fa9f1cd6a74bf43b4c6361daab26b293ac484d228ba3e"
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -249,7 +252,120 @@ def inactive(history=None):
         require(instances() == units and terminal_history(history) == expected)
 
 
-def configurations(path, digest, group, public_pin=None):
+def canonical(value):
+    return json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False).encode()
+
+
+def retired_preparation(runtime, config_digest, state, state_raw, reference):
+    """Code-only migration of one separately retired partial; never a new lease.
+
+    The Root-held cold controller must independently re-collect the complete
+    history and resource absence before and after its operation. This reader
+    binds that immutable qualification to the actual unchanged bank/files;
+    it does not replace fresh controller admission or permit active work.
+    """
+    require(type(reference) is dict and set(reference) == {"path","sha256"}
+            and reference["sha256"] == NINTH_RETIREMENT_SHA256)
+    raw = sealed(reference["path"],reference["sha256"])
+    value = decode(raw)
+    require(canonical(value) == raw and type(value.get("schema")) is int and value["schema"] == 9
+            and value.get("purpose") == "g06-ninth-failed-partial-separate-retirement-complete-history")
+    retired = value["retirement"]
+    require(type(retired["schema"]) is int and retired["schema"] == 1
+            and retired["kind"] == "original-ninth-partial-separately-retired-unknown-preserved")
+    original = retired["original_bootstrap"]
+    require(original["sha256"] == config_digest
+            and decode(sealed(original["path"],original["sha256"])) == runtime)
+    bank, expected = retired["original_bank"], retired["original_record"]
+    store = runtime["ledger_path"]
+    require(type(bank) is dict and set(bank) == {"path","device","inode","state_file_sha256"}
+            and bank["path"] == store and all(type(bank[k]) is int and bank[k] > 0 for k in ("device","inode"))
+            and type(expected["lease_id"]) is str and set(state["leases"]) == {expected["lease_id"]})
+    fd = directory(store)
+    try:
+        before = os.fstat(fd)
+        require((before.st_dev,before.st_ino) == (bank["device"],bank["inode"]))
+        require(sealed(store+"/state.json",bank["state_file_sha256"]) == state_raw)
+        row = state["leases"][expected["lease_id"]]
+        require(row["state"] == expected["state"] == "prepared" and "owned_instance" not in row
+                and hashlib.sha256(canonical(row)).hexdigest() == expected["sha256"]
+                and len(row["effects"]) == 8 and set(row["effects"]) == set(expected["effects"]))
+        projection = {key:{"operation":effect["operation"],"state":effect["state"],
+                          "effect_sha256":hashlib.sha256(canonical(effect)).hexdigest()}
+                      for key,effect in row["effects"].items()}
+        require(canonical(projection) == canonical(expected["effects"])
+                and [(key,e["operation"],e["state"])for key,e in row["effects"].items()if e["state"] != "verified"]
+                    == [(expected["unknown_effect_id"],"fence-create","unknown")]
+                and not any(e["operation"] == "engine-start"for e in row["effects"].values()))
+        terminal, native = row["native_terminal"], value["native_ninth"]
+        jobs = [j for j in native["jobs"] if j["id"] == terminal["job_id"]]
+        require(len(jobs) == 1 and jobs[0]["id"] == terminal["check_run_id"]
+                and jobs[0]["status"] == native["run"]["status"] == "completed"
+                and jobs[0]["conclusion"] == terminal["conclusion"] == native["run"]["conclusion"] == "failure"
+                and terminal["source_sha"] == native["run"]["head_sha"] == row["identity"]["caller_sha"]
+                and terminal["controller_sha"] == runtime["source_identity"]["reusable_sha"]
+                and terminal["run_id"] == native["run"]["id"] == row["identity"]["run_id"]
+                and type(terminal["run_attempt"]) is int and terminal["run_attempt"] == native["run"]["run_attempt"] == 1)
+        from datetime import datetime
+        import time
+        completed = int(datetime.fromisoformat(jobs[0]["completed_at"].replace("Z","+00:00")).timestamp())
+        policy = state["policies"][row["policy_sha256"]]
+        require(type(terminal["completed_at"]) is int and terminal["completed_at"] == completed
+                and type(retired["retain_until"]) is int and retired["retain_until"] == completed+14400 <= time.time()
+                and type(policy["retention_seconds"]) is int and policy["retention_seconds"] == 14400
+                and hashlib.sha256(canonical(policy)).hexdigest() == row["policy_sha256"])
+        journals = {}
+        native_members = {stem+suffix for stem in ("bridge-delete","descriptor-unlink","namespace-alias-unlink",
+                          "private-tree-0","private-tree-1","private-tree-2","private-tree-3","project-delete")
+                          for suffix in ("-intent.json","-receipt.json")} | {"complete-receipt.json"}
+        for label,names in (("native_journal",native_members),
+                            ("prior_journal",{"namespace-mount88-intent.json","namespace-mount88-unknown.json"})):
+            journal = retired[label]
+            require(type(journal) is dict and set(journal) == {"path","members"}
+                    and set(journal["members"]) == names)
+            handle = directory(journal["path"])
+            try:
+                require(set(os.listdir(handle)) == names)
+                bodies = {}
+                for leaf,digest in journal["members"].items():
+                    body = sealed(journal["path"]+"/"+leaf,digest)
+                    parsed = decode(body)
+                    require(canonical(parsed)+b"\n" == body)
+                    bodies[leaf] = parsed
+                require(set(os.listdir(handle)) == names)
+                journals[label] = bodies
+            finally:
+                os.close(handle)
+        complete = journals["native_journal"]["complete-receipt.json"]
+        require(complete["retention_deadline"] == retired["retain_until"]
+                and type(complete["at"]) in {int,float} and complete["at"] >= retired["retain_until"]
+                and complete["original_unknown_resolved"] is False
+                and complete["prior_retirement_unknown_preserved"] is True
+                and complete["native_case_acceptance"] is False
+                and all(complete[k] is True for k in ("all_original_paths_absent","own_project_bridge_absent",
+                                                      "owned_namespace_alias_mounts_absent")))
+        for label in ("certificate_receipt","veth_receipt"):
+            ref = retired[label]
+            body = sealed(ref["path"],ref["sha256"])
+            receipt = decode(body)
+            require(canonical(receipt)+b"\n" == body and receipt["original_unknown_resolved"] is False
+                    and receipt["metadata"]["lease_id"] == expected["lease_id"]
+                    and receipt["metadata"]["original_record_sha256"] == expected["sha256"])
+        require(sealed(store+"/state.json",bank["state_file_sha256"]) == state_raw
+                and (os.fstat(fd).st_dev,os.fstat(fd).st_ino) == (before.st_dev,before.st_ino)
+                and sealed(reference["path"],reference["sha256"]) == raw)
+        reopened = directory(store)
+        try:
+            current = os.fstat(reopened)
+            require((current.st_dev,current.st_ino) == (before.st_dev,before.st_ino)
+                    == (bank["device"],bank["inode"]))
+        finally:
+            os.close(reopened)
+    finally:
+        os.close(fd)
+
+
+def configurations(path, digest, group, public_pin=None, retired_reference=None):
     runtime = decode(sealed(path,digest))
     require(type(runtime["schema"]) is int)
     bootstrap = runtime["schema"] == 1
@@ -296,12 +412,19 @@ def configurations(path, digest, group, public_pin=None):
     lock = sealed(prep["lock_path"])
     require(lock == b"")
     marker = decode(sealed(store+"/.initialized"))
-    state = decode(sealed(store+"/state.json"))
+    state_raw = sealed(store+"/state.json")
+    state = decode(state_raw)
     sealed(store+"/lock")
     require(state["version"] == marker["version"] == 1 and state["store_id"] == marker["store_id"]
-            and type(state["leases"]) is dict and all(row["state"] == "closed" for row in state["leases"].values()))
+            and type(state["leases"]) is dict)
     original = {key:value for key,value in state.items() if key != "checksum"}
     require(state["checksum"] == hashlib.sha256(json.dumps(original,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest())
+    require(retired_reference is None or type(retired_reference) is dict)
+    if retired_reference:
+        require(bootstrap)
+        retired_preparation(runtime,digest,state,state_raw,retired_reference)
+    else:
+        require(all(row["state"] == "closed" for row in state["leases"].values()))
     return runtime
 
 
@@ -342,8 +465,13 @@ BINDINGS_ROOT = "/var/lib/lightning-it/incus-operating-bindings"
 
 def operating_configuration(value, complete=False):
     """Read-only bindings; never tick, submit mail, create a lease or activate units."""
-    require(type(value) is dict and set(value) == {"watchdog_path", "watchdog_sha256", "mail_path", "mail_sha256", "helper_sha256"}
+    require(type(value) is dict and set(value) in (
+                {"watchdog_path", "watchdog_sha256", "mail_path", "mail_sha256", "helper_sha256"},
+                {"watchdog_path", "watchdog_sha256", "mail_path", "mail_sha256", "helper_sha256", "retired_preparation"})
             and type(value["helper_sha256"]) is dict and set(value["helper_sha256"]) == HELPERS)
+    if "retired_preparation" in value:
+        require(type(value["retired_preparation"]) is dict
+                and set(value["retired_preparation"]) == {"path","sha256"})
     for digest in value["helper_sha256"].values():
         require(type(digest) is str and SHA.fullmatch(digest))
     configs = []
@@ -402,7 +530,8 @@ def main():
         operating = decode(sys.argv[9]) if len(sys.argv) >= 10 else None
         if operating is not None:
             operating_configuration(operating)
-        config = configurations(config_path,digest,group,public_pin)
+        config = configurations(config_path,digest,group,public_pin,
+                                operating.get("retired_preparation") if operating is not None else None)
         for path in (PRIVATE,PUBLIC,"/etc/lit/incus-lease-issuer","/etc/lightning-it",
                      "/run/lightning-it/incus-runtime-v2","/etc/systemd/system","/usr/lib/tmpfiles.d"):
             fd=directory(path,missing=True)

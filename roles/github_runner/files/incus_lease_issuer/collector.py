@@ -458,23 +458,44 @@ def _controls(policy):
     return result
 
 
+class _HostFiles:
+    """One bracket's host cache; all insertion/read accounting is serialized."""
+    def __init__(self, files, proof):
+        self.files, self.proof = files, proof
+        self.total = sum(item.size for item in files.values())
+        self.lock = threading.Lock()
+        self.view_lock = threading.Lock()
+        require(self.total <= MAX_HOST_BYTES, "collector-host-file-limit")
+
+    def verify_view(self, root, layout, uid):
+        # Each process has its own root FD. Concurrent walks compete for the
+        # same directory metadata; still verify every process root in full.
+        with self.view_lock:
+            _view_inventory(root, layout, uid)
+
+    def file(self, path):
+        with self.lock:
+            in_runner = path == self.proof.runner_root or path.startswith(self.proof.runner_root + "/")
+            require(not in_runner or path in self.proof.files, "mapped-runner-file-not-sealed")
+            if path not in self.files:
+                value = installation.trusted_file(path)
+                if in_runner:
+                    require(value.sha256 == self.proof.files[path], "mapped-runner-file-not-sealed")
+                total = self.total + value.size
+                require(total <= MAX_HOST_BYTES, "collector-host-file-limit")
+                self.files[path] = value
+                self.total = total
+            return self.files[path]
+
+
 def _closure(pid, snapshot, proof, policy, hosts, layout):
     """Acquire actual maps, effective label, flag and root-view identity."""
     require(type(layout) is _TreeLayout and layout.proof is proof, "process-root-layout-binding")
-    total_host_bytes = sum(item.size for item in hosts.values())
+    shared = _HostFiles(hosts, proof) if type(hosts) is dict else hosts
+    require(type(shared) is _HostFiles and shared.proof is proof, "process-root-layout-binding")
 
     def host(path):
-        nonlocal total_host_bytes
-        in_runner = path == proof.runner_root or path.startswith(proof.runner_root + "/")
-        require(not in_runner or path in proof.files, "mapped-runner-file-not-sealed")
-        if path not in hosts:
-            value = installation.trusted_file(path)
-            if in_runner:
-                require(value.sha256 == proof.files[path], "mapped-runner-file-not-sealed")
-            total_host_bytes += value.size
-            require(total_host_bytes <= MAX_HOST_BYTES, "collector-host-file-limit")
-            hosts[path] = value
-        return hosts[path]
+        return shared.file(path)
 
     with _proc(pid) as fd:
         before = worker.parse_proc_stat(kernel.bounded_file(fd, "stat", worker.MAX_STAT_BYTES))
@@ -498,7 +519,7 @@ def _closure(pid, snapshot, proof, policy, hosts, layout):
         # root is a deliberate /proc kernel magic-link exception, never a job path.
         root = os.open("root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd)
         try:
-            _view_inventory(root, layout, policy.service.installation.service_uid)
+            shared.verify_view(root, layout, policy.service.installation.service_uid)
             for path in (policy.profile_path, policy.config_path):
                 _same_file(root, path, host(path))
             for item in mapped:
@@ -520,6 +541,29 @@ def _closure(pid, snapshot, proof, policy, hosts, layout):
         require((before.pid, before.ppid, before.start_ticks) == (after.pid, after.ppid, after.start_ticks),
                 "collector-process-changed")
     return mapped
+
+
+def _joined_closures(order, snapshots, proof, policy, hosts, layout):
+    from concurrent.futures import ThreadPoolExecutor
+    require(len(order) == 4 and len(set(order)) == 4, "collector-service-layout")
+    initial = dict(hosts)
+    shared = _HostFiles(dict(initial), proof)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        pending = [(pid, pool.submit(_closure, pid, snapshots[pid], proof, policy, shared, layout))
+                   for pid in order]
+        values, failures = [], []
+        for pid, task in pending:
+            try:
+                values.append((pid, task.result()))
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise failures[0]
+    require(sum(item.size for item in shared.files.values()) == shared.total <= MAX_HOST_BYTES,
+            "collector-host-file-limit")
+    require(hosts == initial, "collector-host-file-changed")
+    hosts.update(shared.files)
+    return dict(values)
 
 
 @identity._diagnostic_step("collector")
@@ -555,11 +599,11 @@ def collect_worker(connected_unix_socket, policy):
         require(set(proof.trusted_files) == set(proof.files)
                 and set(proof.file_stamps) == set(proof.files), "collector-stock-file-evidence")
         hosts.update(proof.trusted_files)
-        closures = {pid: _closure(pid, first[pid], proof, policy, hosts, layout) for pid in order}
+        closures = _joined_closures(order, first, proof, policy, hosts, layout)
         second = kernel.read_chain(peer.pid, initial_service.main_pid)
         require(set(second) == set(first), "collector-lineage-changed")
-        for pid in order:
-            require(_closure(pid, second[pid], proof, policy, hosts, layout) == closures[pid], "collector-maps-changed")
+        confirmed = _joined_closures(order, second, proof, policy, hosts, layout)
+        require(confirmed == closures, "collector-maps-changed")
         final_proof = installation.verify_installation(install_policy)
         require(final_proof == proof and service.read_service(policy.service) == initial_service
                 and _controls(policy) == controls, "collector-trust-changed")
@@ -613,11 +657,11 @@ def _worker_bracket(connected_unix_socket, policy, proof=None):
         require(set(proof.trusted_files) == set(proof.files)
                 and set(proof.file_stamps) == set(proof.files), "collector-stock-file-evidence")
         hosts.update(proof.trusted_files)
-        closures = {pid: _closure(pid, first[pid], proof, policy, hosts, layout) for pid in order}
+        closures = _joined_closures(order, first, proof, policy, hosts, layout)
         second = kernel.read_chain(peer.pid, initial_service.main_pid)
         require(set(second) == set(first), "collector-lineage-changed")
-        for pid in order:
-            require(_closure(pid, second[pid], proof, policy, hosts, layout) == closures[pid], "collector-maps-changed")
+        confirmed = _joined_closures(order, second, proof, policy, hosts, layout)
+        require(confirmed == closures, "collector-maps-changed")
         require(service.read_service(policy.service) == initial_service
                 and _controls(policy) == controls, "collector-trust-changed")
         final_peer, final_boot = kernel.read_peer(connected_unix_socket), kernel.read_boot_id()

@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -164,6 +166,51 @@ class RootCellContractTests(unittest.TestCase):
         self.assertEqual(paths, self.value["engine"]["paths"])
         self.assertEqual((Path(self.io.fixture.store_path) / "state.json").read_bytes(), before)
         self.assertEqual({path: tuple(sorted(os.listdir(path))) for path in paths.values()}, directories)
+
+    def test_timed_prepare_interrupts_slow_executable_hash_before_writing(self):
+        from incus_lease_issuer import runtime_entry
+        actual = engine._file
+        interrupted = []
+        def delayed(path, *args, **kwargs):
+            if path == engine.ENGINE:
+                self.assertIs(threading.current_thread(), threading.main_thread())
+                try:
+                    time.sleep(3)
+                except runtime_entry._InitialDeadline:
+                    interrupted.append(path)
+                    raise
+            return actual(path, *args, **kwargs)
+        state = Path(self.io.fixture.store_path) / "state.json"
+        before = state.read_bytes()
+        directories = self.value["engine"]["paths"].values()
+        with mock.patch.object(engine, "_file", side_effect=delayed), self.assertRaisesRegex(Denied, "cell-contract-denied"):
+            with runtime_entry._initial_effects_deadline(1, int(time.time()) + 30):
+                self.prepare()
+        self.assertEqual(interrupted, [engine.ENGINE])
+        self.assertEqual(state.read_bytes(), before)
+        self.assertTrue(all(not os.listdir(path) for path in directories))
+
+    def test_executable_check_joins_on_input_failure_and_keeps_error_order(self):
+        native = self.registry.select("approved").identity
+        env = cell._environment(self.value, native, {"run_id": 501})
+        directory_checked = threading.Event()
+        executable_finished = threading.Event()
+
+        def fail_executable(*args, **kwargs):
+            self.assertTrue(directory_checked.wait(timeout=5))
+            executable_finished.set()
+            raise Denied("engine-file-drift")
+
+        def fail_directory(*args, **kwargs):
+            directory_checked.set()
+            raise Denied("engine-private-directory")
+
+        now = int(cell.time.time())
+        with mock.patch.object(engine, "_file", side_effect=fail_executable), \
+             mock.patch.object(engine, "_directory", side_effect=fail_directory):
+            with self.assertRaisesRegex(Denied, "engine-file-drift"):
+                cell._validate_engine_template(self.value["engine"], env, native, now + 5400, now)
+        self.assertTrue(executable_finished.is_set())
 
     def test_descriptor_projection_unchanged_after_static_validation_extraction(self):
         selected = self.registry.select("approved")

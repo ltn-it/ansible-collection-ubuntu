@@ -6,25 +6,34 @@ untrusted: traversal uses directory FDs, never follows links or crosses mounts.
 No prefix scan, arbitrary path, mount teardown or destructive retry is exposed.
 The separately bounded public-evidence sibling is deliberately retained.
 """
-from dataclasses import dataclass
-from contextlib import contextmanager
+import ctypes
 import hashlib
 import os
-from pathlib import Path, PurePosixPath
-import stat
-import time
-import ctypes
 import platform
 import re
-import threading
+import stat
 import struct
+import threading
+import time
 import weakref
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from . import (cell_contract, engine_executor, engine_policy as engine, identity,
-               installation, ledger, preparation, signed_context, storage_quota)
+from . import (
+    cell_contract,
+    engine_executor,
+    identity,
+    installation,
+    ledger,
+    preparation,
+    signed_context,
+    storage_quota,
+)
+from . import engine_policy as engine
 from .identity import Denied, require
 
 
@@ -168,6 +177,16 @@ _STATX = getattr(_LIBC, 'statx', None)
 if _STATX is not None:
     _STATX.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.POINTER(_Statx)]
     _STATX.restype = ctypes.c_int
+
+def _unique_mount_id(fd):
+    # Linux 6.8 STATX_MNT_ID_UNIQUE is never reused during this boot.
+    value = _Statx()
+    require(_STATX is not None and ctypes.sizeof(value) == 256 and _Statx.mount_id.offset == 144,
+            "cleanup-storage-unique-mount-unavailable")
+    require(_STATX(fd, b"", 0x1000, 0x4000, ctypes.byref(value)) == 0
+            and value.mask & 0x4000 and value.mount_id > 0, "cleanup-storage-unique-mount-unavailable")
+    return value.mount_id
+
 
 def _relative_metadata(parent, name):
     """One no-follow relative stat+mount query; unsupported kernels fail closed."""
@@ -368,14 +387,20 @@ def _consumer_mount_rows(raw, end=None):
         fields = line.split()
         require(len(fields) >= 10 and "-" in fields and fields[0].isdecimal()
                 and re.fullmatch(r"[0-9]+:[0-9]+", fields[2]), "cleanup-consumers-mount-shape")
+        separator = fields.index("-")
+        require(separator >= 6 and len(fields) == separator + 4,
+                "cleanup-consumers-mount-shape")
+        major, minor = map(int, fields[2].split(":"))
         paths = []
-        for value in fields[3:5]:
+        for index, value in enumerate(fields[3:5]):
             require(not re.search(r"\\(?!040|011|012|134)", value), "cleanup-consumers-mount-escape")
             value = re.sub(r"\\(040|011|012|134)", lambda m: chr(int(m[1], 8)), value).removesuffix(" (deleted)")
-            require(value.startswith("/") and ".." not in PurePosixPath(value).parts,
-                    "cleanup-consumers-mount-path")
+            namespace_root = (index == 0 and fields[separator + 1] == "nsfs"
+                              and major == 0 and minor > 0
+                              and re.fullmatch(r"(?:net|mnt|uts|ipc|pid|user|cgroup|time):\[[1-9][0-9]*\]", value))
+            require((value.startswith("/") and ".." not in PurePosixPath(value).parts)
+                    or namespace_root, "cleanup-consumers-mount-path")
             paths.append(value)
-        major, minor = map(int, fields[2].split(":"))
         rows.append((int(fields[0]), os.makedev(major, minor), *paths))
     require(len({r[0] for r in rows}) == len(rows), "cleanup-consumers-mount-duplicate")
     return rows
@@ -388,6 +413,7 @@ def _consumer_mount_targets(rows, pinned):
         found = [row for row in rows if row[0] == mount_id and row[1] == device]
         require(len(found) == 1, "cleanup-consumers-original-mount")
         row = found[0]
+        require(row[2].startswith("/"), "cleanup-consumers-original-filesystem-root")
         require(path == row[3] or path.startswith(row[3].rstrip("/") + "/"),
                 "cleanup-consumers-original-path")
         relative = str(PurePosixPath(row[2]) / PurePosixPath(path).relative_to(row[3]))
@@ -422,32 +448,102 @@ def _same_fd_table(tid, observer):
     return result == 0
 
 
-def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, mount_targets, original_process=None):
+def _same_live_process(before, after):
+    """Scheduling state may change; start ticks bind the observed generation.
+
+    Terminal/unknown states require the separate absence path, never a live
+    process witness. PID/TID, complete task and mount-namespace checks remain
+    mandatory at the calling observation boundary.
+    """
+    live = {b"R", b"S", b"D", b"T", b"t", b"I", b"W", b"K", b"P"}
+    return (before[0] == after[0] and before[1] in live and after[1] in live)
+
+
+def _consumer_tasks(leader, maximum, end):
+    tasks = []
+    for task in (leader / "task").iterdir():
+        _deadline(end)
+        require(task.name.isdecimal() and len(tasks) < maximum, "cleanup-consumers-task-bound")
+        tasks.append(task)
+    require(tasks, "cleanup-consumers-task-inventory")
+    return tuple(tasks)
+
+
+def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
+                  original_process=None, *, forbidden_namespace=None):
+    """Acquire a whole stable observation; churn never becomes an absence proof."""
+    churn = {"cleanup-consumers-task-inventory-changed", "cleanup-consumers-process-replaced",
+             "cleanup-consumers-observation-race"}
+    for _ in range(8):
+        _deadline(end)
+        try:
+            _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
+                               original_process, forbidden_namespace=forbidden_namespace)
+        except Denied as error:
+            if str(error) not in churn:
+                raise
+        else:
+            _deadline(end)
+            return
+    raise Denied("cleanup-consumers-acquire-unstable")
+
+
+def _check_task_maps(mappings, protected, identities, end, previous):
+    """Reuse only decoded coordinates for identical bytes read from sibling tasks."""
+    _deadline(end)
+    require(not any(root in mappings for root in protected), "cleanup-consumers-mapped-reference")
+    if previous is not None and mappings == previous[0]:
+        # The decoded set is limited to 128 KiB of input. Check the
+        # caller's current identities even when sibling map bytes agree.
+        require(previous[1].isdisjoint(identities), "cleanup-consumers-mapped-reference")
+        _deadline(end)
+        return previous
+
+    # Larger maps still take the original full validation path. Bound the
+    # optional retained parser output independently of the kernel read limit.
+    parsed = set() if len(mappings) <= 128 * 1024 else None
+    for line in mappings.decode("utf-8", "strict").splitlines():
+        _deadline(end)
+        fields = line.split(None, 5)
+        require(len(fields) >= 5 and re.fullmatch(r"[0-9a-fA-F]+:[0-9a-fA-F]+", fields[3])
+                and fields[4].isdecimal(), "cleanup-consumers-maps-shape")
+        major, minor = (int(v, 16) for v in fields[3].split(":"))
+        pair = os.makedev(major, minor), int(fields[4])
+        require(pair not in identities, "cleanup-consumers-mapped-reference")
+        if parsed is not None:
+            parsed.add(pair)
+    _deadline(end)
+    return (mappings, frozenset(parsed)) if parsed is not None else None
+
+
+def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
+                       original_process=None, *, forbidden_namespace=None):
+    require(forbidden_namespace is None or type(forbidden_namespace) is tuple
+            and len(forbidden_namespace) == 2
+            and all(type(value) is int and 0 < value < 2**63 for value in forbidden_namespace)
+            and os.major(forbidden_namespace[0]) == 0 and os.minor(forbidden_namespace[0]) > 0,
+            "cleanup-consumers-forbidden-namespace")
     protected = (data["engine"]["storage_root"], data["engine"]["runroot"],
                  data["output_path"], data["context_path"], descriptor_path)
+    protected_bytes = tuple(path.encode() for path in protected)
     allowed = {str(fd): _identity(os.fstat(fd)) for fd in opened if stat.S_ISDIR(os.fstat(fd).st_mode)}
+    protected_roots = frozenset(protected)
+    protected_prefixes = tuple(root + "/" for root in protected)
     def referenced(value):
         value = value.removesuffix(" (deleted)")
-        return any(value == root or value.startswith(root + "/") for root in protected)
+        return value in protected_roots or value.startswith(protected_prefixes)
     def read(path, limit):
         return _consumer_read(path, limit, end)
     def stamp(proc):
         raw = read(proc / "stat", 65536)
         suffix = raw.rsplit(b")", 1)
-        require(len(suffix) == 2 and len(suffix[1].split()) >= 20, "cleanup-consumers-process-stat")
-        fields = suffix[1].split()
+        fields = suffix[-1].split(None, 20)
+        require(len(suffix) == 2 and len(fields) >= 20, "cleanup-consumers-process-stat")
         return fields[19], fields[0]
-    def task_inventory(leader, maximum):
-        tasks = []
-        for task in (leader / "task").iterdir():
-            _deadline(end)
-            require(task.name.isdecimal() and len(tasks) < maximum, "cleanup-consumers-task-bound")
-            tasks.append(task)
-        require(tasks, "cleanup-consumers-task-inventory")
-        return tuple(tasks)
     observer = threading.get_native_id()
     count = total_fds = leaders = 0
     namespaces = set()
+    previous_mountinfo = None
     for leader in Path("/proc").iterdir():
         if not leader.name.isdecimal():
             continue
@@ -460,10 +556,11 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
                 raw = read(leader / "stat", 65536).rsplit(b")", 1)[1].split()
                 require(leader_stamp[0] != str(original_process["start_ticks"]).encode() or raw[0] == b"Z",
                         "cleanup-storage-engine-process-live")
-            tasks = task_inventory(leader, 65536 - count)
+            tasks = _consumer_tasks(leader, 65536 - count, end)
         except (FileNotFoundError, ProcessLookupError):
             require(not leader.exists(), "cleanup-consumers-observation-race")
             continue
+        previous_maps = None
         for proc in tasks:
             _deadline(end)
             count += 1
@@ -499,55 +596,58 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
                         continue
                     require(not referenced(value), "cleanup-consumers-process-reference")
                 mappings = read(proc / "maps", 8 * 1024**2)
-                require(not any(root.encode() in mappings for root in protected), "cleanup-consumers-mapped-reference")
-                for line in mappings.decode("utf-8", "strict").splitlines():
-                    _deadline(end)
-                    fields = line.split(None, 5)
-                    require(len(fields) >= 5 and re.fullmatch(r"[0-9a-fA-F]+:[0-9a-fA-F]+", fields[3])
-                            and fields[4].isdecimal(), "cleanup-consumers-maps-shape")
-                    major, minor = (int(v, 16) for v in fields[3].split(":"))
-                    require((os.makedev(major, minor), int(fields[4])) not in identities,
-                            "cleanup-consumers-mapped-reference")
+                previous_maps = _check_task_maps(mappings, protected_bytes, identities, end, previous_maps)
                 fds = []
-                for descriptor in (proc / "fd").iterdir():
-                    _deadline(end)
-                    fds.append(descriptor)
-                    total_fds += 1
-                    require(len(fds) <= 65536 and total_fds <= 262144, "cleanup-consumers-fd-bound")
-                for descriptor in fds:
+                directory = str(proc / "fd")
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        _deadline(end)
+                        total_fds += 1
+                        require(len(fds) < 65536 and total_fds <= 262144, "cleanup-consumers-fd-bound")
+                        fds.append(entry.name)
+                for name in fds:
+                    descriptor = directory + "/" + name
                     _deadline(end)
                     try:
                         value = os.readlink(descriptor)
-                        observed = descriptor.stat()
+                        observed = os.stat(descriptor)
                     except FileNotFoundError:
                         # A descriptor closed during this observation is no longer
                         # a consumer. Visibility errors on live FDs still hold.
                         continue
                     if referenced(value) or (observed.st_dev, observed.st_ino) in identities:
-                        require(int(leader.name) == os.getpid() and descriptor.name in allowed
-                                and _identity(os.fstat(int(descriptor.name))) == allowed[descriptor.name]
+                        require(int(leader.name) == os.getpid() and name in allowed
+                                and _identity(os.fstat(int(name))) == allowed[name]
                                 and _same_fd_table(int(proc.name), observer),
                                 "cleanup-consumers-open-reference")
                         shared = True
                 ns = (proc / "ns/mnt").stat()
                 namespace = (ns.st_dev, ns.st_ino)
-                if namespace not in namespaces:
-                    namespaces.add(namespace)
-                    require(len(namespaces) <= 4096, "cleanup-consumers-namespace-bound")
-                    mountinfo = read(proc / "mountinfo", 4 * 1024**2)
+                namespaces.add(namespace)
+                require(len(namespaces) <= 4096, "cleanup-consumers-namespace-bound")
+                # mountinfo is relative to this task's root, even when tasks
+                # share a namespace. Compare only fully read task views.
+                mountinfo = read(proc / "mountinfo", 4 * 1024**2)
+                if mountinfo != previous_mountinfo:
                     rows = _consumer_mount_rows(mountinfo, end)
+                    require(forbidden_namespace is None or not any(
+                        row[1] == forbidden_namespace[0] and row[2] == "net:[" + str(forbidden_namespace[1]) + "]"
+                        for row in rows), "cleanup-consumers-namespace-mount-reference")
                     require(not any(referenced(row[3]) for row in rows), "cleanup-consumers-mount-reference")
                     _consumer_mount_aliases(rows, mount_targets, end)
+                    previous_mountinfo = mountinfo
                 require(not shared or _same_fd_table(int(proc.name), observer),
                         "cleanup-consumers-fd-table-changed")
                 after_ns = (proc / "ns/mnt").stat()
-                require(before == stamp(proc) and namespace == (after_ns.st_dev, after_ns.st_ino),
+                require(_same_live_process(before, stamp(proc)) and namespace == (after_ns.st_dev, after_ns.st_ino),
                         "cleanup-consumers-process-replaced")
             except (FileNotFoundError, ProcessLookupError):
                 require(not proc.exists(), "cleanup-consumers-observation-race")
         try:
-            require(leader_stamp == stamp(leader)
-                    and {p.name for p in tasks} == {p.name for p in task_inventory(leader, len(tasks))},
+            after_leader = stamp(leader)
+            require((leader_stamp == after_leader if leader_stamp[1] == b"Z" else
+                     _same_live_process(leader_stamp, after_leader))
+                    and {p.name for p in tasks} == {p.name for p in _consumer_tasks(leader, 65536 - count + len(tasks), end)},
                     "cleanup-consumers-task-inventory-changed")
         except (FileNotFoundError, ProcessLookupError):
             require(not leader.exists(), "cleanup-consumers-observation-race")
@@ -624,7 +724,7 @@ def _consume_reconciliation(proof, store, identifier, effect_id):
 
 def reconcile_postchecks(session, owner, store, config, cleanup):
     """GET-only original-scope resolution, never a repeated delete or timing PASS."""
-    from . import root_session, kernel
+    from . import kernel, root_session
     require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
     record = _fresh(owner, store, config)
     from . import operating_custody

@@ -289,7 +289,12 @@ class HistoryAcquisitionTests(unittest.TestCase):
                 if path == '/git/commits/' + who.caller_sha:
                     return ledger.canonical({'sha': who.caller_sha})
                 return ledger.canonical(self.get(path))
-            for obj, name, value in [(f.admission, '_secret', main_only('secret', None)), (f, '_controls', main_only('controls', 'same')), (f.collector, 'begin_worker_acquisition', main_only('begin', (worker, object()))), (f.collector, 'finish_worker_acquisition', after('finish', worker)), (f.collector, 'discard_worker_acquisition', main_only('discard', None)), (f.identity, 'verify_github_assignment', main_only('worker-token', who)), (f.identity, 'HTTPSReader', lambda: NS(read=read)), (f, '_continuation_receipt', lambda _: (descriptor, self.receipt, {}, None)), (f, '_continuation_origin_absent', after('absence')), (cells, 'validate_continuation_commit', after('commit'))]:
+            def workflow_assignment(*args, **kwargs):
+                result = main_only('worker-token', who)()
+                url = f.identity.API + '/repos/' + f.SOURCE + '/contents/.github/workflows/collection-ci.yml?ref=' + result.caller_sha
+                return result, f.identity.decode_json(read(url))
+
+            for obj, name, value in [(f.admission, '_secret', main_only('secret', None)), (f, '_controls', main_only('controls', 'same')), (f.collector, 'begin_worker_acquisition', main_only('begin', (worker, object()))), (f.collector, 'finish_worker_acquisition', after('finish', worker)), (f.collector, 'discard_worker_acquisition', main_only('discard', None)), (f.identity, 'verify_github_workflow_assignment', workflow_assignment), (f.identity, 'HTTPSReader', lambda: NS(read=read)), (f, '_continuation_receipt', lambda _: (descriptor, self.receipt, {}, None)), (f, '_continuation_origin_absent', after('absence')), (cells, 'validate_continuation_commit', after('commit'))]:
                 stack.enter_context(patch.object(obj, name, value))
             f._native(connected, selected, 'nonce', 'worker-proof-main-only', 'modeled-api')
             self.assertLess(effects.index('absence'), effects.index('commit'))

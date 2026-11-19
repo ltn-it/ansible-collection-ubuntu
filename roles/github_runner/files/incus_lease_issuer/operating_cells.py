@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 9:
+        return _validate_ninth_retired_partial_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 8:
         return _validate_eighth_prelease_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 7:
@@ -145,7 +147,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
-                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN}[value["schema"]])
+                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN}[value["schema"]])
             and len({p["sha"] for p in parents}) == len(parents)
             and caller_sha not in {p["sha"] for p in parents}, "continuation-first-parent")
 
@@ -200,6 +202,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 9:
+        return _validate_ninth_retired_partial_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 8:
         return _validate_eighth_prelease_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 7:
@@ -1431,5 +1435,222 @@ def eighth_prelease_continuation_qualification(previous, run, inventory, checks,
     value = {"schema": 8, "purpose": "g06-eighth-failed-prelease-complete-history",
              "previous_qualification": previous, "native_eighth": eighth_native_projection(run, inventory, checks),
              "failed_prefix": failed_prefix}
+    validate_continuation_qualification(value)
+    return value
+
+
+# The ninth original stopped in partial preparation. Its immutable native graph
+# is history only; a separate Root retirement never resolves its UNKNOWN effect.
+NINTH_MAIN = "86f3cb46e5856c4066cac14e73f46c3cefb8453e"
+NINTH_RUN = 44427583641
+NINTH_JOB = 135238784600
+NINTH_CHECKS = (135238784600, 135243414213, 135244015806, 135244063798,
+                135248771736, 135249618294, 135249670392)
+NINTH_REUSABLE = "99efac0591dd9cd4df836d7d8d805ccdc3ec808f"
+NINTH_WORKFLOW = "6d293f9e8a57942417acd651b35fb11aa5495dba7e0ae2f5e5e386d2ccec315e"
+NINTH_GRAPH = "6d8a5a1a3198e43bfe9e9712f1edc47fbcbc213991f16fb17948493730b27fc6"
+NINTH_PREVIOUS_QUALIFICATION = "cedb33cf2c4914859f272a218f0fc96a8c1d3e48e3e1b8f14b62eb8b83706a2c"
+
+
+def ninth_native_projection(run, inventory, checks):
+    require(type(run) is dict and type(inventory) is dict and type(inventory.get("total_count")) is int
+            and inventory["total_count"] == 24 and type(inventory.get("jobs")) is list
+            and len(inventory["jobs"]) == 24, "continuation-ninth-complete-inventory")
+    repo = run.get("repository", {})
+    require(repo.get("id") == 1103407173 and repo.get("full_name") == "ltn-it/ansible-collection-supplementary"
+            and repo.get("private") is False and repo.get("owner", {}).get("id") == 54334171,
+            "continuation-ninth-native-repository")
+    refs = run.get("referenced_workflows")
+    require(type(refs) is list and sum(type(v) is dict and v.get("sha") == NINTH_REUSABLE
+            and v.get("path") == "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + NINTH_REUSABLE
+            for v in refs) == 1, "continuation-ninth-native-controller")
+    fields = ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion", "runner_id",
+              "runner_group_id", "started_at", "completed_at", "check_run_url")
+    rows = [{k: row.get(k) for k in fields} for row in inventory["jobs"]]
+    require(all(type(row["id"]) is int and row["id"] > 0 for row in rows)
+            and len({row["id"] for row in rows}) == 24, "continuation-ninth-native-ids")
+    actor = {"login": "litroc", "id": 76040632, "type": "User"}
+    require(all(type(run.get(field)) is dict and all(type(run[field].get(k)) is type(v)
+                and run[field][k] == v for k, v in actor.items())
+                for field in ("actor", "triggering_actor")), "continuation-ninth-actor")
+    graph = {"run": {**{k: run.get(k) for k in ("id", "run_attempt", "head_sha", "event", "head_branch",
+             "workflow_id", "path", "status", "conclusion")},
+             **{field: {k: run[field][k] for k in actor} for field in ("actor", "triggering_actor")}},
+             "jobs": sorted(rows, key=lambda row: row["id"])}
+    require(ledger.digest(graph) == NINTH_GRAPH, "continuation-ninth-original-failed-graph")
+    require(type(checks) is list and len(checks) == len(NINTH_CHECKS), "continuation-ninth-native-checks")
+    for identifier, check in zip(NINTH_CHECKS, checks):
+        job = next(row for row in rows if row["id"] == identifier)
+        require(type(check) is dict and check.get("id") == identifier and check.get("head_sha") == NINTH_MAIN
+                and all(check.get(k) == job[k] for k in ("name", "status", "conclusion", "started_at", "completed_at"))
+                and check.get("app", {}).get("id") == 15368 and check.get("app", {}).get("slug") == "github-actions",
+                "continuation-ninth-native-check")
+    return graph
+
+
+
+# Historical projection only. A Root factory must independently re-read these
+# private objects and native absence; a matching JSON document grants nothing.
+NINTH_RETIRED_PARTIAL = {'original_bootstrap': {'path': '/var/lib/lightning-it/g06-runtime-root-6848ed621bfd41cbae720bc576c6eeb4/oidc-config-successor-a2828109c3e24c0eac5b477c2e97e635/immutable-original-source86-8a386d83bcb54382a45ec3046a15331b/bootstrap.json',
+                        'sha256': '1ba772ed0f7952f060b1cd981371ae8b798a882e72833e0679fd7afb131e101f',
+                        'device': 64517,
+                        'inode': 1446333},
+ 'original_bank': {'path': '/var/lib/lightning-it/g06-runtime-root-6848ed621bfd41cbae720bc576c6eeb4/oidc-config-successor-a2828109c3e24c0eac5b477c2e97e635/ledger',
+                   'device': 64517,
+                   'inode': 1444142,
+                   'state_file_sha256': 'b8139214bba2863ef928872b65f54b4057c3f9a8577327c65b7021ecc9606f43'},
+ 'original_record': {'lease_id': '3e4a98952211426a1d317fd1757b3e67',
+                     'sha256': '7a371958869bae94d251af131e92aaf0516ccbdf7b47ef65a31e78efd98d7878',
+                     'state': 'prepared',
+                     'unknown_effect_id': '838e147b15567fa3e2daf9f453b955f5',
+                     'effects': {'426f0be0c6acad017fa74171628d37d9': {'operation': 'project-create',
+                                                                      'state': 'verified',
+                                                                      'effect_sha256': '7805f3be1bf4d756092e02008ba8d886f7d5bd44fef26d577c8ec0475de18df9'},
+                                 '4e1cf648fc0508a76e153d89f011fdd5': {'operation': 'network-create',
+                                                                      'state': 'verified',
+                                                                      'effect_sha256': 'a2e42cb0f9556e831fc0b5be8880cd512a2cd0c07d487c3d3dfeb1643f6840d5'},
+                                 '542eb06cc371d80180630aa427b48f4b': {'operation': 'context-publish',
+                                                                      'state': 'verified',
+                                                                      'effect_sha256': '451b7d03fff1b0cd7b3263fa999e8461fffec06f8cbca77dddce09e51e38f400'},
+                                 '72a07506c9358ec0a7a0fdfb291b32fc': {'operation': 'context-create',
+                                                                      'state': 'verified',
+                                                                      'effect_sha256': '61081cffb7052b57205fa131981bff5853cb65d600d8f8e9397d47f58fca2e36'},
+                                 '7d4d47e450670b17d89aa8016bd75c17': {'operation': 'engine-prepare',
+                                                                      'state': 'verified',
+                                                                      'effect_sha256': '19a900de760de1aa7b9634759bba14487481de9de8e9e009d795a11eed67d3d2'},
+                                 '838e147b15567fa3e2daf9f453b955f5': {'operation': 'fence-create',
+                                                                      'state': 'unknown',
+                                                                      'effect_sha256': 'f62b5f5cc322428e3efc629bdfdd88e38dc73653a982485f06d8c77caf274b2b'},
+                                 '85ba7dfd855ce9c93ad8fee99195dbca': {'operation': 'certificate-create',
+                                                                      'state': 'verified',
+                                                                      'effect_sha256': '042fdb0f9b31a47be0ce7994d1965f9888f84eebfa509a7dc1359671e1716f43'},
+                                 'bf67f64928035b8b04432368c4bbd911': {'operation': 'profile-configure',
+                                                                      'state': 'verified',
+                                                                      'effect_sha256': 'e1cc9630b8950f67cb03648f81f7b11d0c4d3f1e6dcb3614eccee8aaa095bf1a'}}},
+ 'configuration': {'name': '8fc5f1b2a2f13e7379014f42172c4319091bf16946111cc7e786fbe0d72fd4ad',
+                   'device': 64517,
+                   'inode': 1444159,
+                   'receipt_sha256': '0396baf7d45c72ab6d222b6f69819e11d9e0d5f0973371832c9c68e48dd03cd5',
+                   'inventory_sha256': 'b2e3b9275ecf757326a7ad712ffb841e02c5d0e565f9351d047f8bc7402c5ae4'},
+ 'intake': {'name': 'b679e0a749b4f2f867d4b310ac5972349bea313ac58525788a141588681cd277',
+            'device': 64517,
+            'inode': 1444146,
+            'receipt_sha256': '0338723f3b4fb941917bce0ce2bf0682639bd69984c403c732905c894d5f1bab',
+            'inventory_sha256': '01e8f03415aab83919388fbd371bd2e0e113ae3a6e84fc4e385b1972366e6e6b'},
+ 'native_journal': {'path': '/var/lib/lightning-it/g06-runtime-root-6848ed621bfd41cbae720bc576c6eeb4/partial-retirement-ab89fd156df44bcca52d9be9f697f6fb',
+                    'members': {'bridge-delete-intent.json': '665d804fab6fbb29587ccfcdf10440343d584b10a8577cf9dab6b089670cfadd',
+                                'bridge-delete-receipt.json': '1206a251c6ae67220d38580fd362621eac8fcb81064f3f693c624fe0003f1150',
+                                'complete-receipt.json': 'adfc9324eb25e9ecfd09cb31721e57f25a4df32e871d8c411c5496dfbf69ae94',
+                                'descriptor-unlink-intent.json': '2e65522b0777238f4f85336d225c9483dbea46b1c05ee46be34460f4acd38ca0',
+                                'descriptor-unlink-receipt.json': 'ee77d5e0940e06f8bbfdf990c0bf776be3eb79306731bd29a9ba729884727ef6',
+                                'namespace-alias-unlink-intent.json': '9c971f45a681a0b304819550e35cd0535cff6dcf4b2985bd61e13b590257b682',
+                                'namespace-alias-unlink-receipt.json': '584b43417f54e51433755aa8feb6bee0288f98276e00a060fedbe9e077e6f6df',
+                                'private-tree-0-intent.json': 'cf4cfdd1e78794222168550393be1da8aa538a1ab86e17f49f7ce196f372f48d',
+                                'private-tree-0-receipt.json': '951ad5ed73fcdd01ca7f36eca0b788a7c5422542cd89ec75e63e0b2090cc2c84',
+                                'private-tree-1-intent.json': 'e65c6d2ed5e8310facd792c3c26728ba83db7cc9a35989726240d0266898565f',
+                                'private-tree-1-receipt.json': '743c877bed83880913407b2b62d91021daf77db4f9865ed26d0fd24e13fee437',
+                                'private-tree-2-intent.json': '06c2b87bff2afecdf8f54ae7bdf503309a57fc9284baa44ac8ad8f7f68ed3315',
+                                'private-tree-2-receipt.json': '3956208da096c28ee116335ec159eea63a383e5b18cb43cc271168e6d8d64fec',
+                                'private-tree-3-intent.json': 'ac4690423bc631a1c737b511f19a337078228d8dcb2f346ade59dc68ec7e0517',
+                                'private-tree-3-receipt.json': '72994ae433e34a2230a0af786f31da2edc26144dc35f71b5e97c68d353836203',
+                                'project-delete-intent.json': '45d6a916c229e6dd3e6c20528e80acf5d6c219a29e7340a6eb88acd07a6b33ea',
+                                'project-delete-receipt.json': '2ab3caa3c03fd3c068df88fae9debadcac7140b7af74f09acefebc79d91a3f58'}},
+ 'prior_journal': {'path': '/var/lib/lightning-it/g06-runtime-root-6848ed621bfd41cbae720bc576c6eeb4/partial-retirement-d71dc962a0934be89a935b5fc94060d9',
+                   'members': {'namespace-mount88-intent.json': 'c0dd63809ba49059a221a357cd5c5aab32698886c19e7693b5d4bb5f14ba9376',
+                               'namespace-mount88-unknown.json': '3195af5cfa9f34d9699dd1efc6cb6b836d7d34fefb45cd3728120c0e60d9e798'}},
+ 'certificate_receipt': {'path': '/var/lib/lightning-it/g06-runtime-root-6848ed621bfd41cbae720bc576c6eeb4/certificate-withdrawal-24fdf580f89741efb0eb519cbf2efd37/certificate-withdrawal-receipt.json',
+                         'sha256': '7ed820afe5f84b9cfced1453067eb6f108d39751b40282981637046a4c084fad'},
+ 'veth_receipt': {'path': '/var/lib/lightning-it/g06-runtime-root-6848ed621bfd41cbae720bc576c6eeb4/veth-withdrawal-efb501261f194cf58e17df7e3d8b9004/veth-withdrawal-receipt.json',
+                  'sha256': 'b22fa4eeec89a4a02fac0e42101d7728f502d626b259a6d46ddbeccb45a12e5d'},
+ 'retain_until': 1795062671}
+
+
+def _validate_ninth_retirement(value):
+    engine_policy._keys(value, {"schema", "kind", *NINTH_RETIRED_PARTIAL, "catalogues"})
+    require(type(value["schema"]) is int and value["schema"] == 1
+            and value["kind"] == "original-ninth-partial-separately-retired-unknown-preserved",
+            "continuation-ninth-retirement-purpose")
+    # Canonical byte equality also rejects bool/int substitutions in fixed
+    # device, inode, deadline and record fields. No old UNKNOWN becomes closed.
+    for key, expected in NINTH_RETIRED_PARTIAL.items():
+        require(ledger.canonical(value[key]) == ledger.canonical(expected),
+                "continuation-ninth-retirement-fixed-history")
+    catalogues = engine_policy._keys(value["catalogues"],
+        {"native_intake_catalogue", "native_run_configuration_catalogue"})
+    for kind, entry in (("native_intake_catalogue", value["intake"]),
+                        ("native_run_configuration_catalogue", value["configuration"])):
+        rows = catalogues[kind]
+        require(type(rows) is dict and 0 < len(rows) <= 256
+                and rows.get(entry["name"]) == entry["inventory_sha256"],
+                "continuation-ninth-retirement-catalogue")
+        for name, sha in rows.items():
+            require(type(name) is str and re.fullmatch("[0-9a-f]{64}", name),
+                    "continuation-ninth-retirement-catalogue-name")
+            engine_policy._hash(sha)
+    return value
+
+
+def _validate_ninth_retired_partial_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "previous_qualification", "native_ninth", "retirement"})
+    require(type(value["schema"]) is int and value["schema"] == 9
+            and value["purpose"] == "g06-ninth-failed-partial-separate-retirement-complete-history",
+            "continuation-ninth-qualification")
+    previous = value["previous_qualification"]
+    require(type(previous) is dict and type(previous.get("schema")) is int and previous["schema"] == 8
+            and ledger.digest(previous) == NINTH_PREVIOUS_QUALIFICATION,
+            "continuation-ninth-preserved-eight-history")
+    counts = _validate_eighth_prelease_qualification(previous)
+    require(ledger.digest(value["native_ninth"]) == NINTH_GRAPH,
+            "continuation-ninth-preserved-native-graph")
+    retirement = _validate_ninth_retirement(value["retirement"])
+    old = previous["failed_prefix"]["catalogues"]
+    for kind, entry in (("native_intake_catalogue", retirement["intake"]),
+                        ("native_run_configuration_catalogue", retirement["configuration"])):
+        actual = retirement["catalogues"][kind]
+        require(entry["name"] not in old[kind]
+                and set(actual) == set(old[kind]) | {entry["name"]}
+                and all(actual[name] == sha for name, sha in old[kind].items()),
+                "continuation-ninth-preserved-catalogues")
+    return counts
+
+
+# The isolated workflow on Validation Main and its exact Supplementary caller.
+NINTH_SUCCESSOR_WORKFLOW = "68eac383ebec4462071398bef54831e7199d1e924482dc9c267809f993684fc3"
+NINTH_SUCCESSOR_REUSABLE = "eeb932bf8a2a064a78161925182a3141df489790"
+
+
+def _validate_ninth_retired_partial_descriptor(value, workflow_sha256, reusable_sha):
+    require(type(NINTH_SUCCESSOR_WORKFLOW) is str and re.fullmatch("[0-9a-f]{64}", NINTH_SUCCESSOR_WORKFLOW)
+            and NINTH_SUCCESSOR_WORKFLOW not in {NINTH_WORKFLOW, "0" * 64}
+            and type(NINTH_SUCCESSOR_REUSABLE) is str and re.fullmatch("[0-9a-f]{40}", NINTH_SUCCESSOR_REUSABLE)
+            and NINTH_SUCCESSOR_REUSABLE not in {NINTH_REUSABLE, "0" * 40},
+            "continuation-ninth-successor-pins-unbound")
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    require(type(value["schema"]) is int and value["schema"] == 9
+            and value["reason"] == "original-partial-preparation-separately-retired-unknown-preserved",
+            "continuation-ninth-purpose")
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"]); engine_policy._hash(ref["sha256"])
+    row = engine_policy._keys(value["successor"], {"source_sha", "run_id", "run_attempt", "first_parent",
+                                                  "source_workflow_sha256", "reusable_sha"})
+    cell_contract._commit(row["source_sha"])
+    engine_policy._integer(row["run_id"], 1, 2**63 - 1)
+    require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN, THIRD_MAIN, FOURTH_MAIN,
+                                    FIFTH_MAIN, SIXTH_MAIN, SEVENTH_MAIN, EIGHTH_MAIN, NINTH_MAIN}
+            and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN, FOURTH_RUN, FIFTH_RUN,
+                                    SIXTH_RUN, SEVENTH_RUN, EIGHTH_RUN, NINTH_RUN}
+            and type(row["run_attempt"]) is int and row["run_attempt"] == 1
+            and row["first_parent"] == NINTH_MAIN
+            and row["source_workflow_sha256"] == workflow_sha256 == NINTH_SUCCESSOR_WORKFLOW
+            and row["reusable_sha"] == reusable_sha == NINTH_SUCCESSOR_REUSABLE,
+            "continuation-ninth-successor")
+    return value
+
+
+def ninth_retired_partial_continuation_qualification(previous, run, inventory, checks, retirement):
+    """Preserve all genuine history; never authorize replay of the failed run."""
+    value = {"schema": 9, "purpose": "g06-ninth-failed-partial-separate-retirement-complete-history",
+             "previous_qualification": previous, "native_ninth": ninth_native_projection(run, inventory, checks),
+             "retirement": retirement}
     validate_continuation_qualification(value)
     return value

@@ -73,6 +73,8 @@
           'mail_path': github_runner_runtime_v2_mail_configuration_path,
           'mail_sha256': github_runner_runtime_v2_mail_configuration_sha256,
           'helper_sha256': github_runner_runtime_v2_mail_helper_sha256}
+         | combine({'retired_preparation': github_runner_runtime_v2_retired_preparation}
+                   if github_runner_runtime_v2_retired_preparation | length > 0 else {})
          if github_runner_runtime_v2_operating_install else none }}
   block:
     - name: Require complete source-package module inventory
