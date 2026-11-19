@@ -495,8 +495,10 @@ class NinthNativeDispatchTests(unittest.TestCase):
                  "qualification": {"path": "/qualified/ninth.json", "sha256": "9" * 64},
                  "successor": {"source_sha": "a" * 40, "run_id": cells.NINTH_RUN + 1, "run_attempt": 1,
                     "first_parent": cells.NINTH_MAIN, "source_workflow_sha256": "b" * 64, "reusable_sha": "c" * 40}}
-        with self.assertRaisesRegex(Denied, "successor-pins-unbound"):
-            cells.validate_continuation_descriptor(value, "b" * 64, "c" * 40)
+        with mock.patch.object(cells, "NINTH_SUCCESSOR_WORKFLOW", None), \
+             mock.patch.object(cells, "NINTH_SUCCESSOR_REUSABLE", None):
+            with self.assertRaisesRegex(Denied, "successor-pins-unbound"):
+                cells.validate_continuation_descriptor(value, "b" * 64, "c" * 40)
         with mock.patch.object(cells, "NINTH_SUCCESSOR_WORKFLOW", "b" * 64), \
              mock.patch.object(cells, "NINTH_SUCCESSOR_REUSABLE", "c" * 40):
             self.assertEqual(cells.validate_continuation_descriptor(value, "b" * 64, "c" * 40), value)
@@ -508,8 +510,13 @@ class NinthNativeDispatchTests(unittest.TestCase):
                 changed = deepcopy(value); changed["successor"][key] = bad
                 with self.subTest(key=key), self.assertRaises(Denied):
                     cells.validate_continuation_descriptor(changed, "b" * 64, "c" * 40)
-        self.assertIsNone(cells.NINTH_SUCCESSOR_WORKFLOW)
-        self.assertIsNone(cells.NINTH_SUCCESSOR_REUSABLE)
+        workflow = cells.NINTH_SUCCESSOR_WORKFLOW
+        reusable = cells.NINTH_SUCCESSOR_REUSABLE
+        live = deepcopy(value)
+        live["successor"].update(source_workflow_sha256=workflow, reusable_sha=reusable)
+        self.assertEqual(cells.validate_continuation_descriptor(live, workflow, reusable), live)
+        with self.assertRaises(Denied):
+            cells.validate_continuation_descriptor(live, workflow, cells.NINTH_REUSABLE)
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")

@@ -1614,10 +1614,9 @@ def _validate_ninth_retired_partial_qualification(value):
     return counts
 
 
-# No caller/reusable pin is invented. Native installation remains denied until
-# the complete locally qualified consumer and its protected publication exist.
-NINTH_SUCCESSOR_WORKFLOW = None
-NINTH_SUCCESSOR_REUSABLE = None
+# The isolated workflow on Validation Main and its exact Supplementary caller.
+NINTH_SUCCESSOR_WORKFLOW = "68eac383ebec4462071398bef54831e7199d1e924482dc9c267809f993684fc3"
+NINTH_SUCCESSOR_REUSABLE = "eeb932bf8a2a064a78161925182a3141df489790"
 
 
 def _validate_ninth_retired_partial_descriptor(value, workflow_sha256, reusable_sha):
