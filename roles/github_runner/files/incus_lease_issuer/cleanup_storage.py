@@ -478,6 +478,34 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
     raise Denied("cleanup-consumers-acquire-unstable")
 
 
+def _check_task_maps(mappings, protected, identities, end, previous):
+    """Reuse only decoded coordinates for identical bytes read from sibling tasks."""
+    _deadline(end)
+    require(not any(root in mappings for root in protected), "cleanup-consumers-mapped-reference")
+    if previous is not None and mappings == previous[0]:
+        for pair in previous[1]:
+            _deadline(end)
+            require(pair not in identities, "cleanup-consumers-mapped-reference")
+        _deadline(end)
+        return previous
+
+    # Larger maps still take the original full validation path. Bound the
+    # optional retained parser output independently of the kernel read limit.
+    parsed = [] if len(mappings) <= 128 * 1024 else None
+    for line in mappings.decode("utf-8", "strict").splitlines():
+        _deadline(end)
+        fields = line.split(None, 5)
+        require(len(fields) >= 5 and re.fullmatch(r"[0-9a-fA-F]+:[0-9a-fA-F]+", fields[3])
+                and fields[4].isdecimal(), "cleanup-consumers-maps-shape")
+        major, minor = (int(v, 16) for v in fields[3].split(":"))
+        pair = os.makedev(major, minor), int(fields[4])
+        require(pair not in identities, "cleanup-consumers-mapped-reference")
+        if parsed is not None:
+            parsed.append(pair)
+    _deadline(end)
+    return (mappings, tuple(parsed)) if parsed is not None else None
+
+
 def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
                        original_process=None, *, forbidden_namespace=None):
     require(forbidden_namespace is None or type(forbidden_namespace) is tuple
@@ -487,6 +515,7 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
             "cleanup-consumers-forbidden-namespace")
     protected = (data["engine"]["storage_root"], data["engine"]["runroot"],
                  data["output_path"], data["context_path"], descriptor_path)
+    protected_bytes = tuple(path.encode() for path in protected)
     allowed = {str(fd): _identity(os.fstat(fd)) for fd in opened if stat.S_ISDIR(os.fstat(fd).st_mode)}
     def referenced(value):
         value = value.removesuffix(" (deleted)")
@@ -518,6 +547,7 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
         except (FileNotFoundError, ProcessLookupError):
             require(not leader.exists(), "cleanup-consumers-observation-race")
             continue
+        previous_maps = None
         for proc in tasks:
             _deadline(end)
             count += 1
@@ -553,15 +583,7 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
                         continue
                     require(not referenced(value), "cleanup-consumers-process-reference")
                 mappings = read(proc / "maps", 8 * 1024**2)
-                require(not any(root.encode() in mappings for root in protected), "cleanup-consumers-mapped-reference")
-                for line in mappings.decode("utf-8", "strict").splitlines():
-                    _deadline(end)
-                    fields = line.split(None, 5)
-                    require(len(fields) >= 5 and re.fullmatch(r"[0-9a-fA-F]+:[0-9a-fA-F]+", fields[3])
-                            and fields[4].isdecimal(), "cleanup-consumers-maps-shape")
-                    major, minor = (int(v, 16) for v in fields[3].split(":"))
-                    require((os.makedev(major, minor), int(fields[4])) not in identities,
-                            "cleanup-consumers-mapped-reference")
+                previous_maps = _check_task_maps(mappings, protected_bytes, identities, end, previous_maps)
                 fds = []
                 for descriptor in (proc / "fd").iterdir():
                     _deadline(end)
