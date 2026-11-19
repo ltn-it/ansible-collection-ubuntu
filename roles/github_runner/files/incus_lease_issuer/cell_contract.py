@@ -10,11 +10,13 @@ or native namespace/runtime proof are supplied by this semantic component.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import ipaddress
 import os
 import re
+import signal
 import time
 from types import MappingProxyType
 from urllib.parse import urlsplit
@@ -269,6 +271,22 @@ def _incus(value, env, lease_id, cell_sha):
             "dns_domain": data["dns_domain"], "project_limits": limits, "ownership": ownership, "instance": instance}
 
 
+@contextmanager
+def _check_executable(digest):
+    # A process-wide initial-effects alarm interrupts only the main thread.
+    # Its handler stays installed until the transition has fully unwound.
+    if signal.getsignal(signal.SIGALRM) != signal.SIG_DFL:
+        engine._file(engine.ENGINE, digest, maximum=128 * 1024 * 1024)
+        yield
+        return
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        check = pool.submit(engine._file, engine.ENGINE, digest, maximum=128 * 1024 * 1024)
+        try:
+            yield
+        finally:
+            check.result()
+
+
 def _validate_engine_template(template, env, native, deadline, created_at):
     """Read-only static template validation, without a lease or descriptor.
 
@@ -301,26 +319,19 @@ def _validate_engine_template(template, env, native, deadline, created_at):
     engine._integer(capture["total_limit"], 1, stdout_limit + stderr_limit)
     binary = engine._keys(template["engine"], {"executable", "executable_sha256"})
     require(binary["executable"] == engine.ENGINE, "cell-engine-executable")
-    # The executable is fixed by root policy. Read its digest concurrently
-    # with the independent sealed inputs, and join before deriving a descriptor.
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        executable = pool.submit(engine._file, engine.ENGINE, binary["executable_sha256"], maximum=128 * 1024 * 1024)
-        try:
-            paths = engine._keys(template["paths"], PATH_KEYS)
-            for path in paths.values():
-                fd = engine._directory(path, private=True)
-                os.close(fd)
-            require(len(set(paths.values())) == len(PATH_KEYS), "cell-path-overlap")
-            archives = engine._keys(template["archives"], {"controller", "candidate"})
-            for item in archives.values():
-                engine._keys(item, {"path", "sha256"})
-                engine._file(item["path"], item["sha256"])
-            trees = engine._keys(template["trees"], {"workspace", "controller", "candidate"})
-            for item in trees.values():
-                engine._tree(item)
-        finally:
-            # Preserve the original precedence if both validations fail.
-            executable.result()
+    with _check_executable(binary["executable_sha256"]):
+        paths = engine._keys(template["paths"], PATH_KEYS)
+        for path in paths.values():
+            fd = engine._directory(path, private=True)
+            os.close(fd)
+        require(len(set(paths.values())) == len(PATH_KEYS), "cell-path-overlap")
+        archives = engine._keys(template["archives"], {"controller", "candidate"})
+        for item in archives.values():
+            engine._keys(item, {"path", "sha256"})
+            engine._file(item["path"], item["sha256"])
+        trees = engine._keys(template["trees"], {"workspace", "controller", "candidate"})
+        for item in trees.values():
+            engine._tree(item)
     roots = list(paths.values()) + [v["path"] for v in trees.values()] + [v["path"] for v in archives.values()]
     require(len(set(roots)) == len(roots) and not any(a.startswith(b + "/") for a in roots for b in roots if a != b), "cell-path-overlap")
     engine._environment(env, native.service_uid, uid, gid)

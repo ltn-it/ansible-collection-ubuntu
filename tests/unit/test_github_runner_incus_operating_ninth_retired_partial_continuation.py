@@ -137,6 +137,48 @@ class NinthSeparateRetirementTests(unittest.TestCase):
                     cells._validate_ninth_retired_partial_qualification(changed)
 
 
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "trusted root-owned netns parent")
+class NinthNetworkWithdrawalTests(unittest.TestCase):
+    def test_readonly_link_inventory_and_root_owned_namespace_parent(self):
+        from incus_lease_issuer import network_fence as fence
+        fixed = cells.NINTH_RETIRED_PARTIAL
+        lease = fixed["original_record"]["lease_id"]
+        name = "lth" + lease[:12]
+        config = SimpleNamespace(network_fence_policy_path="/policy", network_fence_policy_sha256="f"*64)
+        metadata = {"host": name, "lease_id": lease, "host_ifindex": 12250}
+        receipt = (SimpleNamespace(sha256=fixed["veth_receipt"]["sha256"]), ledger.canonical({"metadata": metadata}), None)
+        with tempfile.TemporaryDirectory(dir=validated_fixture_parent(Path("/run/proof"), private=True)) as directory, ExitStack() as stack:
+            parent = Path(directory) / "netns"
+            parent.mkdir(mode=0o755)
+            parent.chmod(0o755)
+            open_directory = factory.installation._open_directory
+            def open_parent(path):
+                self.assertEqual(path, "/run/netns")
+                return open_directory(str(parent))
+            stack.enter_context(mock.patch.object(factory.installation, "_open_directory", side_effect=open_parent))
+            stack.enter_context(mock.patch.object(factory.installation, "_file", return_value=receipt))
+            bound = stack.enter_context(mock.patch.object(fence, "_bound_policy"))
+            inventory = stack.enter_context(mock.patch.object(fence, "_ip"))
+            visible = [{"ifname": "lo", "ifindex": 1}]
+            inventory.return_value = visible
+            factory._ninth_host_network_absent(config, lease)
+            bound.assert_called_once_with(config.network_fence_policy_path, config.network_fence_policy_sha256, config)
+            inventory.assert_called_once_with(bound.return_value, "link", "show")
+            for rows in ([], [{"ifname": name, "ifindex": 77}], [{"ifname": "renamed", "ifindex": 12250}], [{}]):
+                inventory.return_value = rows
+                with self.subTest(rows=rows), self.assertRaisesRegex(Denied, "host-link-returned"):
+                    factory._ninth_host_network_absent(config, lease)
+            inventory.return_value = visible
+            alias = parent / ("lit-lease-" + lease)
+            alias.symlink_to("absent-target")
+            with self.assertRaisesRegex(Denied, "alias-returned"):
+                factory._ninth_host_network_absent(config, lease)
+            alias.unlink()
+            parent.chmod(0o777)
+            with self.assertRaisesRegex(Denied, "untrusted-directory"):
+                factory._ninth_host_network_absent(config, lease)
+
+
 class NinthVolumeCensusTests(unittest.TestCase):
     def test_only_the_censused_mount_and_filesystem_are_accepted(self):
         from incus_lease_issuer import cleanup_storage, storage_quota

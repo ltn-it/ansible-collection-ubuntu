@@ -1797,6 +1797,32 @@ def _ninth_storage_census_continuity(config):
                 "ccf207f4408979cf96465e8f6a696c8ffb36f5082dee79b192e7894432bbc001", "continuation-ninth-census-volume-changed")
 
 
+def _ninth_host_network_absent(config, lease):
+    from . import network_fence
+    fixed = operating_cells.NINTH_RETIRED_PARTIAL
+    ref = fixed["veth_receipt"]
+    proof, raw, _ = installation._file(ref["path"], 32768, private=True, keep=True)
+    require(proof.sha256 == ref["sha256"], "continuation-ninth-withdrawal-receipt")
+    metadata = identity.decode_json(raw)["metadata"]
+    name = "lth" + lease[:12]
+    index = metadata["host_ifindex"]
+    require(lease == fixed["original_record"]["lease_id"] == metadata["lease_id"]
+            and metadata["host"] == name and type(index) is int and index > 0,
+            "continuation-ninth-withdrawal-receipt")
+    policy = network_fence._bound_policy(config.network_fence_policy_path, config.network_fence_policy_sha256, config)
+    host = network_fence._host_namespace()
+    rows = network_fence._ip(policy, "link", "show")
+    require(rows and all(type(row.get("ifname")) is str and type(row.get("ifindex")) is int
+                         and row["ifname"] != name and row["ifindex"] != index for row in rows),
+            "continuation-ninth-host-link-returned")
+    parent = installation._open_directory("/run/netns")
+    try:
+        require("lit-lease-" + lease not in os.listdir(parent), "continuation-ninth-alias-returned")
+    finally:
+        os.close(parent)
+    require(network_fence._host_namespace() == host, "fence-host-namespace-changed")
+
+
 def _ninth_original_resources_absent(old, configuration):
     """Fresh original-scope product/process absence, without adopting its lease."""
     from types import SimpleNamespace
@@ -1824,8 +1850,8 @@ def _ninth_original_resources_absent(old, configuration):
         descriptor = cell["engine"]["paths"]["descriptor"] + "/" + lease + ".json"
         paths = (data["engine"]["storage_root"], data["engine"]["runroot"],
                  data["output_path"], data["context_path"], descriptor)
-        alias = "/run/netns/lit-lease-" + lease
-        cleanup_storage._absent((*paths, alias))
+        cleanup_storage._absent(paths)
+        _ninth_host_network_absent(config, lease)
         roots, opened, identities = [], [], set()
         try:
             for index, path in enumerate(paths):
@@ -1875,7 +1901,8 @@ def _ninth_original_resources_absent(old, configuration):
             require(not any(item["name"] == "lit-lease-" + lease or target["project"] in item["projects"]
                             or item["fingerprint"] == "b5463e5f4508e89e8e58c11c5b198360aa75501829605549161e9d91ca2c7626"
                             for item in certificates), "continuation-ninth-original-certificate-returned")
-        cleanup_storage._absent((*paths, alias))
+        cleanup_storage._absent(paths)
+        _ninth_host_network_absent(config, lease)
         require(store.read(lease) == row, "continuation-ninth-original-resource-record-drift")
     _ninth_storage_census_continuity(config)
 

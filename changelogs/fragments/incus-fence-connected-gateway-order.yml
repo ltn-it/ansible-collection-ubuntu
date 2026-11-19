@@ -40,3 +40,7 @@ bugfixes:
   - >-
       github_runner - start the longest historical lookup in the first batch and reduce repeated
       path and mapping work during full process scans within the existing authorization deadline.
+  - >-
+      github_runner - interrupt executable verification at the initial VM preparation deadline, check each task's
+      mount view during ordinary cleanup, and verify the retired host interface and namespace alias before and
+      after checking the original resources.

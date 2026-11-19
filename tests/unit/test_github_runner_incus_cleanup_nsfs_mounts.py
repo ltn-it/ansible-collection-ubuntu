@@ -104,7 +104,10 @@ class NamespaceMountConsumerWalk(unittest.TestCase):
         def read(path, limit, end):
             raw = actual_read(path, limit, end)
             if str(path) == f"/proc/{child}/task/{child}/mountinfo":
-                return self.append_namespace(raw)
+                identifier = max(int(row.split()[0]) for row in raw.splitlines()) + 2
+                point = self.data["engine"]["storage_root"]
+                mount = f"{identifier} 1 8:1 / {point} rw - ext4 /dev/test rw\n".encode()
+                return self.append_namespace(raw) + mount
             return raw
         try:
             # Only the later task sees the extra mount in its root-relative view.
@@ -113,6 +116,8 @@ class NamespaceMountConsumerWalk(unittest.TestCase):
                      mock.patch.object(subject, "_consumer_read", side_effect=read):
                     with self.assertRaisesRegex(Denied, "namespace-mount-reference"):
                         self.observe((4, 4026532529))
+                    with self.assertRaisesRegex(Denied, "cleanup-consumers-mount-reference"):
+                        self.observe()
         finally:
             os.close(writefd)
             os.waitpid(child, 0)
