@@ -28,3 +28,6 @@ bugfixes:
   - >-
       github_runner - distinguish a changed borrowed socket descriptor from a stable forbidden namespace socket;
       only descriptor churn may trigger complete reacquisition within the existing deadline.
+  - >-
+      github_runner - read runtime receipt cell configuration through the existing sealed cell contract,
+      retaining its size and digest guards for source inventories larger than 64 KiB.
