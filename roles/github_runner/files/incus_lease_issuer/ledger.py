@@ -87,11 +87,11 @@ CREATES = {
     "certificate-create": "certificate-revoke", "instance-create": "instance-destroy",
     "network-create": "network-delete", "project-create": "project-delete",
     "context-create": "context-delete", "engine-start": "engine-stop",
-    "engine-prepare": "engine-release",
+    "engine-prepare": "engine-release", "slice-create": "slice-remove",
     "fence-create": "fence-remove",
 }
 PROVISIONING = frozenset({"image-copy", "network-create", "project-create", "profile-configure", "context-create", "context-publish",
-                          "engine-prepare", "engine-start", "fence-create"})
+                          "engine-prepare", "engine-start", "fence-create", "slice-create"})
 WITHDRAWALS = frozenset({"fence-disable"})
 ONCE = PROVISIONING | WITHDRAWALS | {"instance-stop", "operating-ready", "engine-graph-prune"}
 CLEANUPS = frozenset(CREATES.values())
@@ -101,6 +101,21 @@ OPERATIONS = frozenset(CREATES) | CLEANUPS | OBSERVATIONS | WITHDRAWALS | {
 INCUS_OPERATIONS = frozenset({"image-copy", "image-delete", "network-create", "network-delete", "project-create", "project-delete",
                               "profile-configure", "certificate-create", "certificate-revoke",
                               "instance-create", "instance-destroy", "instance-stop"})
+
+
+def _unresolved_pre_fence_slice(identifier, effects):
+    """Identify an interrupted slice start with a complete pre-fence prefix."""
+    prefix = {"network-create", "project-create", "profile-configure", "context-create",
+              "certificate-create", "engine-prepare", "context-publish"}
+    verified = {effect["operation"] for effect in effects if effect["state"] == "verified"}
+    slices = [effect for effect in effects if effect["operation"] == "slice-create"]
+    if (len(slices) == 1 and slices[0]["state"] in {"intent", "unknown"}
+            and slices[0]["target"] == "slice:" + identifier and prefix <= verified
+            and all(effect["operation"] in {"slice-create", "certificate-revoke"}
+                    or effect["operation"] in prefix | {"image-copy"} and effect["state"] == "verified"
+                    for effect in effects)):
+        return slices[0]
+    return None
 
 
 def _graph_prune_binding(value, effect, lease):
@@ -144,6 +159,13 @@ def _validate_engine_capture(value):
                     for key in ("stdout_limit", "stderr_limit"))
             and type(value["total_limit"]) is int
             and 0 < value["total_limit"] <= value["stdout_limit"] + value["stderr_limit"], "invalid-engine-capture")
+
+
+def _validate_slice(value, boot_id):
+    require(type(value) is dict and set(value) == {"boot_id", "cgroup_device", "cgroup_inode"}
+            and _native_uuid(value["boot_id"]) and value["boot_id"] == boot_id
+            and type(value["cgroup_device"]) is int and value["cgroup_device"] > 0
+            and type(value["cgroup_inode"]) is int and value["cgroup_inode"] > 0, "invalid-engine-slice")
 
 
 def _validate_engine_exit(value, effect):
@@ -250,6 +272,8 @@ def _target_valid(operation, target):
         return bool(re.fullmatch(r"context:[0-9a-f]{64}:[0-9a-f]{64}", target))
     if operation in {"engine-prepare", "engine-release", "engine-graph-prune"}:
         return bool(re.fullmatch(r"engine:[0-9a-f]{32}", target))
+    if operation in {"slice-create", "slice-remove"}:
+        return bool(re.fullmatch(r"slice:[0-9a-f]{32}", target))
     if operation in {"engine-start", "engine-stop"}:
         return bool(re.fullmatch(r"engine:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", target))
     if operation in {"fence-create", "fence-remove", "fence-disable"}:
@@ -628,6 +652,8 @@ class Ledger:
                             and type(lease.get("cancelled_at")) is int and lease["cancelled_at"] >= expiry
                             and lease["state"] in {"cancelled", "retained", "closed"}, "ledger-corrupt")
                 effect_targets, provisioned = set(), set()
+                fence_released = any(row["operation"] == "fence-remove" and row["state"] == "verified"
+                                     for row in lease["effects"].values())
                 for effect_key, effect in lease["effects"].items():
                     require(ID.fullmatch(effect_key) and effect["operation"] in OPERATIONS
                             and effect["state"] in {"intent", "unknown", "verified", "not_applied", "failed"}
@@ -710,11 +736,13 @@ class Ledger:
                         fence = effect["fence"]
                         _validate_fence(fence)
                         key_fence = (fence["boot_id"], fence["netns_device"], fence["netns_inode"])
-                        require(effect["operation"] == "fence-create" and key_fence not in fence_namespaces,
-                                "ledger-corrupt")
-                        require((fence["boot_id"], fence["host_ifindex"]) not in fence_host_interfaces, "ledger-corrupt")
-                        fence_namespaces.add(key_fence)
-                        fence_host_interfaces.add((fence["boot_id"], fence["host_ifindex"]))
+                        require(effect["operation"] == "fence-create", "ledger-corrupt")
+                        if not fence_released:
+                            host_link = (fence["boot_id"], fence["host_ifindex"])
+                            require(key_fence not in fence_namespaces and host_link not in fence_host_interfaces,
+                                    "ledger-corrupt")
+                            fence_namespaces.add(key_fence)
+                            fence_host_interfaces.add(host_link)
                     if "fence_authorization" in effect:
                         require(effect["operation"] == "fence-renew", "ledger-corrupt")
                         _validate_fence_authorization(effect["fence_authorization"], lease, effect)
@@ -750,6 +778,19 @@ class Ledger:
                         _graph_prune_binding(effect["graph_prune"], effect, lease)
                     if effect["operation"] == "engine-graph-prune" and effect["state"] == "verified":
                         require("graph_prune" in effect, "engine-cache-binding-missing")
+                    if effect["operation"] in {"slice-create", "slice-remove"}:
+                        require(effect["target"] == "slice:" + key, "ledger-corrupt")
+                    if "engine_slice" in effect:
+                        require(effect["operation"] == "slice-create", "ledger-corrupt")
+                        _validate_slice(effect["engine_slice"], worker.boot_id)
+                    if effect["operation"] == "slice-create" and effect["state"] == "verified":
+                        require("engine_slice" in effect, "ledger-corrupt")
+                    if effect["operation"] == "engine-start" and "engine_capture" in effect:
+                        slices = [item for item in effects if item["operation"] == "slice-create"]
+                        if slices:
+                            require(len(slices) == 1 and slices[0]["state"] == "verified"
+                                    and all(effect["engine_capture"][field] == slices[0]["engine_slice"][field]
+                                            for field in ("cgroup_device", "cgroup_inode")), "engine-capture-slice-drift")
                     if effect["operation"] in {"engine-start", "engine-stop"}:
                         require(effect["target"] == "engine:lit-lease-" + key, "ledger-corrupt")
                     if effect["operation"] in {"fence-create", "fence-remove", "fence-disable", "fence-renew"}:
@@ -1222,9 +1263,16 @@ class Ledger:
         owned_stop = operation == "engine-stop" and target == "engine:lit-lease-" + identifier and any(
             e["operation"] == "engine-start" and e["target"] == target and e["state"] == "verified"
             and "engine_process" in e and "engine_container_id" in e for e in effects)
-        # A first exact-owned withdrawal is the sole unresolved-effect
-        # exception: it cannot enable access or resolve any other effect.
-        require(operation in WITHDRAWALS or owned_stop
+        first_pre_fence_revoke = (operation == "certificate-revoke"
+            and not any(e["operation"] == "certificate-revoke" for e in effects)
+            and (lease["state"] == "cancelled" or "native_terminal" in lease
+                 or now >= min(lease["expires_at"], lease["authorizations"][-1]["valid_until"]))
+            and _unresolved_pre_fence_slice(identifier, effects) is not None
+            and any(e["operation"] == "certificate-create" and e["target"] == target
+                    and e["state"] == "verified" and "certificate_scope" in e for e in effects))
+        # Immediate safety effects can proceed within their original ownership.
+        # An unresolved slice still blocks all resource cleanup.
+        require(operation in WITHDRAWALS or owned_stop or first_pre_fence_revoke
                 or not any(e["state"] in {"intent", "unknown"} for e in effects),
                 "effect-unresolved")
         require(not any(e["operation"] == operation and e["target"] == target for e in effects), "effect-replay")
@@ -1232,6 +1280,8 @@ class Ledger:
             require(not any(e["operation"] == operation for e in effects), "provisioning-replay")
         if operation in {"engine-prepare", "engine-release", "engine-graph-prune"}:
             require(target == "engine:" + identifier, "engine-lease-target")
+        if operation in {"slice-create", "slice-remove"}:
+            require(target == "slice:" + identifier, "engine-slice-target")
         if operation in {"engine-start", "engine-stop"}:
             require(target == "engine:lit-lease-" + identifier, "engine-lease-target")
         if operation == "engine-start":
@@ -1335,6 +1385,7 @@ class Ledger:
             "context-refresh": {"network-create", "project-create", "profile-configure", "context-create",
                                 "certificate-create", "context-publish"},
             "engine-prepare": {"context-create", "certificate-create"},
+            "slice-create": {"engine-prepare", "context-publish"},
             "fence-disable": {"fence-create"},
             "fence-renew": {"fence-create"},
             "engine-start": {"network-create", "project-create", "profile-configure", "certificate-create", "context-create",
@@ -1349,6 +1400,8 @@ class Ledger:
                 needed[operation].add("context-create")
             if operation in CREATES or operation in {"profile-configure", "context-publish", "context-refresh", "fence-renew"}:
                 require(not any(e["operation"] in CLEANUPS for e in effects), "provisioning-cleanup-started")
+        if operation in {"engine-start", "fence-create"} and any(e["operation"] == "slice-create" for e in effects):
+            require("slice-create" in live, "engine-slice-not-owned")
         require(needed.get(operation, set()) <= live, "effect-prerequisite")
         blockers = {
             "instance-destroy": {"engine-start"},
@@ -1356,6 +1409,7 @@ class Ledger:
             "engine-release": {"engine-start"},
             "engine-graph-prune": {"engine-start", "certificate-create", "fence-create"},
             "fence-remove": {"engine-start"},
+            "slice-remove": {"engine-start", "fence-create"},
             "project-delete": {"engine-start", "instance-create", "certificate-create", "context-create", "image-copy"},
             "network-delete": {"engine-start", "instance-create", "project-create", "certificate-create", "image-copy"},
             "image-delete": {"engine-start", "instance-create", "certificate-create"},
@@ -1524,6 +1578,18 @@ class Ledger:
                 and effect["state"] in {"intent", "unknown", "verified"}, "engine-observation-effect")
         return lease, effect
 
+    def bind_engine_slice(self, identifier, effect_id, *, boot_id, cgroup_device, cgroup_inode):
+        """Bind the actual kernel slice before it may host a Podman process."""
+        value = {"boot_id": boot_id, "cgroup_device": cgroup_device, "cgroup_inode": cgroup_inode}
+        with self._transaction() as state:
+            lease = self._lease(state, identifier)
+            _validate_slice(value, lease["worker"]["boot_id"])
+            effect = lease["effects"].get(effect_id)
+            require(lease["state"] == "prepared" and effect is not None
+                    and effect["operation"] == "slice-create" and effect["target"] == "slice:" + identifier
+                    and effect["state"] == "intent" and "engine_slice" not in effect, "engine-slice-effect")
+            effect["engine_slice"] = value
+
     def bind_engine_capture(self, identifier, effect_id, *, manifest_sha256, cgroup_device, cgroup_inode,
                             stdout_device, stdout_inode, stderr_device, stderr_inode,
                             stdout_limit, stderr_limit, total_limit):
@@ -1617,7 +1683,12 @@ class Ledger:
                 require(effect["fence"] == fence, "fence-metadata-rebind")
                 return
             for record in state["leases"].values():
-                for other in record["effects"].values():
+                effects = record["effects"].values()
+                # Kernel identifiers may be recycled after a verified removal.
+                # Every unresolved namespace keeps its exclusive claim.
+                if any(row["operation"] == "fence-remove" and row["state"] == "verified" for row in effects):
+                    continue
+                for other in effects:
                     if "fence" in other:
                         owned = other["fence"]
                         require((owned["boot_id"], owned["netns_device"], owned["netns_inode"]) != key

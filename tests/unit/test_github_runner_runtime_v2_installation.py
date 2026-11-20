@@ -40,6 +40,7 @@ class InstallationContractTests(unittest.TestCase):
         self.assertEqual(defaults["github_runner_runtime_v2_module_sha256"], {})
         self.assertEqual(defaults["github_runner_runtime_v2_client_sha256"], {})
         self.assertEqual(defaults["github_runner_runtime_v2_terminal_history"], {})
+        self.assertEqual(defaults["github_runner_runtime_v2_pending_preparation_handoff"], {})
         main = (ROLE / "tasks/main.yml").read_text()
         self.assertLess(main.index("runtime_v2.yml"), main.index("Ensure GitHub runner packages"))
         self.assertIn("github_runner_runtime_v2_install or github_runner_runtime_v2_operating_install", main)
@@ -497,3 +498,153 @@ class RootInstalledRuntimeTests(unittest.TestCase):
 
 
 if __name__=="__main__":unittest.main()
+
+
+class PendingPreparationHandoffTests(unittest.TestCase):
+    def setUp(self):
+        self.machine = "a" * 32
+        self.boot = "12345678-1234-4234-8234-123456789abc"
+        self.source = "b" * 40
+        self.controller = "c" * 40
+        self.lease = "d" * 32
+        self.digest = "e" * 64
+        self.unit = "actions.runner.demo.incus-runner-01.service"
+        self.cell = {"kind": "business", "native_job_name": "Heavy",
+                     "incus": {"project_prefix": "g06-"}}
+        self.runtime = {"ledger_path": "/ledger", "source_identity": {
+            "runner_id": 78, "service_uid": 2101, "reusable_sha": self.controller, "actor_ids": [9, 1]},
+            "cells": {"heavy": self.cell},
+            "operating_continuation": {"successor": {
+                "run_id": 99, "run_attempt": 1, "source_sha": self.source, "reusable_sha": self.controller}},
+            "collector": {"service": {"unit": self.unit}}}
+        self.effects = {name: {"operation": name, "state": "verified", "evidence_sha256": "a" * 64}
+                        for name in ("network-create", "project-create", "profile-configure", "context-create",
+                                     "certificate-create", "engine-prepare", "context-publish", "fence-create",
+                                     "fence-renew")}
+        target = "fence:" + self.lease
+        self.project = self.cell["incus"]["project_prefix"] + self.lease
+        self.effects["project-create"]["target"] = "project:" + self.project
+        policy = {**self.runtime["source_identity"], "actor_ids": [1, 9], "caller_sha": self.source,
+                  "required_native_job_name": self.cell["native_job_name"]}
+        policy_sha256 = hashlib.sha256(probe.canonical(policy)).hexdigest()
+        self.effects["fence-create"].update(target=target, fence={"boot_id": self.boot},
+                                           host_api={"boot_id": self.boot})
+        grant = {"allow_expires_at": 250, "expires_boot_ns": 700}
+        self.effects["fence-renew"].update(target=target + ":" + "f" * 64, fence_authorization=grant.copy(),
+                                          host_api_authorization=grant.copy())
+        self.row = {"state": "prepared", "created_at": 100, "expires_at": 280, "effects": self.effects,
+                    "identity": {"run_id": 99, "job_id": 90, "check_run_id": 90, "runner_id": 78,
+                                 "service_uid": 2101, "caller_sha": self.source, "reusable_sha": self.controller,
+                                 "policy_sha256": policy_sha256},
+                    "worker": {"boot_id": self.boot, "runner_id": 78, "uid": 2101},
+                    "authorizations": [{"token_id_sha256": "f" * 64, "valid_until": 250}]}
+        self.state = {"leases": {self.lease: self.row}}
+        self.proof = {"schema": 1, "kind": "expired-pre-engine-installation-handoff",
+                      "bootstrap_sha256": self.digest, "source_machine_id": self.machine, "source_boot_id": self.boot,
+                      "bank": {"device": 11, "inode": 12}, "lease_id": self.lease,
+                      "native_terminal": {"run_id": 99, "job_id": 90, "check_run_id": 90, "source_sha": self.source,
+                                          "conclusion": "failure", "completed_at": 200, "run_attempt": 1},
+                      "isolation": {"observed_at": 260, "private_grant_ms": 0, "host_grant_ms": 0,
+                                    "native_instance_count": 0}}
+
+    def check(self):
+        raw = probe.canonical(self.state)
+        state_digest = hashlib.sha256(raw).hexdigest()
+        self.proof["bank"]["state_sha256"] = state_digest
+        self.proof["lease_sha256"] = hashlib.sha256(probe.canonical(self.row)).hexdigest()
+        proof = probe.canonical(self.proof)
+        ref = {"path": "/handoff-private.json", "sha256": hashlib.sha256(proof).hexdigest()}
+        def sealed(path, *args, **kwargs):
+            return {"/etc/machine-id": self.machine.encode(), "/ledger/state.json": raw, ref["path"]: proof}[path]
+
+        with mock.patch.object(probe, "sealed", side_effect=sealed), \
+             mock.patch.object(probe, "boot_id", return_value=self.boot), \
+             mock.patch.object(probe.time, "time", return_value=300), \
+             mock.patch.object(probe.time, "clock_gettime_ns", return_value=1000), \
+             mock.patch.object(probe, "directory", return_value=123), \
+             mock.patch.object(probe.os, "fstat", return_value=SimpleNamespace(st_dev=11, st_ino=12)), \
+             mock.patch.object(probe.os, "close"), \
+             mock.patch.object(probe, "preparation_runner_inactive") as inactive:
+            probe.pending_preparation(self.runtime, self.digest, self.state, raw, ref)
+            inactive.assert_called_once_with(self.unit)
+
+    def test_only_expired_known_pre_engine_failure_can_be_carried(self):
+        self.check()
+
+    def test_operating_handoff_requires_verified_in_project_pinned_image(self):
+        image = "1" * 64
+        self.cell.update(kind="operating", operating={"image": image})
+        image_effect = {"operation": "image-copy", "state": "verified", "evidence_sha256": "2" * 64,
+                        "target": f"image:{self.project}:{image}"}
+        with self.assertRaises(ValueError):
+            self.check()
+        self.effects["image-copy"] = image_effect
+        self.check()
+        image_effect["target"] = f"image:foreign:{image}"
+        with self.assertRaises(ValueError):
+            self.check()
+        image_effect.update(target=f"image:{self.project}:{image}", state="unknown")
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_unmatched_native_cell_policy_rejected(self):
+        self.row["identity"]["policy_sha256"] = "0" * 64
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_only_verified_slice_bound_to_original_lease_and_cgroup_can_be_carried(self):
+        binding = {"boot_id": self.boot, "cgroup_device": 35, "cgroup_inode": 2101}
+        creator = {"operation": "slice-create", "state": "verified", "target": "slice:" + self.lease,
+                   "engine_slice": binding, "evidence_sha256": hashlib.sha256(probe.canonical(binding)).hexdigest()}
+        self.effects["slice-create"] = creator
+        self.check()
+        for change in ({"state": "unknown"}, {"target": "slice:" + "a" * 32}, {"evidence_sha256": "0" * 64}):
+            with self.subTest(change=change):
+                self.effects["slice-create"] = {**creator, **change}
+                with self.assertRaises(ValueError):
+                    self.check()
+        for change in ({"boot_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}, {"cgroup_inode": 0},
+                       {"cgroup_device": True}):
+            with self.subTest(change=change):
+                invalid = {**binding, **change}
+                self.effects["slice-create"] = {**creator, "engine_slice": invalid,
+                    "evidence_sha256": hashlib.sha256(probe.canonical(invalid)).hexdigest()}
+                with self.assertRaises(ValueError):
+                    self.check()
+
+    def test_foreign_terminal_same_bytes_rejected(self):
+        self.proof["native_terminal"]["check_run_id"] = 88
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_unexpired_boot_deadline_rejected(self):
+        self.effects["fence-renew"]["host_api_authorization"]["expires_boot_ns"] = 1200
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_observed_instance_rejected(self):
+        self.proof["isolation"]["native_instance_count"] = 1
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_unknown_creator_rejected(self):
+        self.effects["engine-prepare"]["state"] = "unknown"
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_engine_start_rejected(self):
+        self.effects["engine-start"] = {"operation": "engine-start", "state": "intent"}
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_runner_must_be_inactive(self):
+        state = {"Id": self.unit, "LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+                 "MainPID": "0", "ControlPID": "0", "Job": ""}
+        def output():
+            return SimpleNamespace(returncode=0, stdout="".join(f"{k}={v}\n" for k, v in state.items()).encode())
+        with mock.patch.object(probe.subprocess, "run", return_value=output()):
+            probe.preparation_runner_inactive(self.unit)
+        state.update(MainPID="123", ActiveState="active", SubState="running")
+        with mock.patch.object(probe.subprocess, "run", return_value=output()):
+            with self.assertRaises(ValueError):
+                probe.preparation_runner_inactive(self.unit)

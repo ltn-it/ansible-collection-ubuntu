@@ -1350,6 +1350,24 @@ class IncusLedgerTests(unittest.TestCase):
         self.write_corrupted_snapshot(self.path, state, recompute_checksum=True)
         self.deny(self.open)
 
+    def test_fence_locator_recycling_requires_verified_original_removal(self):
+        with self.open() as store:
+            first, _, _, _ = self.prepare(store)
+            create = store.begin(first, "fence-create", "fence:" + first)
+            proof = self.fence_metadata()
+            store.bind_fence(first, create, **proof)
+            store.record(first, create, "verified", evidence_sha256=EVIDENCE)
+            second, _, _, _ = self.prepare(store, worker=replace(self.worker, uid=2102, runner_id=62, pid=12346),
+                identity_changes={"service_uid": 2102, "runner_id": 62, "run_id": 502,
+                                  "job_id": 903, "check_run_id": 732, "token_id_sha256": "c" * 64})
+            other = store.begin(second, "fence-create", "fence:" + second)
+            removal = store.begin(first, "fence-remove", "fence:" + first)
+            self.deny(store.bind_fence, second, other, **proof)
+            store.record(first, removal, "verified", evidence_sha256=EVIDENCE)
+            store.bind_fence(second, other, **proof)
+            self.assertEqual(store.read(first)["effects"][create]["fence"], proof)
+            self.assertEqual(store.read(second)["effects"][other]["fence"], proof)
+
     def test_fence_metadata_rejects_untyped_fields_and_unrelated_effects(self):
         with self.open() as store:
             lease, _, _, _ = self.prepare(store)

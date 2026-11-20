@@ -5,6 +5,7 @@ verification. No dummy admission cell, global anchor replacement, offline
 publisher call, TLS/signing-key read, lease initialization or engine effect is
 performed here. Existing native custody/lease admission remains mandatory.
 """
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from concurrent.futures import ThreadPoolExecutor
 import base64
@@ -728,7 +729,8 @@ def _continuation_origin_absent(bootstrap, qualified):
         with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
             require(_ninth_retired_partial_projection(bootstrap.value["ledger_path"],
                         receipt["retirement"]["original_bootstrap"], receipt["previous_qualification"],
-                        revalidating=True, defer_catalogues=True) == receipt["retirement"],
+                        revalidating=True, defer_catalogues=True,
+                        successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
         retired = receipt["retirement"]["catalogues"]
     elif descriptor["schema"] == 8:
@@ -885,17 +887,14 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             # still freshly checked on every revalidation; no shared cache exists.
             if check_origin:
                 _continuation_native_histories(get, descriptor, receipt)
+            # Origin validation may read a network namespace cookie. Its observer
+            # needs the process to be single-threaded after the history reads.
+            _continuation_origin_absent(selected.bootstrap, qualified)
             needs_commit = descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9, 10} or identity.decode_json(selected.template_bytes)["kind"] == "operating"
             if needs_commit:
-                # Fetch only the immutable Git object during the local check.
-                # Validate it after the original origin check on the owning thread.
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    commit = pool.submit(get, "/git/commits/" + who.caller_sha)
-                    _continuation_origin_absent(selected.bootstrap, qualified)
-                    operating_cells.validate_continuation_commit(commit.result(), descriptor,
-                                                                 who.caller_sha, who.run_id, who.reusable_sha)
-            else:
-                _continuation_origin_absent(selected.bootstrap, qualified)
+                commit = get("/git/commits/" + who.caller_sha)
+                operating_cells.validate_continuation_commit(commit, descriptor, who.caller_sha, who.run_id,
+                                                             who.reusable_sha)
         elif identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_initial_main(get("/git/commits/" + who.caller_sha), who.caller_sha)
         admission._socket(connected)
@@ -1865,7 +1864,61 @@ def _ninth_host_network_absent(config, lease):
     require(network_fence._host_namespace() == host, "fence-host-namespace-changed")
 
 
-def _ninth_original_resources_absent(old, configuration):
+_NINTH_NAMESPACE = (4, 4026532529)
+_NINTH_NAMESPACE_COOKIE = 25882
+
+
+@contextmanager
+def _historical_namespace_coordinates(successor_bank, successor):
+    """Pin a proven successor generation while scanning for the old one."""
+    from . import kernel, network_fence
+
+    if successor is None:
+        yield _NINTH_NAMESPACE
+        return
+    with ledger.Ledger(successor_bank, clock=time.time) as store:
+        matches = []
+        for lease_id in store.lease_ids():
+            row = store.read(lease_id)
+            who = row["identity"]
+            require((who["run_id"], who["caller_sha"], who["reusable_sha"])
+                    == (successor["run_id"], successor["source_sha"], successor["reusable_sha"]),
+                    "continuation-namespace-successor-origin")
+            if row["state"] == "closed" or any(e["operation"] == "fence-remove" and e["state"] == "verified"
+                                               for e in row["effects"].values()):
+                continue
+            for effect in row["effects"].values():
+                fence = effect.get("fence")
+                if fence and (fence["netns_device"], fence["netns_inode"]) == _NINTH_NAMESPACE:
+                    require(effect["operation"] == "fence-create" and effect["target"] == "fence:" + lease_id
+                            and effect["state"] == "verified" and fence["boot_id"] == kernel.read_boot_id()
+                            and "host_api" in effect
+                            and not any(e["operation"] == "fence-remove" for e in row["effects"].values()),
+                            "continuation-namespace-successor-fence")
+                    matches.append((lease_id, effect))
+        require(len(matches) <= 1, "continuation-namespace-successor-unique")
+        if not matches:
+            yield _NINTH_NAMESPACE
+            return
+        lease_id, original = matches[0]
+        name = "lit-lease-" + lease_id
+        with network_fence._namespace_witness(name) as (fd, info):
+            require((info.st_dev, info.st_ino) == _NINTH_NAMESPACE
+                    and network_fence._namespace_cookie(fd, info) != _NINTH_NAMESPACE_COOKIE,
+                    "continuation-namespace-kernel-generation")
+            yield None
+            # Keep the FD open so those coordinates cannot be recycled during
+            # either census. The original cookie still governs socket checks.
+            with network_fence._namespace_witness(name) as (_, after):
+                require((after.st_dev, after.st_ino) == _NINTH_NAMESPACE,
+                        "continuation-namespace-successor-alias")
+            row = store.read(lease_id)
+            require(original in row["effects"].values() and row["state"] != "closed"
+                    and not any(e["operation"] == "fence-remove" for e in row["effects"].values()),
+                    "continuation-namespace-successor-changed")
+
+
+def _ninth_original_resources_absent(old, configuration, successor_bank, successor=None):
     """Fresh original-scope product/process absence, without adopting its lease."""
     from types import SimpleNamespace
     from . import cleanup_storage, incus_admin, incus_mutation, network_fence
@@ -1894,40 +1947,41 @@ def _ninth_original_resources_absent(old, configuration):
                  data["output_path"], data["context_path"], descriptor)
         cleanup_storage._absent(paths)
         _ninth_host_network_absent(config, lease)
-        roots, opened, identities = [], [], set()
-        try:
-            for index, path in enumerate(paths):
-                leaf = "private-tree-" + str(index) + "-receipt.json" if index < 4 else "descriptor-unlink-receipt.json"
-                name = fixed["native_journal"]["path"] + "/" + leaf
-                proof, raw, _ = installation._file(name, 32768, private=True, keep=True)
-                require(proof.sha256 == fixed["native_journal"]["members"][leaf],
-                        "continuation-ninth-original-storage-receipt")
-                receipt = identity.decode_json(raw)
-                metadata = receipt["metadata"]
-                require(metadata.get("path", path) == path, "continuation-ninth-original-storage-path")
-                device, inode = metadata["device"], metadata["inode"]
-                require(type(device) is int and device == 1792 and type(inode) is int and inode > 0,
-                        "continuation-ninth-original-storage-identity")
-                identities.add((device, inode))
-                fd = installation._open_directory(str(Path(path).parent))
-                opened.append(fd)
-                require(os.fstat(fd).st_dev == device, "continuation-ninth-original-storage-parent")
-                roots.append((path, device, cleanup_storage.storage_quota._mount_id(fd)))
-            end = time.monotonic() + 60
-            rows = cleanup_storage._consumer_mount_rows(cleanup_storage._consumer_read(
-                Path("/proc/self/mountinfo"), 4 * 1024**2, end), end)
-            targets = cleanup_storage._consumer_mount_targets(rows, roots)
-            for _ in range(2):
-                cleanup_storage._no_consumers(data, descriptor, lease, opened, end, identities, targets,
-                                              forbidden_namespace=(4, 4026532529))
-        finally:
-            for fd in reversed(opened):
-                os.close(fd)
-        # Historical coordinates are only a negative search target, never a
-        # live FD witness or a global refcount/queued-rights attestation.
-        historical = SimpleNamespace(st_dev=4, st_ino=4026532529)
-        network_fence._namespace_refs_drained(-1, historical, 25882)
-        network_fence._namespace_refs_drained(-1, historical, 25882)
+        with _historical_namespace_coordinates(successor_bank, successor) as coordinates:
+            roots, opened, identities = [], [], set()
+            try:
+                for index, path in enumerate(paths):
+                    leaf = "private-tree-" + str(index) + "-receipt.json" if index < 4 else "descriptor-unlink-receipt.json"
+                    name = fixed["native_journal"]["path"] + "/" + leaf
+                    proof, raw, _ = installation._file(name, 32768, private=True, keep=True)
+                    require(proof.sha256 == fixed["native_journal"]["members"][leaf],
+                            "continuation-ninth-original-storage-receipt")
+                    receipt = identity.decode_json(raw)
+                    metadata = receipt["metadata"]
+                    require(metadata.get("path", path) == path, "continuation-ninth-original-storage-path")
+                    device, inode = metadata["device"], metadata["inode"]
+                    require(type(device) is int and device == 1792 and type(inode) is int and inode > 0,
+                            "continuation-ninth-original-storage-identity")
+                    identities.add((device, inode))
+                    fd = installation._open_directory(str(Path(path).parent))
+                    opened.append(fd)
+                    require(os.fstat(fd).st_dev == device, "continuation-ninth-original-storage-parent")
+                    roots.append((path, device, cleanup_storage.storage_quota._mount_id(fd)))
+                end = time.monotonic() + 60
+                rows = cleanup_storage._consumer_mount_rows(cleanup_storage._consumer_read(
+                    Path("/proc/self/mountinfo"), 4 * 1024**2, end), end)
+                targets = cleanup_storage._consumer_mount_targets(rows, roots)
+                for _ in range(2):
+                    cleanup_storage._no_consumers(data, descriptor, lease, opened, end, identities, targets,
+                                                  forbidden_namespace=coordinates)
+            finally:
+                for fd in reversed(opened):
+                    os.close(fd)
+            # Historical coordinates are only a negative search target, never a
+            # live FD witness or a global refcount/queued-rights attestation.
+            historical = SimpleNamespace(st_dev=coordinates[0], st_ino=coordinates[1]) if coordinates else None
+            network_fence._namespace_refs_drained(-1, historical, _NINTH_NAMESPACE_COOKIE)
+            network_fence._namespace_refs_drained(-1, historical, _NINTH_NAMESPACE_COOKIE)
         target = cell_contract._incus(cell["incus"], environment, lease, selected.cell_sha256)
         owner = incus_mutation.Ownership(**target["ownership"])
         project = incus_mutation.ProjectSpec(target["project"], target["network"], target["pool"],
@@ -1951,7 +2005,7 @@ def _ninth_original_resources_absent(old, configuration):
 
 
 def _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap, previous_qualification, *,
-                                       revalidating=False, defer_catalogues=False):
+                                       revalidating=False, defer_catalogues=False, successor=None):
     """Compose all eight histories and the separate ninth retirement, read-only."""
     require(type(revalidating) is bool and type(defer_catalogues) is bool
             and (not defer_catalogues or revalidating), "continuation-ninth-catalogue-composition")
@@ -1978,7 +2032,7 @@ def _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap,
     entries = _ninth_original_entries(old, revalidating=revalidating)
     journals = _ninth_preserved_journals()
     configuration, _ = _read_complete(Path(ROOT) / entries["configuration"]["name"])
-    _ninth_original_resources_absent(old, configuration)
+    _ninth_original_resources_absent(old, configuration, successor_ledger_path, successor)
     catalogues = {}
     old_catalogues = previous_qualification["failed_prefix"]["catalogues"]
     for kind, parent, entry in (("native_intake_catalogue", run_intake.ROOT, entries["intake"]),
@@ -2004,7 +2058,7 @@ def _ninth_retired_partial_projection(successor_ledger_path, original_bootstrap,
             catalogues[kind] = rows
         finally:
             os.close(root)
-    _ninth_original_resources_absent(old, configuration)
+    _ninth_original_resources_absent(old, configuration, successor_ledger_path, successor)
     require(_ninth_preserved_journals() == journals
             and _ninth_original_bank(old, successor_ledger_path) == original
             and load_bootstrap(old.path, old.sha256) == old, "continuation-ninth-original-read-drift")
