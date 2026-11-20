@@ -14,8 +14,17 @@ on:
 permissions:
   contents: read
 
+# Serialize attempts for the same release while preserving an active producer.
+# A successor may finish creating a missing PR, but never redispatches review
+# for an already-open PR.
+concurrency:
+  group: >-
+    release-back-sync-${{ github.repository }}-${{ startsWith(github.event.release.tag_name || inputs.tag, 'v') && (github.event.release.tag_name || inputs.tag) || format('v{0}', github.event.release.tag_name || inputs.tag) }}
+  cancel-in-progress: false
+
 jobs:
   back-sync:
+    timeout-minutes: 10
     name: Open release back-sync PR
     runs-on: ubuntu-latest
 
@@ -146,7 +155,26 @@ jobs:
           gh auth setup-git
           local_head="$(git rev-parse HEAD)"
           remote_head_before="$(git ls-remote --heads origin "refs/heads/${branch}" | awk 'NR == 1 { print $1 }')"
-          branch_advanced=false
+          if [ -n "$remote_head_before" ]; then
+            [[ "$remote_head_before" =~ ^[0-9a-f]{40}$ ]]
+            git fetch --no-tags origin "refs/heads/${branch}"
+            if [ "$(git rev-parse FETCH_HEAD)" != "$remote_head_before" ]; then
+              echo "::error::Release back-sync branch changed during validation."
+              exit 1
+            fi
+            # Regenerating a merge changes its timestamp. Reuse only the
+            # published commit with the same exact parents and tree; a changed
+            # revision must use the protected fresh-revision/PR path.
+            if [ "$(git rev-parse "${remote_head_before}^{tree}")" != \
+                 "$(git rev-parse "${local_head}^{tree}")" ] || \
+               [ "$(git show -s --format=%P "$remote_head_before")" != \
+                 "$(git show -s --format=%P "$local_head")" ]; then
+              echo "::error::Existing back-sync branch has a different revision."
+              exit 1
+            fi
+            git reset --hard "$remote_head_before"
+            local_head="$remote_head_before"
+          fi
           if ! git push \
               --force-with-lease="refs/heads/${branch}:${remote_head_before}" \
               origin "$branch"
@@ -162,10 +190,6 @@ jobs:
             echo "::error::Release back-sync did not publish the exact local head."
             exit 1
           fi
-          if [ "$remote_head_before" != "$remote_head_after" ]; then
-            branch_advanced=true
-          fi
-
           if ! gh label list --repo "$REPO" --json name --jq '.[].name' \
             | grep -Fxq skip-changelog
           then
@@ -196,87 +220,90 @@ jobs:
             local candidate_json
             candidate_json="$(gh pr view "$candidate" \
               --repo "$REPO" \
-              --json author,baseRefName,baseRefOid,headRefName,headRefOid,headRepositoryOwner,isDraft)"
+              --json author,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,isDraft)"
             jq -e \
               --arg branch "$branch" \
               --arg expected_base "$expected_base" \
               --arg expected_head "$expected_head" \
-              --arg owner "$GITHUB_REPOSITORY_OWNER" '
+              --arg repo "$REPO" '
                 .author.login == "app/lightning-it-release-automation"
                 and .baseRefName == "develop"
                 and .baseRefOid == $expected_base
                 and .headRefName == $branch
                 and .headRefOid == $expected_head
-                and .headRepositoryOwner.login == $owner
+                and .headRepository.nameWithOwner == $repo
                 and .isDraft == false
               ' <<< "$candidate_json" >/dev/null
           }
 
-          existing="$(
-            gh pr list \
-              --repo "$REPO" \
-              --base develop \
-              --head "$branch" \
-              --state open \
-              --json url \
-              --jq '.[0].url'
-          )"
+          head_query="$(jq -rn --arg value "${GITHUB_REPOSITORY_OWNER}:${branch}" '$value | @uri')"
+          prior="$(gh api --paginate --slurp \
+            "repos/${REPO}/pulls?state=all&head=${head_query}&base=develop&per_page=100")"
+          jq -e \
+            --arg branch "$branch" \
+            --arg repo "$REPO" '
+              type == "array" and length > 0 and
+              all(.[]; type == "array") and
+              all(.[][];
+                (.number | type) == "number" and .number > 0 and
+                (.number | floor) == .number and
+                (.state == "open" or .state == "closed") and
+                .base.ref == "develop" and .head.ref == $branch and
+                .head.repo.full_name == $repo and
+                (.head.sha | type) == "string" and
+                (.base.sha | type) == "string" and
+                (.user.login | type) == "string" and
+                (.html_url | type) == "string")
+            ' <<< "$prior" >/dev/null || {
+              echo "::error::Release back-sync PR history is incomplete."
+              exit 1
+            }
+          matching="$(jq -c '[.[][]] | unique_by(.number)' <<< "$prior")"
+          if [ "$(jq 'length' <<< "$matching")" != \
+               "$(jq '[.[][]] | length' <<< "$prior")" ]; then
+            echo "::error::Release back-sync PR history has duplicate entries."
+            exit 1
+          fi
+          if [ "$(jq '[.[] | select(.state == "closed")] | length' <<< "$matching")" -ne 0 ]; then
+            echo "::error::A closed back-sync PR already used this branch."
+            exit 1
+          fi
+          if [ "$(jq 'length' <<< "$matching")" -gt 1 ]; then
+            echo "::error::Ambiguous open release back-sync PR history."
+            exit 1
+          fi
+          existing="$(jq -r '.[0].html_url // empty' <<< "$matching")"
           created_pr=false
           if [ -n "$existing" ]; then
             validate_existing_back_sync_pr "$existing"
-            gh pr edit "$existing" \
+          else
+            existing="$(gh pr create \
               --repo "$REPO" \
+              --base develop \
+              --head "$branch" \
               --title "$title" \
               --body "$body" \
-              --add-label skip-changelog
-          else
-            if ! existing="$(gh pr create \
-                --repo "$REPO" \
-                --base develop \
-                --head "$branch" \
-                --title "$title" \
-                --body "$body" \
-                --label skip-changelog)"
-            then
-              existing="$(
-                gh pr list \
-                  --repo "$REPO" \
-                  --base develop \
-                  --head "$branch" \
-                  --state open \
-                  --json url \
-                  --jq '.[0].url'
-              )"
-              if [ -z "$existing" ]; then
+              --label skip-changelog)" || {
                 echo "::error::Failed to create release back-sync PR."
                 exit 1
-              fi
-              echo "Release back-sync PR was created by another run: $existing"
-              validate_existing_back_sync_pr "$existing"
-              gh pr edit "$existing" \
-                --repo "$REPO" \
-                --title "$title" \
-                --body "$body" \
-                --add-label skip-changelog
-            else
-              created_pr=true
-            fi
+              }
+            created_pr=true
           fi
           back_sync_pr="$(gh pr view "$existing" \
             --repo "$REPO" \
-            --json author,baseRefName,baseRefOid,headRefName,headRefOid,headRepositoryOwner,isDraft,number,title)"
+            --json author,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,isDraft,number,title)"
           jq -e \
             --arg branch "$branch" \
             --arg expected_base "$expected_base" \
             --arg expected_head "$expected_head" \
-            --arg owner "$GITHUB_REPOSITORY_OWNER" \
+            --arg repo "$REPO" \
             --arg title "$title" '
               .author.login == "app/lightning-it-release-automation"
               and .baseRefName == "develop"
               and .baseRefOid == $expected_base
               and .headRefName == $branch
               and .headRefOid == $expected_head
-              and .headRepositoryOwner.login == $owner
+              and .headRepository.nameWithOwner == $repo
               and .isDraft == false
               and .title == $title
             ' <<< "$back_sync_pr" >/dev/null
@@ -285,7 +312,7 @@ jobs:
             echo "base_ref=$(jq -r .baseRefName <<<"$back_sync_pr")"
             echo "expected_base=$(jq -r .baseRefOid <<<"$back_sync_pr")"
             echo "expected_head=$(jq -r .headRefOid <<<"$back_sync_pr")"
-            if [ "$branch_advanced" = true ] || [ "$created_pr" = true ]; then
+            if [ "$created_pr" = true ]; then
               echo "dispatch_review=true"
             else
               echo "dispatch_review=false"
