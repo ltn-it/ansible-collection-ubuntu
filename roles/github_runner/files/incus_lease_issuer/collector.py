@@ -689,6 +689,7 @@ def discard_worker_acquisition(token):
         _ACQUISITIONS.pop(token, None)
 
 
+@identity._diagnostic_step("collector-finish")
 def finish_worker_acquisition(token, connected_unix_socket, policy):
     require(os.geteuid() == 0, "root-collector-required")
     try:

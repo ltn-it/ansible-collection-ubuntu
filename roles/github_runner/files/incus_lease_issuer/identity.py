@@ -47,10 +47,11 @@ _DIAGNOSTIC_STAGES = frozenset({
     "collector", "installation", "native-controls", "native-worker", "native-assignment",
     "native-current", "native-histories", "intake-stage", "intake-discovery",
     "snapshot-acquisition", "snapshot-readback", "observer", "observer-lookup",
-    "observer-native", "runtime-selected",
+    "observer-native", "runtime-selected", "continuation-origin", "continuation-commit",
+    "namespace-census", "collector-finish",
 })
 _DIAGNOSTIC_REASONS = frozenset({
-    "bootstrap-challenge-expired", "bootstrap-native-denied", "bootstrap-native-drift",
+    "fence-proc-acquire-unstable", "bootstrap-challenge-expired", "bootstrap-native-denied", "bootstrap-native-drift",
     "bootstrap-native-expired", "bootstrap-policy-changed", "bootstrap-workflow-sha",
     "bootstrap-native-job", "collector-acquisition-denied", "collector-maps-changed",
     "collector-process-changed", "collector-peer-changed", "collector-trust-changed",

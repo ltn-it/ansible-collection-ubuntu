@@ -939,6 +939,7 @@ def _require_drained_socket(borrowed, observed, cookie):
     require(_socket_cookie(borrowed) != cookie, "fence-namespace-socket-live")
 
 
+@identity._diagnostic_step("namespace-census")
 def _namespace_refs_drained(witness_fd, info, cookie):
     """Reacquire whole observations after churn within one original budget."""
     deadline = time.monotonic() + 10
@@ -954,6 +955,8 @@ def _namespace_refs_drained(witness_fd, info, cookie):
         except Denied as error:
             if str(error) not in transient:
                 raise
+    # Keep the typed hold for callers. Record only the constant for this exit.
+    identity._diagnostic_failed("namespace-census", Denied("fence-proc-acquire-unstable"))
     raise KernelHold("fence-proc-acquire-unstable")
 
 
