@@ -426,6 +426,15 @@ def pending_preparation(runtime, config_digest, state, state_raw, reference):
         image = cell["operating"]["image"]
         require(type(image) is str and SHA.fullmatch(image)
                 and effects.get("image-copy", {}).get("target") == "image:" + project + ":" + image)
+    if "slice-create" in effects:
+        expected.add("slice-create")
+        creator = effects["slice-create"]
+        binding = creator.get("engine_slice")
+        require(type(binding) is dict and set(binding) == {"boot_id", "cgroup_device", "cgroup_inode"}
+                and binding["boot_id"] == value["source_boot_id"]
+                and all(type(binding[key]) is int and binding[key] > 0 for key in ("cgroup_device", "cgroup_inode"))
+                and creator["target"] == "slice:" + lease
+                and creator["evidence_sha256"] == hashlib.sha256(canonical(binding)).hexdigest())
     require(len(effects) == len(row["effects"]) and set(effects) == expected
             and all(effect["state"] == "verified" and type(effect.get("evidence_sha256")) is str
                     and SHA.fullmatch(effect["evidence_sha256"]) for effect in effects.values()))

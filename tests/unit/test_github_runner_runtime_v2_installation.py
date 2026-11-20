@@ -592,6 +592,26 @@ class PendingPreparationHandoffTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_only_verified_slice_bound_to_original_lease_and_cgroup_can_be_carried(self):
+        binding = {"boot_id": self.boot, "cgroup_device": 35, "cgroup_inode": 2101}
+        creator = {"operation": "slice-create", "state": "verified", "target": "slice:" + self.lease,
+                   "engine_slice": binding, "evidence_sha256": hashlib.sha256(probe.canonical(binding)).hexdigest()}
+        self.effects["slice-create"] = creator
+        self.check()
+        for change in ({"state": "unknown"}, {"target": "slice:" + "a" * 32}, {"evidence_sha256": "0" * 64}):
+            with self.subTest(change=change):
+                self.effects["slice-create"] = {**creator, **change}
+                with self.assertRaises(ValueError):
+                    self.check()
+        for change in ({"boot_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}, {"cgroup_inode": 0},
+                       {"cgroup_device": True}):
+            with self.subTest(change=change):
+                invalid = {**binding, **change}
+                self.effects["slice-create"] = {**creator, "engine_slice": invalid,
+                    "evidence_sha256": hashlib.sha256(probe.canonical(invalid)).hexdigest()}
+                with self.assertRaises(ValueError):
+                    self.check()
+
     def test_foreign_terminal_same_bytes_rejected(self):
         self.proof["native_terminal"]["check_run_id"] = 88
         with self.assertRaises(ValueError):
