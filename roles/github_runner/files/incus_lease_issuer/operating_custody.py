@@ -495,7 +495,7 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                         # creator prefix is eligible for pre-engine withdrawal.
                         from . import cell_contract
                         try:
-                            cell_contract.partial_preparation_owner(runtime._registry, selector, store, lease_id)
+                            cell_contract.partial_preparation_withdrawal_owner(runtime._registry, selector, store, lease_id)
                         except Exception:
                             if ("native_terminal" in record
                                     or store._now() >= min(record["expires_at"], record["authorizations"][-1]["valid_until"])

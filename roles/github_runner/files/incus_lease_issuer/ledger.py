@@ -103,6 +103,21 @@ INCUS_OPERATIONS = frozenset({"image-copy", "image-delete", "network-create", "n
                               "instance-create", "instance-destroy", "instance-stop"})
 
 
+def _unresolved_pre_fence_slice(identifier, effects):
+    """Identify an interrupted slice start with a complete pre-fence prefix."""
+    prefix = {"network-create", "project-create", "profile-configure", "context-create",
+              "certificate-create", "engine-prepare", "context-publish"}
+    verified = {effect["operation"] for effect in effects if effect["state"] == "verified"}
+    slices = [effect for effect in effects if effect["operation"] == "slice-create"]
+    if (len(slices) == 1 and slices[0]["state"] in {"intent", "unknown"}
+            and slices[0]["target"] == "slice:" + identifier and prefix <= verified
+            and all(effect["operation"] in {"slice-create", "certificate-revoke"}
+                    or effect["operation"] in prefix | {"image-copy"} and effect["state"] == "verified"
+                    for effect in effects)):
+        return slices[0]
+    return None
+
+
 def _graph_prune_binding(value, effect, lease):
     fields = {"graph_device", "graph_inode", "diagnostics_sha256", "manifest_sha256", "exit_sha256"}
     require(type(value) is dict and set(value) == fields and effect["operation"] == "engine-graph-prune"
@@ -1248,9 +1263,16 @@ class Ledger:
         owned_stop = operation == "engine-stop" and target == "engine:lit-lease-" + identifier and any(
             e["operation"] == "engine-start" and e["target"] == target and e["state"] == "verified"
             and "engine_process" in e and "engine_container_id" in e for e in effects)
-        # A first exact-owned withdrawal is the sole unresolved-effect
-        # exception: it cannot enable access or resolve any other effect.
-        require(operation in WITHDRAWALS or owned_stop
+        first_pre_fence_revoke = (operation == "certificate-revoke"
+            and not any(e["operation"] == "certificate-revoke" for e in effects)
+            and (lease["state"] == "cancelled" or "native_terminal" in lease
+                 or now >= min(lease["expires_at"], lease["authorizations"][-1]["valid_until"]))
+            and _unresolved_pre_fence_slice(identifier, effects) is not None
+            and any(e["operation"] == "certificate-create" and e["target"] == target
+                    and e["state"] == "verified" and "certificate_scope" in e for e in effects))
+        # Immediate safety effects can proceed within their original ownership.
+        # An unresolved slice still blocks all resource cleanup.
+        require(operation in WITHDRAWALS or owned_stop or first_pre_fence_revoke
                 or not any(e["state"] in {"intent", "unknown"} for e in effects),
                 "effect-unresolved")
         require(not any(e["operation"] == operation and e["target"] == target for e in effects), "effect-replay")

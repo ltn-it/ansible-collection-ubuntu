@@ -134,6 +134,64 @@ class PublishedPartialPreparationTests(unittest.TestCase):
             self.create_slice(start)
         start.assert_called_once_with(lease, "start")
 
+    def test_slice_timeout_revokes_only_the_original_certificate_and_holds_cleanup(self):
+        store, lease = self.f.store, self.f.lease
+        certificate, = [effect for effect in self.record["effects"].values()
+                        if effect["operation"] == "certificate-create"]
+        fingerprint = certificate["target"].removeprefix("certificate:")
+        start = mock.Mock(side_effect=TimeoutError)
+        with self.assertRaises(engine_executor.EngineUnknown):
+            self.create_slice(start)
+        unresolved = engine_executor._slice_creator(store.read(lease))
+        self.assertEqual(unresolved["state"], "unknown")
+        with self.assertRaisesRegex(Denied, "partial-published-original-still-live"):
+            self.f.finalizer.withdraw_partial_preparation(self.f.registry, "approved", store, lease)
+        self.assertIn("/1.0/certificates/" + fingerprint, self.f.io.server.resources)
+        baseline_writes = list(self.f.io.writes())
+
+        runtime = self.f.runtime
+        rpc = runtime_rpc.RuntimeRPC(str(runtime), ledger.digest(identity.decode_json(runtime.read_bytes())))
+        rpc._retain_after_failure(store, lease, "approved", None)
+
+        after = store.read(lease)
+        self.assertEqual(after["state"], "cancelled")
+        self.assertEqual(engine_executor._slice_creator(after), unresolved)
+        revoke, = [effect for effect in after["effects"].values() if effect["operation"] == "certificate-revoke"]
+        self.assertEqual((revoke["state"], revoke["target"]), ("verified", certificate["target"]))
+        self.assertNotIn("/1.0/certificates/" + fingerprint, self.f.io.server.resources)
+        native_writes = self.f.io.writes()[len(baseline_writes):]
+        self.assertEqual([(row[0], row[1]) for row in native_writes], [("DELETE", "/1.0/certificates/" + fingerprint)])
+
+        self.f.finalizer.withdraw_partial_preparation(self.f.registry, "approved", store, lease)
+        with self.assertRaisesRegex(Denied, "partial-preparation-unknown-or-entered"):
+            self.f.finalizer.finalize_partial_preparation(self.f.registry, "approved", store, lease)
+        with self.assertRaisesRegex(Denied, "effect-unresolved"):
+            store.begin(lease, "slice-remove", "slice:" + lease)
+        with self.assertRaisesRegex(Denied, "effect-unresolved"):
+            store.begin(lease, "project-delete", "project:" + self.f.io.prepared.incus["project"])
+        self.assertEqual(self.f.io.writes()[len(baseline_writes):], native_writes)
+        self.assertEqual(store.read(lease), after)
+        start.assert_called_once_with(lease, "start")
+
+    def test_watchdog_withdraws_certificate_after_unresolved_slice_and_keeps_alarm(self):
+        store, lease = self.f.store, self.f.lease
+        certificate, = [effect for effect in self.record["effects"].values()
+                        if effect["operation"] == "certificate-create"]
+        with self.assertRaises(engine_executor.EngineUnknown):
+            self.create_slice(mock.Mock(side_effect=TimeoutError))
+        self.f.terminal()
+        unresolved = engine_executor._slice_creator(store.read(lease))
+        runtime = self.f.runtime
+        digest = ledger.digest(identity.decode_json(runtime.read_bytes()))
+        result = operating_custody.tick_runtime(str(runtime), digest, "f" * 64)
+        after = store.read(lease)
+        self.assertEqual(engine_executor._slice_creator(after), unresolved)
+        revoke, = [effect for effect in after["effects"].values() if effect["operation"] == "certificate-revoke"]
+        self.assertEqual((revoke["target"], revoke["state"]), (certificate["target"], "verified"))
+        self.assertIn("cleanup-unknown", [event["kind"] for event in result["events"]])
+        self.assertNotIn("partial_preparation_custody", after)
+        self.assertFalse(result["native_acceptance"])
+
     def test_verified_fence_without_engine_gets_withdrawn_and_retained_four_hours(self):
         store, lease = self.f.store, self.f.lease
         self.create_slice(mock.Mock())

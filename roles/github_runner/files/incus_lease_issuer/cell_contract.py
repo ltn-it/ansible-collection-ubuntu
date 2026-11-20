@@ -618,7 +618,26 @@ class PartialPreparationOwner:
 
 
 
+@dataclass(frozen=True)
+class PartialCertificateWithdrawal(PartialPreparationOwner):
+    """Certificate-only authority while an original pre-fence slice is unresolved."""
+
+
 def partial_preparation_owner(registry, selector, store, lease_id):
+    return _partial_preparation_owner(registry, selector, store, lease_id, allow_certificate_withdrawal=False)
+
+
+def partial_preparation_withdrawal_owner(registry, selector, store, lease_id):
+    return _partial_preparation_owner(registry, selector, store, lease_id, allow_certificate_withdrawal=True)
+
+
+def revalidate_partial_preparation(owner, store):
+    factory = (partial_preparation_withdrawal_owner if type(owner) is PartialCertificateWithdrawal
+               else partial_preparation_owner)
+    return factory(owner.registry, owner.selector, store, owner.lease_id) == owner
+
+
+def _partial_preparation_owner(registry, selector, store, lease_id, *, allow_certificate_withdrawal):
     """Revalidate fixed Root semantics and original native creator receipts.
 
     No current JWT/authorization or surviving context/runroot is required. A
@@ -681,11 +700,17 @@ def partial_preparation_owner(registry, selector, store, lease_id):
     creators = {}
     allowed_cleanup = {"certificate-revoke", "engine-release", "context-delete", "image-delete",
                        "project-delete", "network-delete", "fence-disable", "fence-remove", "slice-remove"}
+    effects = list(record["effects"].values())
+    unresolved_slice = ledger._unresolved_pre_fence_slice(lease_id, effects) if allow_certificate_withdrawal else None
+    if unresolved_slice is not None:
+        allowed_cleanup = {"certificate-revoke"}
     fence_renewals = []
     require("owned_instance" not in record and "custody" not in record,
             "partial-preparation-not-VM-owner")
     for identifier, effect in record["effects"].items():
         operation = effect["operation"]
+        if effect is unresolved_slice:
+            continue
         if operation == "fence-renew":
             require(effect["state"] == "verified" and not fence_renewals
                     and effect["target"] == "fence:" + lease_id + ":" + record["authorizations"][-1]["token_id_sha256"]
@@ -738,11 +763,14 @@ def partial_preparation_owner(registry, selector, store, lease_id):
     binding = {"lease_id": lease_id, "cell_sha256": selected.cell_sha256,
                "identity_policy_sha256": identity.policy_digest(native), "descriptor": hashlib.sha256(raw).hexdigest(),
                "incus": incus, "creators": creators}
+    if unresolved_slice is not None:
+        binding["unresolved_slice_sha256"] = ledger.digest(unresolved_slice)
     original = {"schema": 1, "lease_id": lease_id, "cell_sha256": selected.cell_sha256,
         "identity_policy_sha256": identity.policy_digest(native), "identity": record["identity"],
         "expires_at": record["expires_at"], "candidate": candidate, "controller": controller,
         "engine_descriptor_path": descriptor_path, "engine_descriptor_sha256": hashlib.sha256(raw).hexdigest(), "incus": incus}
     canonical = engine._canonical(original)
-    return PartialPreparationOwner(registry, selector, lease_id, selected.cell_sha256, selected.deadline,
+    owner_type = PartialCertificateWithdrawal if unresolved_slice is not None else PartialPreparationOwner
+    return owner_type(registry, selector, lease_id, selected.cell_sha256, selected.deadline,
         identity.policy_digest(native), descriptor_path, raw, hashlib.sha256(raw).hexdigest(),
         incus_bytes, creator_bytes, hashlib.sha256(canonical).hexdigest(), canonical, ledger.digest(binding))

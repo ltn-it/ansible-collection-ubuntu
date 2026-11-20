@@ -142,13 +142,16 @@ class RootFinalizer:
         require(runtime_rpc._configuration(self._runtime.path, self._runtime.sha256) == self._runtime
                 and registry.path == self._runtime.registry_path and registry.sha256 == self._runtime.registry_sha256
                 and config.registry_path == registry.path and config.registry_sha256 == registry.sha256
-                and (cell_contract.partial_preparation_owner(registry, selector, store, owner.lease_id)
-                     if type(owner) is cell_contract.PartialPreparationOwner else
-                     cell_contract.owned_cell_for_cleanup(registry, selector, store, owner.lease_id)) == owner,
+                and registry == owner.registry and selector == owner.selector
+                and (cell_contract.revalidate_partial_preparation(owner, store)
+                     if isinstance(owner, cell_contract.PartialPreparationOwner) else
+                     cell_contract.owned_cell_for_cleanup(registry, selector, store, owner.lease_id) == owner),
                 "finalization-root-drift")
         return config
 
     def _remote_delete(self, session, registry, selector, store, owner, cleanup, operation, target, kind, action):
+        if type(owner) is cell_contract.PartialCertificateWithdrawal:
+            require(operation == "certificate-revoke" and kind == "certificate", "partial-certificate-only")
         config = self._fresh(session, registry, selector, store, owner)
         existing = _effect(store.read(owner.lease_id), operation, target)
         if existing is not None:
@@ -159,7 +162,7 @@ class RootFinalizer:
         try:
             before = cleanup.readback(kind)
             require(before["state"] in {"required_fields_match", "absent_observed"}, "finalization-delete-not-owned")
-            if type(owner) is cell_contract.PartialPreparationOwner:
+            if isinstance(owner, cell_contract.PartialPreparationOwner):
                 require(before["state"] == "required_fields_match", "partial-original-resource-disappeared")
             if before["state"] != "absent_observed":
                 if operation == "certificate-revoke":
@@ -202,7 +205,7 @@ class RootFinalizer:
         from . import root_session
         with root_session._session(self._runtime.preparation_config_path,
                                   self._runtime.preparation_config_sha256) as session:
-            owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
+            owner = cell_contract.partial_preparation_withdrawal_owner(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
             if "fence-create" in owner.creators:
                 record = store.read(lease_id)
