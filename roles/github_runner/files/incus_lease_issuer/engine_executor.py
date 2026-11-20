@@ -36,6 +36,9 @@ NSFS_MAGIC = 0x6e736673
 CGROUP2_MAGIC = 0x63677270
 NS_GET_NSTYPE = 0xb703
 CLONE_NEWNET = 0x40000000
+SYSTEMCTL = "/usr/bin/systemctl"
+CGROUP_ROOT = "/sys/fs/cgroup"
+SLICE_PARENT = "/lit.slice/lit-lease.slice/"
 IMAGE_CONFIG = "5b4ca16538abccb297f565dda30c511203fade0e30ff14adb439c6d2b06550fd"
 CID = re.compile(r"[0-9a-f]{64}\Z")
 # Keep local Popen ownership while running; durable authority remains the
@@ -86,15 +89,18 @@ def _namespace(path):
         os.close(parent)
 
 
+def _slice_name(lease_id):
+    require(type(lease_id) is str and ledger.ID.fullmatch(lease_id), "engine-slice-id")
+    return "lit-lease-" + lease_id + ".slice"
+
+
 def _cgroup(details):
-    name = "lit-lease-" + details["runtime"]["name"].removeprefix("lit-lease-") + ".slice"
-    parent = installation._open_directory("/sys/fs/cgroup")
+    name = _slice_name(details["runtime"]["name"].removeprefix("lit-lease-"))
+    parent = installation._open_directory(CGROUP_ROOT)
     fd = None
     try:
         require(_fs_type(parent) == CGROUP2_MAGIC, "engine-cgroup-v2-required")
-        # systemd slice hyphens define the actual parent hierarchy; this is
-        # not a flat directory named like the unit. No unit is created here.
-        fd = installation._open_directory("/sys/fs/cgroup/lit.slice/lit-lease.slice/" + name)
+        fd = installation._open_directory(CGROUP_ROOT + SLICE_PARENT + name)
         info = os.fstat(fd)
         require(info.st_uid == 0 and not info.st_mode & 0o022, "engine-cgroup-owner")
         require(kernel.bounded_file(fd, "cgroup.type", 128).strip() == b"domain"
@@ -107,6 +113,141 @@ def _cgroup(details):
             os.close(fd)
         os.close(parent)
 
+
+def _slice_manager(lease_id, action):
+    require(os.geteuid() == 0 and action in {"show", "start", "stop"}, "engine-slice-manager")
+    name = _slice_name(lease_id)
+    installation.trusted_file(SYSTEMCTL, max_bytes=16 * 1024 ** 2)
+    fields = ("Id", "LoadState", "ActiveState", "SubState", "ControlGroup",
+              "FragmentPath", "DropInPaths", "Job")
+    flags = ["--all", "--property=" + ",".join(fields)] if action == "show" else ["--job-mode=fail"]
+    result = subprocess.run([SYSTEMCTL, "--system", "--no-pager", "--no-ask-password", *flags, action, name],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8,
+        env={"LANG": "C", "PATH": "/usr/bin:/bin"}, check=False)
+    require(result.returncode == 0 and len(result.stdout) <= 8192, "engine-slice-systemd")
+    if action == "show":
+        rows = [line.split("=", 1) for line in result.stdout.decode("ascii").splitlines()]
+        require(len(rows) == len(fields) and all(len(row) == 2 for row in rows), "engine-slice-properties")
+        value = dict(rows)
+        require(set(value) == set(fields) and value["Id"] == name and value["LoadState"] == "loaded"
+                and not any(value[key] for key in ("FragmentPath", "DropInPaths", "Job")),
+                "engine-slice-implicit-unit")
+        return value
+
+
+def _slice_inactive(lease_id):
+    value = _slice_manager(lease_id, "show")
+    require(value["ActiveState"] == "inactive" and value["SubState"] == "dead"
+            and not value["ControlGroup"], "engine-slice-not-absent")
+    try:
+        os.lstat(CGROUP_ROOT + SLICE_PARENT + _slice_name(lease_id))
+    except FileNotFoundError:
+        return
+    raise Denied("engine-slice-cgroup-still-present")
+
+
+def _slice_active(lease_id):
+    value = _slice_manager(lease_id, "show")
+    require(value["ActiveState"] == value["SubState"] == "active"
+            and value["ControlGroup"] == SLICE_PARENT + _slice_name(lease_id), "engine-slice-not-active")
+
+
+def _slice_creator(record):
+    rows = [row for row in record["effects"].values() if row["operation"] == "slice-create"]
+    require(len(rows) <= 1, "engine-slice-ambiguous")
+    return rows[0] if rows else None
+
+
+def _create_slice(session, prepared, store, manifest):
+    """Allocate exactly one implicit systemd slice under the preparation lock."""
+    from . import root_session
+    config = root_session._require_session(session)
+    preparation._fresh(config, prepared, store)
+    lease_id = prepared.lease_id
+    details = identity.decode_json(manifest.canonical_bytes)
+    require((manifest.descriptor_path, manifest.descriptor_sha256)
+                == (prepared.engine_descriptor_path, prepared.engine_descriptor_sha256)
+            and "--cgroup-parent=" + _slice_name(lease_id) in manifest.argv
+            and details["runtime"]["name"] == "lit-lease-" + lease_id, "engine-slice-manifest")
+    _slice_inactive(lease_id)
+    store.require_exclusive_preparation(lease_id)
+    effect = store.begin(lease_id, "slice-create", "slice:" + lease_id)
+    try:
+        _slice_inactive(lease_id)
+        _slice_manager(lease_id, "start")
+        _slice_active(lease_id)
+        device, inode = _cgroup(details)
+        value = {"boot_id": kernel.read_boot_id(), "cgroup_device": device, "cgroup_inode": inode}
+        store.bind_engine_slice(lease_id, effect, **value)
+        preparation._fresh(config, prepared, store)
+        store.record(lease_id, effect, "verified", evidence_sha256=ledger.digest(value))
+    except BaseException:
+        _mark_slice_unknown(store, lease_id, effect, "slice-create")
+        raise EngineUnknown("engine-slice-creation-unknown") from None
+
+
+def _mark_slice_unknown(store, lease_id, effect, stage):
+    try:
+        store.record(lease_id, effect, "unknown", evidence_sha256=ledger.digest({"stage": stage}))
+    except Exception:
+        pass  # Original intent/commit stays available for operator reconciliation.
+
+
+def _remove_slice(session, owner, store):
+    """Remove only an original empty slice after its container/fence are gone."""
+    from . import root_session
+    config = root_session._require_session(session)
+    require(type(owner) in {cell_contract.OwnedCellForCleanup, cell_contract.PartialPreparationOwner}
+            and owner.registry.path == config.registry_path and owner.registry.sha256 == config.registry_sha256,
+            "engine-slice-cleanup-owner")
+    lease_id = owner.lease_id
+    factory = (cell_contract.partial_preparation_owner if type(owner) is cell_contract.PartialPreparationOwner
+               else cell_contract.owned_cell_for_cleanup)
+    record = store.read(lease_id)
+    creator = _slice_creator(record)
+    if creator is None:  # Historical cells used operator-prepared slices.
+        return
+    require(factory(owner.registry, owner.selector, store, lease_id) == owner, "engine-slice-cleanup-drift")
+    value = creator.get("engine_slice")
+    ledger._validate_slice(value, kernel.read_boot_id())
+    require(creator["state"] == "verified" and creator["target"] == "slice:" + lease_id
+            and creator["evidence_sha256"] == ledger.digest(value), "engine-slice-cleanup-creator")
+    removals = [row for row in record["effects"].values() if row["operation"] == "slice-remove"]
+    if removals:
+        require(len(removals) == 1 and removals[0]["state"] == "verified", "engine-slice-removal-held")
+        _slice_inactive(lease_id)
+        return
+    name = _slice_name(lease_id)
+    _slice_active(lease_id)
+    _drained_cgroup(name, value)
+    if type(owner) is cell_contract.PartialPreparationOwner:
+        from . import operating_custody
+        operating_custody.require_partial_cleanup_allowed(store, lease_id)
+    effect = store.begin(lease_id, "slice-remove", "slice:" + lease_id)
+    try:
+        _slice_active(lease_id)
+        _drained_cgroup(name, value)
+        _slice_manager(lease_id, "stop")
+        _slice_inactive(lease_id)
+        store.record(lease_id, effect, "verified", evidence_sha256=ledger.digest(
+            {"creator_sha256": ledger.digest(creator), "absent": True}))
+    except BaseException:
+        _mark_slice_unknown(store, lease_id, effect, "slice-remove")
+        raise EngineUnknown("engine-slice-removal-unknown") from None
+
+
+def _start_cgroup(details, store, lease_id):
+    creator = _slice_creator(store.read(lease_id))
+    if creator is not None:
+        _slice_active(lease_id)
+    coordinates = _cgroup(details)
+    if creator is not None:
+        value = creator.get("engine_slice")
+        ledger._validate_slice(value, kernel.read_boot_id())
+        require(creator["state"] == "verified" and creator["target"] == "slice:" + lease_id
+                and creator["evidence_sha256"] == ledger.digest(value)
+                and coordinates == (value["cgroup_device"], value["cgroup_inode"]), "engine-slice-start-drift")
+    return coordinates
 
 def _reservations(details):
     for path, mapping, accounts in (("/etc/subuid", details["uid_map"], [p.pw_uid for p in pwd.getpwall()]),
@@ -593,7 +734,7 @@ def _preflight(config, prepared, store, manifest):
     # Root subid/NSS reservations below additionally deny non-pilot allocation.
     store.require_exclusive_preparation(prepared.lease_id)
     _reservations(details)
-    _cgroup(details)
+    _start_cgroup(details, store, prepared.lease_id)
     with _namespace(details["network_namespace"]["path"]):
         try:
             from . import network_fence, storage_quota
@@ -791,7 +932,7 @@ def _spawn(prepared, manifest, store, effect_id=None):
             os.fsync(parent)
         finally:
             os.close(parent)
-        cgroup_device, cgroup_inode = _cgroup(details)
+        cgroup_device, cgroup_inode = _start_cgroup(details, store, prepared.lease_id)
         capture = engine_supervision.Capture(manifest, store, prepared.lease_id, effect, cgroup_device, cgroup_inode)
         from . import runtime_entry
         with runtime_entry._spawn_adoption():
@@ -967,8 +1108,12 @@ def _signal_owned(process, manifest):
 def _drained(manifest, capture):
     """Kernel subtree population, not merely original PID/CID disappearance."""
     details = identity.decode_json(manifest.canonical_bytes)
-    path = "/sys/fs/cgroup/lit.slice/lit-lease.slice/" + details["runtime"]["name"] + ".slice"
-    fd = installation._open_directory(path)
+    name = _slice_name(details["runtime"]["name"].removeprefix("lit-lease-"))
+    _drained_cgroup(name, capture)
+
+
+def _drained_cgroup(name, capture):
+    fd = installation._open_directory(CGROUP_ROOT + SLICE_PARENT + name)
     try:
         info = os.fstat(fd)
         require(_fs_type(fd) == CGROUP2_MAGIC and info.st_uid == 0 and not info.st_mode & 0o022

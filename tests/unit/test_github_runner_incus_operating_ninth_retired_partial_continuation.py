@@ -81,6 +81,53 @@ class NinthTerminalHistoryTests(unittest.TestCase):
             factory._continuation_ninth_native(drift)
 
 
+class RecycledNamespaceGenerationTests(unittest.TestCase):
+    def test_current_owned_generation_can_pin_recycled_inode_without_blaming_old_run(self):
+        from contextlib import contextmanager
+        from incus_lease_issuer import kernel, network_fence
+
+        coordinates = factory._NINTH_NAMESPACE
+        lease_id = "a" * 32
+        boot = "12345678-1234-1234-1234-123456789abc"
+        successor = {"run_id": 120, "source_sha": "b" * 40, "reusable_sha": "c" * 40}
+        row = {"state": "prepared", "identity": {
+            "run_id": 120, "caller_sha": "b" * 40, "reusable_sha": "c" * 40}, "effects": {
+            "e" * 32: {"operation": "fence-create", "state": "verified", "target": "fence:" + lease_id,
+                       "host_api": {}, "fence": {"boot_id": boot, "netns_device": coordinates[0],
+                                                  "netns_inode": coordinates[1]}}}}
+        store = mock.MagicMock()
+        store.__enter__.return_value = store
+        store.lease_ids.return_value = (lease_id,)
+        store.read.return_value = row
+        held = []
+
+        @contextmanager
+        def witness(name):
+            self.assertEqual(name, "lit-lease-" + lease_id)
+            held.append(name)
+            try:
+                yield 23, SimpleNamespace(st_dev=coordinates[0], st_ino=coordinates[1])
+            finally:
+                held.pop()
+
+        with mock.patch.object(ledger, "Ledger", return_value=store), \
+             mock.patch.object(kernel, "read_boot_id", return_value=boot), \
+             mock.patch.object(network_fence, "_namespace_witness", side_effect=witness), \
+             mock.patch.object(network_fence, "_namespace_cookie", return_value=888) as cookie:
+            with factory._historical_namespace_coordinates("/unused", successor) as observed:
+                self.assertIsNone(observed)
+                self.assertEqual(held, ["lit-lease-" + lease_id])
+            self.assertFalse(held)
+            cookie.return_value = factory._NINTH_NAMESPACE_COOKIE
+            with self.assertRaisesRegex(Denied, "continuation-namespace-kernel-generation"):
+                with factory._historical_namespace_coordinates("/unused", successor):
+                    self.fail("present historical namespace")
+            cookie.return_value = 888
+            row["effects"]["e" * 32]["state"] = "unknown"
+            with self.assertRaisesRegex(Denied, "continuation-namespace-successor-fence"):
+                with factory._historical_namespace_coordinates("/unused", successor):
+                    self.fail("unverified successor generation")
+
 class NinthSeparateRetirementTests(unittest.TestCase):
     def retirement(self):
         value = {"schema": 1, "kind": "original-ninth-partial-separately-retired-unknown-preserved",

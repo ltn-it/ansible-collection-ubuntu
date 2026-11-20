@@ -666,19 +666,33 @@ def partial_preparation_owner(registry, selector, store, lease_id):
         "profile-configure": "profile:" + incus["project"] + ":default",
         "context-create": "context:" + selected.cell_sha256,
         "engine-prepare": "engine:" + lease_id,
-        "context-publish": "context:" + selected.cell_sha256}
+        "context-publish": "context:" + selected.cell_sha256,
+        "slice-create": "slice:" + lease_id,
+        "fence-create": "fence:" + lease_id}
     order = ("network-create", "project-create", "profile-configure")
     if env.get("QUALITY_INPUT_PROFILE") == "operating":
         from . import operating_cells
         expected["image-copy"] = "image:" + incus["project"] + ":" + operating_cells.IMAGE
         order += ("image-copy",)
     order += ("context-create", "certificate-create", "engine-prepare", "context-publish")
+    if any(effect["operation"] == "slice-create" for effect in record["effects"].values()):
+        order += ("slice-create",)
+    order += ("fence-create",)
     creators = {}
-    allowed_cleanup = {"certificate-revoke", "engine-release", "context-delete", "image-delete", "project-delete", "network-delete"}
+    allowed_cleanup = {"certificate-revoke", "engine-release", "context-delete", "image-delete",
+                       "project-delete", "network-delete", "fence-disable", "fence-remove", "slice-remove"}
+    fence_renewals = []
     require("owned_instance" not in record and "custody" not in record,
             "partial-preparation-not-VM-owner")
     for identifier, effect in record["effects"].items():
         operation = effect["operation"]
+        if operation == "fence-renew":
+            require(effect["state"] == "verified" and not fence_renewals
+                    and effect["target"] == "fence:" + lease_id + ":" + record["authorizations"][-1]["token_id_sha256"]
+                    and "fence_authorization" in effect and "host_api_authorization" in effect,
+                    "partial-renewal-not-owned")
+            fence_renewals.append(effect)
+            continue
         require(operation in set(order) | allowed_cleanup
                 and effect["state"] in ({"intent", "verified"} if operation in allowed_cleanup else {"verified"}),
                 "partial-preparation-unknown-or-entered")
@@ -695,6 +709,10 @@ def partial_preparation_owner(registry, selector, store, lease_id):
             require(effect["target"] == expected[operation], "partial-preparation-creator-target")
         creators[operation] = {"id": identifier, "target": effect["target"], "sha256": ledger.digest(effect)}
     require(set(creators) == set(order[:len(creators)]), "partial-preparation-not-verified-prefix")
+    if "fence-create" in creators:
+        fence = record["effects"][creators["fence-create"]["id"]]
+        require("fence" in fence and "host_api" in fence, "partial-fence-not-owned")
+    require(not fence_renewals or "fence-create" in creators, "partial-fence-not-owned")
     if "context-publish" in creators:
         # A healthy original can still start after publication. Cleanup gains
         # only a terminal/cancelled/expired original, never its live grant.

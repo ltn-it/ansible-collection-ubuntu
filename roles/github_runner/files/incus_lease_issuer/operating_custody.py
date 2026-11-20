@@ -775,20 +775,35 @@ class _PartialRetentionProof:
 _PARTIAL_PROOFS = weakref.WeakSet()
 
 
+def _partial_fence_withdrawal(record):
+    fences = [row for row in record["effects"].values() if row["operation"] == "fence-create"]
+    if not fences:
+        return {}
+    withdraw = [row for row in record["effects"].values() if row["operation"] == "fence-disable"]
+    require(len(fences) == len(withdraw) == 1 and fences[0]["state"] == withdraw[0]["state"] == "verified"
+            and fences[0]["target"] == withdraw[0]["target"]
+            and fences[0].get("host_api", {}).get("baseline_sha256") is not None
+            and withdraw[0].get("host_api_withdrawal", {}).get("baseline_sha256")
+                == fences[0]["host_api"]["baseline_sha256"], "partial-custody-fence-live")
+    return {"fence_disable_sha256": ledger.digest(withdraw[0])}
+
+
 def _partial_custody_record(value, record, policy):
     """A pre-engine failure is never normal stopped-VM custody or success."""
+    fence_binding = _partial_fence_withdrawal(record)
     require(type(value) is dict and set(value) == {"schema", "kind", "terminal_at", "retain_until",
-            "creator_sha256", "certificate_revoke_sha256"} and type(value["schema"]) is int and value["schema"] == 1
+            "creator_sha256", "certificate_revoke_sha256"} | fence_binding.keys() and type(value["schema"]) is int and value["schema"] == 1
             and value["kind"] == "failed-partial-preparation" and "owned_instance" not in record
             and "custody" not in record and "native_terminal" in record,
             "partial-custody-shape")
-    require(not any(e["operation"] in {"engine-start", "fence-create"}
+    require(not any(e["operation"] == "engine-start"
                     or e["operation"] == "context-publish" and e["state"] != "verified"
                     for e in record["effects"].values()), "partial-custody-entered")
     creators = {k: ledger.digest(e) for k, e in record["effects"].items()
                 if e["operation"] in ledger.PROVISIONING}
     revoke = [e for e in record["effects"].values() if e["operation"] == "certificate-revoke"]
-    require(value["creator_sha256"] == ledger.digest(creators)
+    require(all(value[key] == observed for key, observed in fence_binding.items())
+            and value["creator_sha256"] == ledger.digest(creators)
             and value["certificate_revoke_sha256"] == ledger.digest(revoke)
             and all(e["state"] == "verified" for e in revoke)
             and (not any(e["operation"] == "certificate-create" for e in record["effects"].values()) or len(revoke) == 1)
@@ -826,7 +841,8 @@ def retain_partial_preparation(registry, selector, store, lease_id):
     value = {"schema": 1, "kind": "failed-partial-preparation",
         "terminal_at": record["native_terminal"]["completed_at"],
         "retain_until": record["native_terminal"]["completed_at"] + policy["retention_seconds"],
-        "creator_sha256": ledger.digest(creators), "certificate_revoke_sha256": ledger.digest(revoke)}
+        "creator_sha256": ledger.digest(creators), "certificate_revoke_sha256": ledger.digest(revoke),
+        **_partial_fence_withdrawal(record)}
     _partial_custody_record(value, record, policy)
     require(cell_contract.partial_preparation_owner(registry, selector, store, lease_id) == owner,
             "partial-custody-owner-drift")

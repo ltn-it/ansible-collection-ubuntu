@@ -489,7 +489,8 @@ def withdraw(path, expected, prepared, store, worker, config, effect_id):
 def verify_withdrawn(owner, store, worker, config):
     """Read-only cleanup prerequisite; baseline survives raw context deletion."""
     _root()
-    require(type(owner) is cell_contract.OwnedCellForCleanup, "host-api-cleanup-owner")
+    require(type(owner) in {cell_contract.OwnedCellForCleanup, cell_contract.PartialPreparationOwner},
+            "host-api-cleanup-owner")
     locator, record = namespace._cleanup_context(owner, store, worker, config)
     # The shared helper returns no LIVE locator only after independently
     # rederiving the strong owner and exact verified removal. The owner below

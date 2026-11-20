@@ -676,11 +676,14 @@ def disable(root_policy_path, expected_sha256, prepared, store, worker, root_con
 
 def _cleanup_context(owner, store, worker, config):
     _root()
-    require(type(owner) is cell_contract.OwnedCellForCleanup and type(store) is ledger.Ledger
-            and store.owner_uid == 0 and type(config) is preparation.RootConfiguration, "fence-cleanup-inputs")
+    require(type(owner) in {cell_contract.OwnedCellForCleanup, cell_contract.PartialPreparationOwner}
+            and type(store) is ledger.Ledger and store.owner_uid == 0
+            and type(config) is preparation.RootConfiguration, "fence-cleanup-inputs")
+    owner_factory = (cell_contract.partial_preparation_owner if type(owner) is cell_contract.PartialPreparationOwner
+                     else cell_contract.owned_cell_for_cleanup)
     require(preparation._config(config.path, config.sha256)[0] == config
             and owner.registry.path == config.registry_path and owner.registry.sha256 == config.registry_sha256
-            and cell_contract.owned_cell_for_cleanup(owner.registry, owner.selector, store, owner.lease_id) == owner,
+            and owner_factory(owner.registry, owner.selector, store, owner.lease_id) == owner,
             "fence-cleanup-owner-drift")
     record = store.read(owner.lease_id)
     require(type(worker) is ledger.Worker and record["worker"] == asdict(worker), "fence-worker-binding")
@@ -735,7 +738,8 @@ def _removed_observed(policy, owner, record):
     """Read back a KNOWN verified removal; never reconcile an unknown effect."""
     creators = [row for row in record["effects"].values()
                 if row["operation"] == "fence-create" and row["state"] == "verified"]
-    require(type(owner) is cell_contract.OwnedCellForCleanup and len(creators) == 1 and "fence" in creators[0]
+    require(type(owner) in {cell_contract.OwnedCellForCleanup, cell_contract.PartialPreparationOwner}
+            and len(creators) == 1 and "fence" in creators[0]
             and creators[0]["target"] == "fence:" + owner.lease_id, "fence-not-owned")
     namespace, host_link = "lit-lease-" + owner.lease_id, "lth" + owner.lease_id[:12]
     metadata, host = creators[0]["fence"], _host_namespace()
@@ -968,7 +972,10 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
     UID/AppArmor/IPC isolation must prevent such untrusted outside retention.
     Unknown proc/ptrace/cookie/thread-FD observations HOLD, never assume absence.
     """
-    target, count = (info.st_dev, info.st_ino), 0
+    # An authenticated successor holds the only live generation at reused
+    # coordinates. In that case the historical cookie still checks sockets.
+    require(info is not None or witness_fd == -1, "fence-namespace-witness")
+    target, count = ((info.st_dev, info.st_ino) if info is not None else None), 0
     proc = os.open("/proc", engine.DIR)
     try:
         with os.scandir(proc) as processes:
@@ -1031,15 +1038,15 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
 
 
 @contextmanager
-def _removal_witness(fence):
-    # Normal _namespace deliberately checks the named alias after yielding.
-    # Removal retains this independently acquired witness across alias deletion.
+def _namespace_witness(name):
+    """Acquire a single Root-created lease namespace without authorizing effects."""
+    require(type(name) is str and re.fullmatch(r"lit-lease-[0-9a-f]{32}", name), "fence-namespace-name")
     parent = installation._open_directory("/run/netns")
     fd = -1
     try:
-        fd = os.open(_names(fence)[0], installation.FILE_FLAGS, dir_fd=parent)
+        fd = os.open(name, installation.FILE_FLAGS, dir_fd=parent)
         info, buffer = os.fstat(fd), ctypes.create_string_buffer(256)
-        named = os.stat(_names(fence)[0], dir_fd=parent, follow_symlinks=False)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
         require(info.st_uid == 0 and not info.st_mode & 0o022
                 and ctypes.CDLL(None, use_errno=True).fstatfs(fd, buffer) == 0
                 and ctypes.c_long.from_buffer(buffer).value == NSFS_MAGIC
@@ -1050,6 +1057,31 @@ def _removal_witness(fence):
         if fd >= 0:
             os.close(fd)
         os.close(parent)
+
+
+def _removal_witness(fence):
+    # Retain the witness across alias removal; _namespace checks the alias
+    # again after yielding, which would reject a successful owned removal.
+    return _namespace_witness(_names(fence)[0])
+
+
+def _cleanup_engine_drained(owner, store, record):
+    if type(owner) is cell_contract.PartialPreparationOwner:
+        from . import engine_executor, operating_custody
+        operating_custody.require_partial_cleanup_allowed(store, owner.lease_id)
+        require(not any(row["operation"] == "engine-start" for row in record["effects"].values()),
+                "partial-fence-engine-started")
+        creator = engine_executor._slice_creator(record)
+        if creator is None:
+            engine_executor._slice_inactive(owner.lease_id)
+        else:
+            value = creator.get("engine_slice")
+            ledger._validate_slice(value, kernel.read_boot_id())
+            require(creator["state"] == "verified" and creator["evidence_sha256"] == ledger.digest(value),
+                    "partial-fence-slice-not-owned")
+            engine_executor._drained_cgroup(engine_executor._slice_name(owner.lease_id), value)
+        return
+    _engine_drained(owner, record)
 
 
 def remove(root_policy_path, expected_sha256, owner, store, worker, root_configuration):
@@ -1065,7 +1097,7 @@ def remove(root_policy_path, expected_sha256, owner, store, worker, root_configu
             verify_disabled(owner, store, worker, root_configuration)
             return FenceReceipt(owner.lease_id, "fence-remove", previous[0]["evidence_sha256"])
         verify_disabled(owner, store, worker, root_configuration)
-        _engine_drained(owner, record)
+        _cleanup_engine_drained(owner, store, record)
         host = _host_namespace()
         with _removal_witness(fence) as (fd, info):
             metadata, _, _, _ = _owned(policy, fence, store)
@@ -1075,7 +1107,7 @@ def remove(root_policy_path, expected_sha256, owner, store, worker, root_configu
             for _ in range(2):
                 _namespace_refs_drained(fd, info, cookie)
                 require(_host_namespace() == host, "fence-host-namespace-changed")
-            _engine_drained(owner, store.read(owner.lease_id))
+            _cleanup_engine_drained(owner, store, store.read(owner.lease_id))
             verify_disabled(owner, store, worker, root_configuration)
             effect = store.begin(owner.lease_id, "fence-remove", "fence:" + owner.lease_id)
             _run(policy, IP, ["link", "delete", "dev", _names(fence)[1]])

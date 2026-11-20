@@ -11,8 +11,8 @@ import unittest
 from unittest import mock
 
 import test_github_runner_incus_partial_preparation as partial
-from incus_lease_issuer import (cell_contract,cleanup_storage,identity,ledger,
-    operating_custody,preparation,signed_context)
+from incus_lease_issuer import (cell_contract, cleanup_storage, engine_executor, engine_policy, identity,
+    kernel, ledger, network_fence, operating_custody, preparation, root_session, signed_context)
 from incus_lease_issuer.identity import Denied
 
 
@@ -76,6 +76,121 @@ class PublishedPartialPreparationTests(unittest.TestCase):
         self.assertFalse(self.context.exists());self.assertFalse(Path(owner.engine_descriptor_path).exists())
         for path in [self.data['engine']['storage_root'],self.data['engine']['runroot'],self.data['output_path']]:
             self.assertFalse(Path(path).exists())
+    def create_slice(self, command):
+        worker = self.f.store.read(self.f.lease)["worker"]
+        boot = mock.patch.object(kernel, "read_boot_id", return_value=worker["boot_id"])
+        boot.start()
+        self.addCleanup(boot.stop)
+        prepared = self.f.io.prepared
+        manifest = engine_policy.compile_engine_policy(prepared.engine_descriptor_path,
+                                                        prepared.engine_descriptor_sha256)
+        with root_session._session(self.config.path, self.config.sha256) as session, \
+             mock.patch.object(engine_executor, "_slice_inactive"), \
+             mock.patch.object(engine_executor, "_slice_active"), \
+             mock.patch.object(engine_executor, "_slice_manager", side_effect=command), \
+             mock.patch.object(engine_executor, "_cgroup", return_value=(35, 2101)):
+            engine_executor._create_slice(session, prepared, self.f.store, manifest)
+
+    def test_slice_has_original_intent_before_start_and_exact_capture_identity(self):
+        store, lease = self.f.store, self.f.lease
+
+        def start(lease_id, action):
+            self.assertEqual((lease_id, action), (lease, "start"))
+            creator = engine_executor._slice_creator(store.read(lease))
+            self.assertEqual((creator["target"], creator["state"]), ("slice:" + lease, "intent"))
+
+        self.create_slice(start)
+        creator = engine_executor._slice_creator(store.read(lease))
+        self.assertEqual(creator["state"], "verified")
+        self.assertEqual(creator["engine_slice"], {
+            "boot_id": kernel.read_boot_id(), "cgroup_device": 35, "cgroup_inode": 2101})
+        with mock.patch.object(engine_executor, "_slice_active"), \
+             mock.patch.object(engine_executor, "_cgroup", return_value=(35, 2102)):
+            with self.assertRaisesRegex(Denied, "engine-slice-start-drift"):
+                engine_executor._start_cgroup(self.data, store, lease)
+
+    def test_indeterminate_slice_start_is_never_replayed(self):
+        start = mock.Mock(side_effect=TimeoutError)
+        with self.assertRaises(engine_executor.EngineUnknown):
+            self.create_slice(start)
+        store, lease = self.f.store, self.f.lease
+        self.assertEqual(engine_executor._slice_creator(store.read(lease))["state"], "unknown")
+        with self.assertRaises(Denied):
+            self.create_slice(start)
+        start.assert_called_once_with(lease, "start")
+
+    def test_verified_fence_without_engine_gets_withdrawn_and_retained_four_hours(self):
+        store, lease = self.f.store, self.f.lease
+        self.create_slice(mock.Mock())
+        boot = kernel.read_boot_id()
+        target, baseline = "fence:" + lease, "c" * 64
+        effect = store.begin(lease, "fence-create", target)
+        store.bind_fence(lease, effect, policy_sha256="b" * 64, boot_id=boot, netns_device=4,
+                         netns_inode=4026532529, host_ifindex=21, peer_ifindex=2, nft_table_handle=3)
+        store.bind_host_api_fence(lease, effect, policy_sha256="d" * 64, baseline_sha256=baseline, boot_id=boot,
+                                  host_netns_device=4, host_netns_inode=4026531840, nft_table_handle=4)
+        store.record(lease, effect, "verified", evidence_sha256="e" * 64)
+        terminal = self.f.terminal()
+        owner = self.owner()
+        self.assertEqual(owner.creator_targets["fence-create"], target)
+        with self.assertRaisesRegex(Denied, "partial-custody-fence-live"):
+            operating_custody._partial_fence_withdrawal(store.read(lease))
+
+        def withdraw(path, digest, fence, opened, worker, config):
+            self.assertEqual(fence.lease_id, lease)
+            cut = opened.begin(lease, "fence-disable", target)
+            opened.bind_host_api_withdrawal(lease, cut, baseline_sha256=baseline)
+            opened.record(lease, cut, "verified", evidence_sha256="a" * 64)
+
+        with mock.patch.object(network_fence, "disable", side_effect=withdraw) as cut, \
+             mock.patch.object(network_fence, "verify_disabled") as verify:
+            self.f.finalizer.withdraw_partial_preparation(self.f.registry, "approved", store, lease)
+        cut.assert_called_once()
+        verify.assert_called_once()
+        retention = operating_custody.retain_partial_preparation(self.f.registry, "approved", store, lease)
+        self.assertEqual(retention["retain_until"], terminal["completed_at"] + 14400)
+        keep = store.read(lease)
+        self.assertNotIn("owned_instance", keep)
+        self.assertNotIn("custody", keep)
+        self.assertEqual(retention["fence_disable_sha256"], operating_custody._partial_fence_withdrawal(keep)[
+            "fence_disable_sha256"])
+        self.f.now = retention["retain_until"] - 1
+        with self.assertRaisesRegex(Denied, "partial-retention-not-elapsed"):
+            operating_custody.require_partial_cleanup_allowed(store, lease)
+        self.f.now += 1
+        self.assertEqual(operating_custody.require_partial_cleanup_allowed(store, lease), retention)
+        # Withdrawal is journaled once. Re-entry confirms the already empty
+        # native gate rather than submitting it again.
+        with mock.patch.object(network_fence, "disable") as repeat, \
+             mock.patch.object(network_fence, "verify_disabled"):
+            self.f.finalizer.withdraw_partial_preparation(self.f.registry, "approved", store, lease)
+        repeat.assert_not_called()
+
+        def remove_fence(path, digest, selected, opened, worker, config):
+            self.assertEqual(selected, owner)
+            removal = opened.begin(lease, "fence-remove", target)
+            opened.record(lease, removal, "verified", evidence_sha256="f" * 64)
+
+        def stop_slice(lease_id, action):
+            self.assertEqual((lease_id, action), (lease, "stop"))
+            states = {effect["operation"]:effect["state"] for effect in store.read(lease)["effects"].values()}
+            self.assertEqual((states["fence-remove"], states["slice-remove"]), ("verified", "intent"))
+
+        with mock.patch.object(network_fence, "verify_disabled"), \
+             mock.patch.object(network_fence, "remove", side_effect=remove_fence), \
+             mock.patch.object(engine_executor, "_slice_active"), \
+             mock.patch.object(engine_executor, "_drained_cgroup"), \
+             mock.patch.object(engine_executor, "_slice_manager", side_effect=stop_slice) as stop, \
+             mock.patch.object(engine_executor, "_slice_inactive"), \
+             mock.patch.object(cleanup_storage, "_cleanup_limits", return_value=(100000, 30)), \
+             mock.patch.object(cleanup_storage.storage_quota, "acquire_existing_evidence_quota",
+                               side_effect=lambda *args:nullcontext()):
+            closed = self.f.finalizer.finalize_partial_preparation(self.f.registry, "approved", store, lease)
+        stop.assert_called_once_with(lease, "stop")
+        self.assertEqual(closed["state"], "FAILED_PARTIAL_PREPARATION_CLOSED")
+        self.assertFalse(closed["native_acceptance"])
+        self.assertFalse(self.context.exists())
+
     def test_published_signature_and_original_files_authenticate_after_auth_expiry(self):
         self.f.terminal();owner=self.owner()
         deadline=max(self.record['expires_at'],self.record['authorizations'][-1]['valid_until'])+1

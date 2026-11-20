@@ -307,10 +307,15 @@ class RuntimeRPC:
                   if type(owner) is engine_executor.engine_supervision.OwnedRun
                   and owner.lease_id == lease_id and owner.store is store
                   and owner.owner_pid == os.getpid() and not owner.closed]
-        if not any(e["operation"] == "engine-start" for e in store.read(lease_id)["effects"].values()):
+        record = store.read(lease_id)
+        if not any(e["operation"] == "engine-start" for e in record["effects"].values()):
             from . import finalization
-            # No original engine exists. Exact certificate withdrawal does not
-            # wait on native terminal or data-cleanup eligibility.
+            # The original admitted request has already failed. End its grant
+            # before asking the exact owner to cut the fence and certificate.
+            if record["state"] == "prepared" and any(
+                    e["operation"] == "fence-create" and e["state"] == "verified" for e in record["effects"].values()):
+                store.cancel(lease_id, "cancelled")
+            # Verified terminal and retention are still required separately.
             finalization.RootFinalizer(self._config.path, self._config.sha256).withdraw_partial_preparation(
                 self._registry, selector, store, lease_id)
             return
@@ -440,6 +445,8 @@ class RuntimeRPC:
                         details = identity.decode_json(manifest.canonical_bytes)
                         require(details["capture"] == {key: self._config.capture[key]
                                 for key in ("stdout_limit", "stderr_limit", "total_limit")}, "runtime-capture-policy")
+                        engine_executor._create_slice(session, prepared, store, manifest)
+                        budget()
                         network_fence.create(config.network_fence_policy_path, config.network_fence_policy_sha256,
                                              prepared, store, current_worker, config)
                         budget()
