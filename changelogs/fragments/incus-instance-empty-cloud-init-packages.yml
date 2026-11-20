@@ -1,0 +1,6 @@
+---
+bugfixes:
+  - >-
+    incus_instance - omit the cloud-init packages key when the configured
+    package list is empty, avoiding schema validation warnings and degraded
+    guest readiness.

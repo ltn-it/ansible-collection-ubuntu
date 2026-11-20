@@ -43,6 +43,20 @@
         }}
   when: incus_instance_cloud_init_enabled | bool
 
+- name: Omit empty cloud-init package lists
+  ansible.builtin.set_fact:
+    incus_instance_generated_user_data: >-
+      {{
+        incus_instance_generated_user_data
+        | dict2items
+        | rejectattr('key', 'equalto', 'packages')
+        | items2dict
+      }}
+  no_log: true
+  when:
+    - incus_instance_cloud_init_enabled | bool
+    - incus_instance_generated_user_data.packages | length == 0
+
 - name: Render generated Incus cloud-init user-data
   ansible.builtin.set_fact:
     incus_instance_generated_user_data_rendered: |

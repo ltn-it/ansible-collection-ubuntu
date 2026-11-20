@@ -147,6 +147,7 @@
             type: vm
             state: running
             fqdn: molecule-rhel10.example.com
+            cloud_init_packages: []
             reconfigure: true
             profiles:
               - rhel9-aap

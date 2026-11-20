@@ -69,6 +69,7 @@
             (incus_instance_molecule_user_data.content | b64decode).splitlines() | first
             == '#cloud-config'
           - "'molecule-rhel10.example.com' in (incus_instance_molecule_user_data.content | b64decode)"
+          - "'packages:' not in (incus_instance_molecule_user_data.content | b64decode)"
           - >-
             'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeMoleculeKey'
             in (incus_instance_molecule_user_data.content | b64decode)

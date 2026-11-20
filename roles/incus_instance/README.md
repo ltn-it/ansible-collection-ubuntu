@@ -56,6 +56,9 @@ Each `incus_instance_items` entry supports:
 - `project`, `profiles`, `config`, `devices`, `limits`.
 - `hostname`, `fqdn`, `ssh_user`, `ssh_public_keys`.
 - `cloud_init_enabled`, `cloud_init_user_data`, `cloud_init_network_config`.
+- `cloud_init_packages`: Packages to install at first boot. Set `[]` to omit
+  the `packages` key entirely, for example when the guest must register before
+  using package repositories.
 - `wait_for_ip`, `wait_for_ssh`, `wait_timeout`, `wait_delay`.
 
 When `profiles` is omitted, Incus applies its normal default-profile behavior.
