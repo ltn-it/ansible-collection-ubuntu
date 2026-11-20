@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 10:
+        return _validate_tenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 9:
         return _validate_ninth_retired_partial_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 8:
@@ -137,6 +139,7 @@ def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     return value
 
 
+@identity._diagnostic_step("continuation-commit")
 def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusable_sha):
     """Exact new run/commit/first parent; this does not authenticate native JSON."""
     row = value["successor"]
@@ -147,7 +150,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
-                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN}[value["schema"]])
+                    for p in parents) and parents[0]["sha"] == ({1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN, 6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN}[value["schema"]])
             and len({p["sha"] for p in parents}) == len(parents)
             and caller_sha not in {p["sha"] for p in parents}, "continuation-first-parent")
 
@@ -202,6 +205,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 10:
+        return _validate_tenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 9:
         return _validate_ninth_retired_partial_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 8:
@@ -1453,6 +1458,16 @@ NINTH_PREVIOUS_QUALIFICATION = "cedb33cf2c4914859f272a218f0fc96a8c1d3e48e3e1b8f1
 
 
 def ninth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, NINTH_REUSABLE, NINTH_GRAPH,
+                                       NINTH_CHECKS, NINTH_MAIN)
+
+
+def tenth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, NINTH_SUCCESSOR_REUSABLE,
+                                       TENTH_GRAPH, TENTH_CHECKS, TENTH_MAIN)
+
+
+def _terminal_native_projection(run, inventory, checks, reusable, graph_digest, check_ids, main):
     require(type(run) is dict and type(inventory) is dict and type(inventory.get("total_count")) is int
             and inventory["total_count"] == 24 and type(inventory.get("jobs")) is list
             and len(inventory["jobs"]) == 24, "continuation-ninth-complete-inventory")
@@ -1461,8 +1476,8 @@ def ninth_native_projection(run, inventory, checks):
             and repo.get("private") is False and repo.get("owner", {}).get("id") == 54334171,
             "continuation-ninth-native-repository")
     refs = run.get("referenced_workflows")
-    require(type(refs) is list and sum(type(v) is dict and v.get("sha") == NINTH_REUSABLE
-            and v.get("path") == "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + NINTH_REUSABLE
+    require(type(refs) is list and sum(type(v) is dict and v.get("sha") == reusable
+            and v.get("path") == "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + reusable
             for v in refs) == 1, "continuation-ninth-native-controller")
     fields = ("id", "name", "run_id", "run_attempt", "head_sha", "status", "conclusion", "runner_id",
               "runner_group_id", "started_at", "completed_at", "check_run_url")
@@ -1477,11 +1492,11 @@ def ninth_native_projection(run, inventory, checks):
              "workflow_id", "path", "status", "conclusion")},
              **{field: {k: run[field][k] for k in actor} for field in ("actor", "triggering_actor")}},
              "jobs": sorted(rows, key=lambda row: row["id"])}
-    require(ledger.digest(graph) == NINTH_GRAPH, "continuation-ninth-original-failed-graph")
-    require(type(checks) is list and len(checks) == len(NINTH_CHECKS), "continuation-ninth-native-checks")
-    for identifier, check in zip(NINTH_CHECKS, checks):
+    require(ledger.digest(graph) == graph_digest, "continuation-ninth-original-failed-graph")
+    require(type(checks) is list and len(checks) == len(check_ids), "continuation-ninth-native-checks")
+    for identifier, check in zip(check_ids, checks):
         job = next(row for row in rows if row["id"] == identifier)
-        require(type(check) is dict and check.get("id") == identifier and check.get("head_sha") == NINTH_MAIN
+        require(type(check) is dict and check.get("id") == identifier and check.get("head_sha") == main
                 and all(check.get(k) == job[k] for k in ("name", "status", "conclusion", "started_at", "completed_at"))
                 and check.get("app", {}).get("id") == 15368 and check.get("app", {}).get("slug") == "github-actions",
                 "continuation-ninth-native-check")
@@ -1653,4 +1668,52 @@ def ninth_retired_partial_continuation_qualification(previous, run, inventory, c
              "previous_qualification": previous, "native_ninth": ninth_native_projection(run, inventory, checks),
              "retirement": retirement}
     validate_continuation_qualification(value)
+    return value
+
+# A new protected-main push may follow the captured terminal attempt. The private
+# qualification includes the exact earlier bootstrap bytes and its original bank.
+TENTH_MAIN = "5604f19544f97b572272496fd61f5c4949d45fba"
+TENTH_RUN = 44677270629
+TENTH_CHECKS = (136092710776, 136093110422, 136092711591, 136092711786,
+                136093566695, 136093593473, 136093593880, 136093593863)
+TENTH_GRAPH = "b6adbcf86e247018cf8cfa4d323c2d714d67a4aa4cc790facf11856b0bd5bfe8"
+TENTH_QUALIFICATION = "e3c4f3698863028ecab61b0566992cb09016d0e1e7945cd17138858adbc767a1"
+TENTH_SUCCESSOR_WORKFLOW = "de43f184e7f11e8099176cf91250b2f51ad3d4578a56d431e9dd17d692e76e4a"
+TENTH_SUCCESSOR_REUSABLE = "ade2ad12b4b6daa90332f1a7c087ed61ae6bed57"
+
+
+def _validate_tenth_qualification(value):
+    require(ledger.digest(value) == TENTH_QUALIFICATION, "continuation-tenth-history")
+    previous = value["previous_qualification"]
+    old = value["previous_bootstrap"]
+    route = old["operating_continuation"]
+    require(value["purpose"] == "terminal-original-push-without-lease-or-catalogue-addition"
+            and ledger.digest(value["native_tenth"]) == TENTH_GRAPH
+            and old["ledger_path"] == value["previous_bank"]["path"]
+            and route["qualification"]["sha256"] == ledger.digest(previous)
+            and route["successor"]["source_sha"] == TENTH_MAIN
+            and route["successor"]["run_id"] == TENTH_RUN, "continuation-tenth-original")
+    _validate_ninth_retired_partial_descriptor(route, old["source_workflow_sha256"],
+                                              old["source_identity"]["reusable_sha"])
+    return _validate_ninth_retired_partial_qualification(previous)
+
+
+def _validate_tenth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == "terminal-original-push-without-lease-or-catalogue-addition"
+            and ref["sha256"] == TENTH_QUALIFICATION, "continuation-tenth-qualification")
+    row = engine_policy._keys(value["successor"], {"source_sha", "run_id", "run_attempt", "first_parent",
+                                                   "source_workflow_sha256", "reusable_sha"})
+    cell_contract._commit(row["source_sha"])
+    engine_policy._integer(row["run_id"], 1, 2**63 - 1)
+    require(row["source_sha"] not in {INITIAL_MAIN, ORIGIN_MAIN, PRIOR_MAIN, THIRD_MAIN, FOURTH_MAIN,
+                                      FIFTH_MAIN, SIXTH_MAIN, SEVENTH_MAIN, EIGHTH_MAIN, NINTH_MAIN, TENTH_MAIN}
+            and row["run_id"] not in {ORIGIN_RUN, PRIOR_RUN, THIRD_RUN, FOURTH_RUN, FIFTH_RUN,
+                                      SIXTH_RUN, SEVENTH_RUN, EIGHTH_RUN, NINTH_RUN, TENTH_RUN}
+            and type(row["run_attempt"]) is int and row["run_attempt"] == 1
+            and row["first_parent"] == TENTH_MAIN
+            and row["source_workflow_sha256"] == workflow_sha256 == TENTH_SUCCESSOR_WORKFLOW
+            and row["reusable_sha"] == reusable_sha == TENTH_SUCCESSOR_REUSABLE, "continuation-tenth-successor")
     return value
