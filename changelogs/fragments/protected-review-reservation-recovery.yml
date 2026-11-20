@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    release automation - reconcile exact-head review reservations with bounded API readback
+    and reject stale materialized review input.
