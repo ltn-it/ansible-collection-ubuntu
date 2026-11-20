@@ -142,13 +142,16 @@ class RootFinalizer:
         require(runtime_rpc._configuration(self._runtime.path, self._runtime.sha256) == self._runtime
                 and registry.path == self._runtime.registry_path and registry.sha256 == self._runtime.registry_sha256
                 and config.registry_path == registry.path and config.registry_sha256 == registry.sha256
-                and (cell_contract.partial_preparation_owner(registry, selector, store, owner.lease_id)
-                     if type(owner) is cell_contract.PartialPreparationOwner else
-                     cell_contract.owned_cell_for_cleanup(registry, selector, store, owner.lease_id)) == owner,
+                and registry == owner.registry and selector == owner.selector
+                and (cell_contract.revalidate_partial_preparation(owner, store)
+                     if isinstance(owner, cell_contract.PartialPreparationOwner) else
+                     cell_contract.owned_cell_for_cleanup(registry, selector, store, owner.lease_id) == owner),
                 "finalization-root-drift")
         return config
 
     def _remote_delete(self, session, registry, selector, store, owner, cleanup, operation, target, kind, action):
+        if type(owner) is cell_contract.PartialCertificateWithdrawal:
+            require(operation == "certificate-revoke" and kind == "certificate", "partial-certificate-only")
         config = self._fresh(session, registry, selector, store, owner)
         existing = _effect(store.read(owner.lease_id), operation, target)
         if existing is not None:
@@ -159,7 +162,7 @@ class RootFinalizer:
         try:
             before = cleanup.readback(kind)
             require(before["state"] in {"required_fields_match", "absent_observed"}, "finalization-delete-not-owned")
-            if type(owner) is cell_contract.PartialPreparationOwner:
+            if isinstance(owner, cell_contract.PartialPreparationOwner):
                 require(before["state"] == "required_fields_match", "partial-original-resource-disappeared")
             if before["state"] != "absent_observed":
                 if operation == "certificate-revoke":
@@ -202,8 +205,17 @@ class RootFinalizer:
         from . import root_session
         with root_session._session(self._runtime.preparation_config_path,
                                   self._runtime.preparation_config_sha256) as session:
-            owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
+            owner = cell_contract.partial_preparation_withdrawal_owner(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
+            if "fence-create" in owner.creators:
+                record = store.read(lease_id)
+                worker = ledger.Worker(**record["worker"])
+                disable = _effect(record, "fence-disable", "fence:" + lease_id)
+                if disable is None:
+                    fence = cell_contract.owned_fence_for_cleanup(registry, selector, store, lease_id)
+                    network_fence.disable(config.network_fence_policy_path, config.network_fence_policy_sha256,
+                                          fence, store, worker, config)
+                network_fence.verify_disabled(owner, store, worker, config)
             target = owner.incus
             fingerprint = owner.creator_targets.get("certificate-create", "").removeprefix("certificate:")
             client = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
@@ -242,6 +254,11 @@ class RootFinalizer:
                 cleanup.quiet_project()
             cleanup_storage.reconcile_postchecks(session, owner, store, config, cleanup)
             operating_custody.require_partial_cleanup_allowed(store, lease_id)
+            if "fence-create" in owner.creators:
+                worker = ledger.Worker(**store.read(lease_id)["worker"])
+                network_fence.remove(config.network_fence_policy_path, config.network_fence_policy_sha256,
+                                     owner, store, worker, config)
+            engine_executor._remove_slice(session, owner, store)
             if "engine-prepare" in owner.creators:
                 cleanup_storage.release_engine(owner, store, config)
             if "context-create" in owner.creators:
@@ -413,6 +430,7 @@ class RootFinalizer:
                 self._fresh(session, registry, selector, store, owner)
                 network_fence.remove(config.network_fence_policy_path, config.network_fence_policy_sha256,
                                      owner, store, worker, config)
+                engine_executor._remove_slice(session, owner, store)
                 self._fresh(session, registry, selector, store, owner)
                 require(cleanup.certificates_absent() is True, "finalization-certificate-returned")
                 require(cleanup.readback("project")["state"] == "absent_observed"

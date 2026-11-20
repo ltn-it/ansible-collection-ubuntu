@@ -1,0 +1,8 @@
+---
+bugfixes:
+  - Bind the Incus test controller's systemd slice to the original lease before
+    engine startup and remove it after verified cleanup.
+  - Withdraw and retain a verified, fenced preparation that fails before engine
+    startup. Distinguish reused network namespace inodes by kernel identity.
+  - Support an explicit disabled installation handoff for an expired,
+    verified pre-engine preparation so the updated finalizer can recover it.

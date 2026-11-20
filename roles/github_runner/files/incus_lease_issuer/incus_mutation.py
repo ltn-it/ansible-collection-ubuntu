@@ -840,11 +840,11 @@ class RootPartialPreparationCleanup(RootIncusMutator):
     def __init__(self, client, owned, store):
         from . import cell_contract, ledger
         admin._root()
-        require(type(owned) is cell_contract.PartialPreparationOwner and type(store) is ledger.Ledger
+        require(type(owned) in {cell_contract.PartialPreparationOwner, cell_contract.PartialCertificateWithdrawal}
+                and type(store) is ledger.Ledger
                 and store.owner_uid == 0 and type(client) is admin.RootIncusAdmin,
                 "partial-mutation-root-inputs")
-        require(cell_contract.partial_preparation_owner(owned.registry, owned.selector, store, owned.lease_id) == owned,
-                "partial-mutation-owner-drift")
+        require(cell_contract.revalidate_partial_preparation(owned, store), "partial-mutation-owner-drift")
         value = owned.incus
         owner = Ownership(**value["ownership"])
         project = ProjectSpec(value["project"], value["network"], value["pool"], ProjectLimits(**value["project_limits"]), owner)
@@ -865,8 +865,7 @@ class RootPartialPreparationCleanup(RootIncusMutator):
 
     def _scope(self):
         from . import cell_contract, ledger
-        require(cell_contract.partial_preparation_owner(self._owner.registry, self._owner.selector,
-                    self._store, self._owner.lease_id) == self._owner, "partial-mutation-owner-drift")
+        require(cell_contract.revalidate_partial_preparation(self._owner, self._store), "partial-mutation-owner-drift")
         record = self._store.read(self._owner.lease_id)
         if "certificate-create" in self._owner.creators:
             creator = record["effects"][self._owner.creators["certificate-create"]["id"]]
@@ -877,6 +876,7 @@ class RootPartialPreparationCleanup(RootIncusMutator):
                 "projects": [self._project.project]}
 
     def _mutate(self, operation, target, method, path, body=None, *, etag=None):
+        from . import cell_contract
         self._scope()
         expected = {"image-delete": self._owner.creator_targets.get("image-copy"),
                     "certificate-revoke": self._owner.creator_targets.get("certificate-create"),
@@ -884,6 +884,9 @@ class RootPartialPreparationCleanup(RootIncusMutator):
                     "network-delete": self._owner.creator_targets.get("network-create")}
         require(operation in expected and expected[operation] == target and method == "DELETE"
                 and body is None and etag is None, "partial-mutation-delete-only")
+        if type(self._owner) is cell_contract.PartialCertificateWithdrawal:
+            require(operation == "certificate-revoke" and path == "/1.0/certificates/" + self._fingerprint,
+                    "partial-mutation-certificate-only")
         effects = self._store.read(self._owner.lease_id)["effects"].values()
         require(sum(e["operation"] == operation and e["target"] == target and e["state"] == "intent"
                     for e in effects) == 1, "partial-mutation-original-intent")
