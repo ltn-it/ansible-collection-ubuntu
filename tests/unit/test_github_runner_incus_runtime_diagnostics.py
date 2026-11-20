@@ -43,6 +43,20 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertLessEqual(value[key], 86400000)
         return value
 
+    def test_exhausted_namespace_census_reports_fixed_reason_and_preserves_hold(self):
+        from incus_lease_issuer import network_fence
+
+        with mock.patch.object(network_fence, "_namespace_refs_drained_once",
+                               side_effect=ProcessLookupError("private process detail")) as scan:
+            with self.assertRaises(network_fence.KernelHold):
+                with identity._diagnostic_request():
+                    network_fence._namespace_refs_drained(-1, None, 0)
+        self.assertEqual(scan.call_count, 8)
+        record = self.record()
+        self.assertEqual((record["stage"], record["reason"]),
+                         ("namespace-census", "fence-proc-acquire-unstable"))
+        self.assertEqual(record["counts"], [["namespace-census", 1, 0]])
+
     def test_success_and_inactive_helpers_do_not_log(self):
         @identity._diagnostic_step("collector")
         def success():

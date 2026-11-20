@@ -248,6 +248,9 @@ def _continuation_receipt(value):
     require(proof.sha256 == ref["sha256"], "continuation-qualification-drift")
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
+    require(type(receipt) is dict, "continuation-qualification-object")
+    if descriptor["schema"] == 10 or receipt.get("schema") == 10:
+        require(descriptor["schema"] == receipt.get("schema") == 10, "continuation-tenth-receipt-kind")
     counts = operating_cells.validate_continuation_qualification(receipt)
     return descriptor, receipt, counts, stamp
 
@@ -711,10 +714,16 @@ def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, temp
         os.close(root)
 
 
+@identity._diagnostic_step("continuation-origin")
 def _continuation_origin_absent(bootstrap, qualified):
     """Product API reads only; call outside any nested Ledger transaction."""
     descriptor, receipt, counts, _ = qualified
-    if descriptor["schema"] == 9:
+    previous_bank = None
+    if descriptor["schema"] == 10:
+        previous_bank = receipt["previous_bank"]
+        _check_empty_previous_bank(previous_bank, bootstrap.value["ledger_path"])
+        receipt = receipt["previous_qualification"]
+    if descriptor["schema"] in {9, 10}:
         bank = operating_cells.NINTH_RETIRED_PARTIAL["original_bank"]
         with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
             require(_ninth_retired_partial_projection(bootstrap.value["ledger_path"],
@@ -761,14 +770,35 @@ def _continuation_origin_absent(bootstrap, qualified):
                     and who["reusable_sha"] == successor["reusable_sha"], "continuation-original-or-unknown-lease")
 
 
+    if previous_bank is not None:
+        _check_empty_previous_bank(previous_bank, bootstrap.value["ledger_path"])
+
+
+def _check_empty_previous_bank(bank, current_path):
+    require(bank["path"] != current_path, "continuation-tenth-bank-reuse")
+    with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
+        with ledger.Ledger(bank["path"]) as old:
+            require(old.lease_ids() == (), "continuation-tenth-original-lease")
+            fd = installation._open_directory(current_path)
+            try:
+                current = os.fstat(fd)
+                require((current.st_dev, current.st_ino) != (bank["device"], bank["inode"]),
+                        "continuation-tenth-bank-alias")
+            finally:
+                os.close(fd)
+
+
 @identity._diagnostic_step("native-histories")
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
-    ninth = descriptor["schema"] == 9
+    tenth_receipt = receipt if descriptor["schema"] == 10 else None
+    if tenth_receipt is not None:
+        receipt = tenth_receipt["previous_qualification"]
+    ninth = descriptor["schema"] in {9, 10}
     eighth_receipt = receipt["previous_qualification"] if ninth else receipt
-    eighth = descriptor["schema"] in {8, 9}
+    eighth = descriptor["schema"] in {8, 9, 10}
     record = eighth_receipt["previous_qualification"] if eighth else receipt
-    seventh = descriptor["schema"] in {7, 8, 9}
+    seventh = descriptor["schema"] in {7, 8, 9, 10}
     history = record["previous_qualification"] if seventh else record
     schema = 6 if seventh else descriptor["schema"]
     fifth = history["previous_qualification"] if schema == 6 else history
@@ -797,6 +827,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if ninth:
         families.append((_continuation_ninth_native, {}, receipt["native_ninth"],
                          "continuation-ninth-native-drift"))
+    if tenth_receipt is not None:
+        families.append((_continuation_tenth_native, {}, tenth_receipt["native_tenth"],
+                         "continuation-tenth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -852,7 +885,7 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             # still freshly checked on every revalidation; no shared cache exists.
             if check_origin:
                 _continuation_native_histories(get, descriptor, receipt)
-            needs_commit = descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9} or identity.decode_json(selected.template_bytes)["kind"] == "operating"
+            needs_commit = descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9, 10} or identity.decode_json(selected.template_bytes)["kind"] == "operating"
             if needs_commit:
                 # Fetch only the immutable Git object during the local check.
                 # Validate it after the original origin check on the owning thread.
@@ -1129,6 +1162,8 @@ def _current_configuration_catalogue(bootstrap, root):
         descriptor, receipt, _, _ = qualified
         if descriptor["schema"] in {7, 8}:
             retired = receipt["failed_prefix"]["catalogues"]["native_run_configuration_catalogue"]
+        elif descriptor["schema"] == 10:
+            retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] in {5, 6, 9}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
     directory_identity = run_intake._directory_identity(root)
@@ -1544,12 +1579,21 @@ def collect_eighth_prelease_history(successor_ledger_path, original_bootstrap, p
 
 
 def _continuation_ninth_native(get):
-    """Full ninth terminal family; fresh second inventory before returning."""
-    prefix = "/actions/runs/" + str(operating_cells.NINTH_RUN)
+    return _terminal_family(get, operating_cells.NINTH_RUN, operating_cells.NINTH_CHECKS,
+                            operating_cells.ninth_native_projection)
+
+
+def _continuation_tenth_native(get):
+    return _terminal_family(get, operating_cells.TENTH_RUN, operating_cells.TENTH_CHECKS,
+                            operating_cells.tenth_native_projection)
+
+
+def _terminal_family(get, run_id, check_ids, projection):
+    prefix = "/actions/runs/" + str(run_id)
     path = prefix + "/attempts/1/jobs?per_page=100&page=1"
     run, inventory = get(prefix), get(path)
-    checks = [get("/check-runs/" + str(identifier)) for identifier in operating_cells.NINTH_CHECKS]
-    result = operating_cells.ninth_native_projection(run, inventory, checks)
+    checks = [get("/check-runs/" + str(identifier)) for identifier in check_ids]
+    result = projection(run, inventory, checks)
     require(get(path) == inventory, "continuation-ninth-native-inventory-drift")
     return result
 
