@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 
 PRIVATE = "/usr/local/lib/lit-incus-runtime-v2"
 PUBLIC = "/usr/libexec/lightning-it"
@@ -365,7 +366,92 @@ def retired_preparation(runtime, config_digest, state, state_raw, reference):
         os.close(fd)
 
 
-def configurations(path, digest, group, public_pin=None, retired_reference=None):
+def preparation_runner_inactive(unit):
+    require(type(unit) is str and re.fullmatch(r"actions[.]runner[.][A-Za-z0-9_.-]+[.]service", unit))
+    expected = {"Id": unit, "LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead",
+                "MainPID": "0", "ControlPID": "0", "Job": ""}
+    result = subprocess.run(["/usr/bin/systemctl", "show", "--all", "--no-pager",
+                             "--property=" + ",".join(expected), unit],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=5, check=False)
+    require(result.returncode == 0 and len(result.stdout) <= 8192
+            and pairs(line.split("=", 1) for line in result.stdout.decode("ascii").splitlines()) == expected)
+
+
+def pending_preparation(runtime, config_digest, state, state_raw, reference):
+    """Carry one known failed preparation unchanged through disabled installation."""
+    require(set(reference) == {"path", "sha256"})
+    raw = sealed(reference["path"], reference["sha256"])
+    value = decode(raw)
+    require(canonical(value) == raw and type(value.get("schema")) is int and value["schema"] == 1
+            and value.get("kind") == "expired-pre-engine-installation-handoff"
+            and set(value) == {"schema", "kind", "bootstrap_sha256", "source_machine_id", "source_boot_id",
+                               "bank", "lease_id", "lease_sha256", "native_terminal", "isolation"})
+    require(value["bootstrap_sha256"] == config_digest
+            and value["source_machine_id"] == sealed("/etc/machine-id", private=False).decode("ascii").strip()
+            and value["source_boot_id"] == boot_id())
+    bank = value["bank"]
+    require(type(bank) is dict and set(bank) == {"device", "inode", "state_sha256"}
+            and bank["state_sha256"] == hashlib.sha256(state_raw).hexdigest()
+            and all(type(bank[key]) is int and bank[key] > 0 for key in ("device", "inode")))
+    lease = value["lease_id"]
+    require(type(lease) is str and re.fullmatch("[0-9a-f]{32}", lease)
+            and set(state["leases"]) == {lease})
+    row = state["leases"][lease]
+    require(value["lease_sha256"] == hashlib.sha256(canonical(row)).hexdigest()
+            and row["state"] in {"prepared", "cancelled"}
+            and not {"owned_instance", "custody", "partial_preparation_custody"} & set(row))
+    source = runtime["source_identity"]
+    successor = runtime["operating_continuation"]["successor"]
+    who = row["identity"]
+    worker = row["worker"]
+    require(worker["boot_id"] == value["source_boot_id"] and worker["runner_id"] == source["runner_id"] == who["runner_id"]
+            and worker["uid"] == source["service_uid"] == who["service_uid"]
+            and who["run_id"] == successor["run_id"] and who["caller_sha"] == successor["source_sha"]
+            and who["reusable_sha"] == successor["reusable_sha"] == source["reusable_sha"])
+    effects = {entry["operation"]: entry for entry in row["effects"].values()}
+    require(len(effects) == len(row["effects"]) and set(effects) == {
+                "network-create", "project-create", "profile-configure", "context-create", "certificate-create",
+                "engine-prepare", "context-publish", "fence-create", "fence-renew"}
+            and all(effect["state"] == "verified" and type(effect.get("evidence_sha256")) is str
+                    and SHA.fullmatch(effect["evidence_sha256"]) for effect in effects.values()))
+    deadline = min(row["expires_at"], row["authorizations"][-1]["valid_until"])
+    fence = effects["fence-create"]
+    renewal = effects["fence-renew"]
+    require(fence["target"] == "fence:" + lease
+            and fence["fence"]["boot_id"] == fence["host_api"]["boot_id"] == value["source_boot_id"]
+            and renewal["target"] == fence["target"] + ":" + row["authorizations"][-1]["token_id_sha256"]
+            and all(renewal[key]["allow_expires_at"] == deadline and
+                    renewal[key]["expires_boot_ns"] <= time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+                    for key in ("fence_authorization", "host_api_authorization")))
+    terminal = value["native_terminal"]
+    require(type(terminal) is dict and set(terminal) == {"run_id", "job_id", "check_run_id", "source_sha",
+                                                "conclusion", "completed_at", "run_attempt"}
+            and all(type(terminal[key]) is int and terminal[key] == who[key]
+                    for key in ("run_id", "job_id", "check_run_id"))
+            and terminal["source_sha"] == who["caller_sha"] and terminal["conclusion"] == "failure"
+            and type(terminal["run_attempt"]) is int and terminal["run_attempt"] == successor["run_attempt"] == 1)
+    isolated = value["isolation"]
+    require(type(isolated) is dict and set(isolated) == {"observed_at", "private_grant_ms", "host_grant_ms",
+                                                     "native_instance_count"}
+            and all(type(isolated[key]) is int and isolated[key] == 0
+                    for key in ("private_grant_ms", "host_grant_ms", "native_instance_count"))
+            and type(terminal["completed_at"]) is int and type(isolated["observed_at"]) is int
+            and row["created_at"] <= terminal["completed_at"] <= isolated["observed_at"] <= time.time()
+            and deadline <= isolated["observed_at"])
+    preparation_runner_inactive(runtime["collector"]["service"]["unit"])
+    store = runtime["ledger_path"]
+    fd = directory(store)
+    try:
+        info = os.fstat(fd)
+        require((info.st_dev, info.st_ino) == (bank["device"], bank["inode"])
+                and sealed(store + "/state.json", bank["state_sha256"]) == state_raw
+                and sealed(reference["path"], reference["sha256"]) == raw)
+    finally:
+        os.close(fd)
+
+
+def configurations(path, digest, group, public_pin=None, retired_reference=None, pending_reference=None):
     runtime = decode(sealed(path,digest))
     require(type(runtime["schema"]) is int)
     bootstrap = runtime["schema"] == 1
@@ -419,10 +505,14 @@ def configurations(path, digest, group, public_pin=None, retired_reference=None)
             and type(state["leases"]) is dict)
     original = {key:value for key,value in state.items() if key != "checksum"}
     require(state["checksum"] == hashlib.sha256(json.dumps(original,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest())
-    require(retired_reference is None or type(retired_reference) is dict)
+    require(all(value is None or type(value) is dict for value in (retired_reference, pending_reference))
+            and not (retired_reference and pending_reference))
     if retired_reference:
         require(bootstrap)
         retired_preparation(runtime,digest,state,state_raw,retired_reference)
+    elif pending_reference:
+        require(bootstrap)
+        pending_preparation(runtime,digest,state,state_raw,pending_reference)
     else:
         require(all(row["state"] == "closed" for row in state["leases"].values()))
     return runtime
@@ -465,13 +555,13 @@ BINDINGS_ROOT = "/var/lib/lightning-it/incus-operating-bindings"
 
 def operating_configuration(value, complete=False):
     """Read-only bindings; never tick, submit mail, create a lease or activate units."""
-    require(type(value) is dict and set(value) in (
-                {"watchdog_path", "watchdog_sha256", "mail_path", "mail_sha256", "helper_sha256"},
-                {"watchdog_path", "watchdog_sha256", "mail_path", "mail_sha256", "helper_sha256", "retired_preparation"})
+    base = {"watchdog_path", "watchdog_sha256", "mail_path", "mail_sha256", "helper_sha256"}
+    optional = {"retired_preparation", "pending_preparation_handoff"}
+    require(type(value) is dict and base <= set(value) <= base | optional
+            and len(set(value) & optional) <= 1
             and type(value["helper_sha256"]) is dict and set(value["helper_sha256"]) == HELPERS)
-    if "retired_preparation" in value:
-        require(type(value["retired_preparation"]) is dict
-                and set(value["retired_preparation"]) == {"path","sha256"})
+    for key in set(value) & optional:
+        require(type(value[key]) is dict and set(value[key]) == {"path", "sha256"})
     for digest in value["helper_sha256"].values():
         require(type(digest) is str and SHA.fullmatch(digest))
     configs = []
@@ -530,8 +620,9 @@ def main():
         operating = decode(sys.argv[9]) if len(sys.argv) >= 10 else None
         if operating is not None:
             operating_configuration(operating)
-        config = configurations(config_path,digest,group,public_pin,
-                                operating.get("retired_preparation") if operating is not None else None)
+        bindings = operating or {}
+        config = configurations(config_path,digest,group,public_pin,bindings.get("retired_preparation"),
+                                bindings.get("pending_preparation_handoff"))
         for path in (PRIVATE,PUBLIC,"/etc/lit/incus-lease-issuer","/etc/lightning-it",
                      "/run/lightning-it/incus-runtime-v2","/etc/systemd/system","/usr/lib/tmpfiles.d"):
             fd=directory(path,missing=True)

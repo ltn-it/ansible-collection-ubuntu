@@ -622,6 +622,17 @@ non-reusable mount ID. A changed mount requires a new assessment.
 Clear the migration reference for a later configuration with a different bank;
 a stale reference fails closed.
 
+`github_runner_runtime_v2_pending_preparation_handoff` is an alternative,
+default-off `path`/`sha256` reference for an explicitly commissioned
+installation that carries one failed preparation into its supported cleanup
+implementation. The same sealed reference and exact bank bytes must verify
+before and after copying. It binds the native terminal job, expired paired
+network grants, zero observed instances and the complete verified
+pre-engine creator and renewal records. The runner and runtime services
+must be inactive. The cold controller supplies the current native isolation
+observations and leaves the existing lease and its terminal timestamp intact.
+Cleanup and later runner activation still require their own native checks.
+
 `github_runner_runtime_v2_terminal_history` optionally supplies an explicit,
 nonsecret Root-observed snapshot of preserved terminal failures during cold
 maintenance. It defaults to `{}` and never discovers, adopts or resets failures.
