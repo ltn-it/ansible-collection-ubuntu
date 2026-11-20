@@ -312,8 +312,7 @@ class RuntimeRPC:
             from . import finalization
             # The original admitted request has already failed. End its grant
             # before asking the exact owner to cut the fence and certificate.
-            if record["state"] == "prepared" and any(
-                    e["operation"] == "fence-create" and e["state"] == "verified" for e in record["effects"].values()):
+            if record["state"] == "prepared":
                 store.cancel(lease_id, "cancelled")
             # Verified terminal and retention are still required separately.
             finalization.RootFinalizer(self._config.path, self._config.sha256).withdraw_partial_preparation(

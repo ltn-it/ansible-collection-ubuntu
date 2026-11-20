@@ -509,8 +509,11 @@ class PendingPreparationHandoffTests(unittest.TestCase):
         self.lease = "d" * 32
         self.digest = "e" * 64
         self.unit = "actions.runner.demo.incus-runner-01.service"
+        self.cell = {"kind": "business", "native_job_name": "Heavy",
+                     "incus": {"project_prefix": "g06-"}}
         self.runtime = {"ledger_path": "/ledger", "source_identity": {
-            "runner_id": 78, "service_uid": 2101, "reusable_sha": self.controller},
+            "runner_id": 78, "service_uid": 2101, "reusable_sha": self.controller, "actor_ids": [9, 1]},
+            "cells": {"heavy": self.cell},
             "operating_continuation": {"successor": {
                 "run_id": 99, "run_attempt": 1, "source_sha": self.source, "reusable_sha": self.controller}},
             "collector": {"service": {"unit": self.unit}}}
@@ -519,6 +522,11 @@ class PendingPreparationHandoffTests(unittest.TestCase):
                                      "certificate-create", "engine-prepare", "context-publish", "fence-create",
                                      "fence-renew")}
         target = "fence:" + self.lease
+        self.project = self.cell["incus"]["project_prefix"] + self.lease
+        self.effects["project-create"]["target"] = "project:" + self.project
+        policy = {**self.runtime["source_identity"], "actor_ids": [1, 9], "caller_sha": self.source,
+                  "required_native_job_name": self.cell["native_job_name"]}
+        policy_sha256 = hashlib.sha256(probe.canonical(policy)).hexdigest()
         self.effects["fence-create"].update(target=target, fence={"boot_id": self.boot},
                                            host_api={"boot_id": self.boot})
         grant = {"allow_expires_at": 250, "expires_boot_ns": 700}
@@ -526,7 +534,8 @@ class PendingPreparationHandoffTests(unittest.TestCase):
                                           host_api_authorization=grant.copy())
         self.row = {"state": "prepared", "created_at": 100, "expires_at": 280, "effects": self.effects,
                     "identity": {"run_id": 99, "job_id": 90, "check_run_id": 90, "runner_id": 78,
-                                 "service_uid": 2101, "caller_sha": self.source, "reusable_sha": self.controller},
+                                 "service_uid": 2101, "caller_sha": self.source, "reusable_sha": self.controller,
+                                 "policy_sha256": policy_sha256},
                     "worker": {"boot_id": self.boot, "runner_id": 78, "uid": 2101},
                     "authorizations": [{"token_id_sha256": "f" * 64, "valid_until": 250}]}
         self.state = {"leases": {self.lease: self.row}}
@@ -561,6 +570,27 @@ class PendingPreparationHandoffTests(unittest.TestCase):
 
     def test_only_expired_known_pre_engine_failure_can_be_carried(self):
         self.check()
+
+    def test_operating_handoff_requires_verified_in_project_pinned_image(self):
+        image = "1" * 64
+        self.cell.update(kind="operating", operating={"image": image})
+        image_effect = {"operation": "image-copy", "state": "verified", "evidence_sha256": "2" * 64,
+                        "target": f"image:{self.project}:{image}"}
+        with self.assertRaises(ValueError):
+            self.check()
+        self.effects["image-copy"] = image_effect
+        self.check()
+        image_effect["target"] = f"image:foreign:{image}"
+        with self.assertRaises(ValueError):
+            self.check()
+        image_effect.update(target=f"image:{self.project}:{image}", state="unknown")
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_unmatched_native_cell_policy_rejected(self):
+        self.row["identity"]["policy_sha256"] = "0" * 64
+        with self.assertRaises(ValueError):
+            self.check()
 
     def test_foreign_terminal_same_bytes_rejected(self):
         self.proof["native_terminal"]["check_run_id"] = 88

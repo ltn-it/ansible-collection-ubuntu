@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -485,6 +486,10 @@ class NinthNativeDispatchTests(unittest.TestCase):
                 def finish_worker(*args):
                     barrier("worker-finish")
                     return worker
+                original_threads = set(threading.enumerate())
+                def check_origin_absent(*args):
+                    self.assertEqual(set(threading.enumerate()), original_threads)
+                    barrier("fresh-absence")
                 history_submissions = []
                 class RecordingPool(factory.ThreadPoolExecutor):
                     def submit(self, helper, *args, **kwargs):
@@ -518,7 +523,7 @@ class NinthNativeDispatchTests(unittest.TestCase):
                         (factory, "_continuation_seventh_native", historical("seventh", seven["native_seventh"])),
                         (factory, "_continuation_eighth_native", historical("eighth", eight["native_eighth"])),
                         (factory, "_continuation_ninth_native", historical("ninth", receipt["native_ninth"])),
-                        (factory, "_continuation_origin_absent", lambda *_: barrier("fresh-absence")),
+                        (factory, "_continuation_origin_absent", check_origin_absent),
                         (cells, "validate_continuation_commit", lambda *_: barrier("current-commit"))]:
                         stack.enter_context(mock.patch.object(obj, name, value))
                     factory._native(connected, selected, "nonce", "modeled-auth", "modeled-api")

@@ -410,9 +410,23 @@ def pending_preparation(runtime, config_digest, state, state_raw, reference):
             and who["run_id"] == successor["run_id"] and who["caller_sha"] == successor["source_sha"]
             and who["reusable_sha"] == successor["reusable_sha"] == source["reusable_sha"])
     effects = {entry["operation"]: entry for entry in row["effects"].values()}
-    require(len(effects) == len(row["effects"]) and set(effects) == {
-                "network-create", "project-create", "profile-configure", "context-create", "certificate-create",
+    policy = {**source, "caller_sha": who["caller_sha"], "actor_ids": sorted(source["actor_ids"])}
+    matches = [cell for cell in runtime["cells"].values()
+               if hashlib.sha256(canonical({**policy, "required_native_job_name": cell["native_job_name"]})).hexdigest()
+               == who["policy_sha256"]]
+    require(len(matches) == 1 and matches[0]["kind"] in {"business", "operating"})
+    cell = matches[0]
+    expected = {"network-create", "project-create", "profile-configure", "context-create", "certificate-create",
                 "engine-prepare", "context-publish", "fence-create", "fence-renew"}
+    project = cell["incus"]["project_prefix"] + lease
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}", project)
+            and effects.get("project-create", {}).get("target") == "project:" + project)
+    if cell["kind"] == "operating":
+        expected.add("image-copy")
+        image = cell["operating"]["image"]
+        require(type(image) is str and SHA.fullmatch(image)
+                and effects.get("image-copy", {}).get("target") == "image:" + project + ":" + image)
+    require(len(effects) == len(row["effects"]) and set(effects) == expected
             and all(effect["state"] == "verified" and type(effect.get("evidence_sha256")) is str
                     and SHA.fullmatch(effect["evidence_sha256"]) for effect in effects.values()))
     deadline = min(row["expires_at"], row["authorizations"][-1]["valid_until"])

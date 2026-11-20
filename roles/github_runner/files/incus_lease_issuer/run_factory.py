@@ -887,17 +887,14 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             # still freshly checked on every revalidation; no shared cache exists.
             if check_origin:
                 _continuation_native_histories(get, descriptor, receipt)
+            # Origin validation may read a network namespace cookie. Its observer
+            # needs the process to be single-threaded after the history reads.
+            _continuation_origin_absent(selected.bootstrap, qualified)
             needs_commit = descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9, 10} or identity.decode_json(selected.template_bytes)["kind"] == "operating"
             if needs_commit:
-                # Fetch only the immutable Git object during the local check.
-                # Validate it after the original origin check on the owning thread.
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    commit = pool.submit(get, "/git/commits/" + who.caller_sha)
-                    _continuation_origin_absent(selected.bootstrap, qualified)
-                    operating_cells.validate_continuation_commit(commit.result(), descriptor,
-                                                                 who.caller_sha, who.run_id, who.reusable_sha)
-            else:
-                _continuation_origin_absent(selected.bootstrap, qualified)
+                commit = get("/git/commits/" + who.caller_sha)
+                operating_cells.validate_continuation_commit(commit, descriptor, who.caller_sha, who.run_id,
+                                                             who.reusable_sha)
         elif identity.decode_json(selected.template_bytes)["kind"] == "operating":
             operating_cells.validate_initial_main(get("/git/commits/" + who.caller_sha), who.caller_sha)
         admission._socket(connected)

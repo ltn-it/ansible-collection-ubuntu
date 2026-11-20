@@ -12,7 +12,7 @@ from unittest import mock
 
 import test_github_runner_incus_partial_preparation as partial
 from incus_lease_issuer import (cell_contract, cleanup_storage, engine_executor, engine_policy, identity,
-    kernel, ledger, network_fence, operating_custody, preparation, root_session, signed_context)
+    kernel, ledger, network_fence, operating_custody, preparation, root_session, runtime_rpc, signed_context)
 from incus_lease_issuer.identity import Denied
 
 
@@ -108,6 +108,21 @@ class PublishedPartialPreparationTests(unittest.TestCase):
              mock.patch.object(engine_executor, "_cgroup", return_value=(35, 2102)):
             with self.assertRaisesRegex(Denied, "engine-slice-start-drift"):
                 engine_executor._start_cgroup(self.data, store, lease)
+
+    def test_failure_after_slice_before_fence_withdraws_original_certificate(self):
+        store, lease = self.f.store, self.f.lease
+        self.create_slice(mock.Mock())
+        before = store.read(lease)
+        self.assertEqual(before["state"], "prepared")
+        self.assertNotIn("fence-create", {effect["operation"] for effect in before["effects"].values()})
+        runtime = self.f.runtime
+        rpc = runtime_rpc.RuntimeRPC(str(runtime), ledger.digest(identity.decode_json(runtime.read_bytes())))
+        rpc._retain_after_failure(store, lease, "approved", None)
+        after = store.read(lease)
+        self.assertEqual(after["state"], "cancelled")
+        revoke, = [effect for effect in after["effects"].values() if effect["operation"] == "certificate-revoke"]
+        self.assertEqual(revoke["state"], "verified")
+        self.assertNotIn("partial_preparation_custody", after)
 
     def test_indeterminate_slice_start_is_never_replayed(self):
         start = mock.Mock(side_effect=TimeoutError)
