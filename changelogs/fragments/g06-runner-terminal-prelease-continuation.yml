@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - accept the reviewed continuation after a terminal G06 pre-lease failure.
-    Bind the successor run to the published Validation workflow and the exact caller workflow.

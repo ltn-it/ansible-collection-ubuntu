@@ -1,8 +1,0 @@
----
-minor_changes:
-  - >-
-    github_runner - add an unpublished Root-private pending-alarm forwarder
-    with explicit mutual TLS, native source identity, exact Alertmanager API
-    readback and separate ingestion receipts; no notification acceptance,
-    automatic installation, incident resolution or worker-capacity release
-    is implied.
