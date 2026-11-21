@@ -1,7 +1,0 @@
----
-minor_changes:
-  - github_runner - join stopped ephemeral registration to the Root controller lease fence with one-shot
-    dispatch and guest/GitHub readback.
-known_issues:
-  - Native executor/token transport, actual job assignment, cleanup and complete operating acceptance remain
-    unqualified.

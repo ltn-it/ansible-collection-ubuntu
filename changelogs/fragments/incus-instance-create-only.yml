@@ -1,6 +1,0 @@
----
-minor_changes:
-  - >-
-    incus_instance - add opt-in stopped create-only allocation with native
-    absence checks and config included in the initial allocation request;
-    refuse existing resources without adoption or automatic allocation retry.

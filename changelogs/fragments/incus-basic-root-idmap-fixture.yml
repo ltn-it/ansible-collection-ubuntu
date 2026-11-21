@@ -1,6 +1,0 @@
----
-bugfixes:
-  - >-
-    incus - keep the offline controller scenario unprivileged and verify the unchanged
-    Root-owned subordinate-ID task separately with real check-mode, ownership,
-    unrelated-entry preservation and idempotence tests in an isolated Root EE.
