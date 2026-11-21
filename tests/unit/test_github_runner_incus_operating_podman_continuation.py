@@ -1,6 +1,6 @@
 """The failed first Podman start remains immutable history."""
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 import hashlib
 import json
@@ -10,7 +10,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "roles/github_runner/files"))
 from incus_lease_issuer import host_api_fence, identity, ledger, operating_cells as cells, run_factory
@@ -271,6 +271,131 @@ class PodmanRetirementContinuationTests(unittest.TestCase):
             with self.subTest(key=key), patch.dict(observation, {key: value}):
                 with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-observed-mounts"):
                     self.read()
+
+
+class PodmanRetirementRevalidationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.bank_file = self.root / "state.json"
+        self.bank_file.write_bytes(b'{"retained":true}\n')
+        self.lease = cells.TWELFTH_LEASE
+        self.effect_id = "d" * 32
+        self.record = {
+            "state": "prepared", "created_at": 4000, "expires_at": 8000, "identity": {},
+            "effects": {self.effect_id: {
+                "operation": "engine-start", "state": "unknown", "engine_capture": {},
+            }},
+            "native_terminal": {
+                "source_sha": cells.TWELFTH_MAIN, "controller_sha": cells.ELEVENTH_SUCCESSOR_REUSABLE,
+                "run_id": cells.TWELFTH_RUN, "job_id": cells.TWELFTH_CHECKS[0],
+                "check_run_id": cells.TWELFTH_CHECKS[0], "run_attempt": 1,
+                "conclusion": "failure", "completed_at": 5000,
+            },
+            "policy_sha256": "c" * 64,
+        }
+        self.retirement = {
+            "original_bootstrap": {"path": "/unit/bootstrap", "sha256": "b" * 64, "device": 7, "inode": 8},
+            "original_record": {"lease_id": self.lease, "sha256": ledger.digest(self.record),
+                                "unknown_effect_id": self.effect_id},
+            "original_bank": {"path": str(self.root), "device": 7, "inode": 9,
+                              "state_file_sha256": hashlib.sha256(self.bank_file.read_bytes()).hexdigest()},
+            "new_entries": {
+                "native_run_configuration_catalogue": {"name": "original-configuration"},
+                "native_intake_catalogue": {"name": "original-intake"},
+            },
+            "retain_until": 19400,
+        }
+        self.previous = {"approved_predecessor": True}
+        self.original = SimpleNamespace(
+            file_stamp=(7, 8), value={"ledger_path": str(self.root)}, path="/unit/bootstrap", sha256="b" * 64,
+        )
+        self.configuration = SimpleNamespace(
+            registry_path="/unit/registry", registry_sha256="e" * 64,
+            preparation_config_path="/unit/preparation", preparation_config_sha256="f" * 64,
+        )
+        self.selected = SimpleNamespace(
+            ledger_path=str(self.root), cell_config_path="/unit/cell", cell_sha256="a" * 64, identity={},
+        )
+        self.rows = {"verified_journal": True}
+        self.store = Mock()
+        self.store.lease_ids.return_value = (self.lease,)
+        self.store.read.side_effect = lambda _lease: deepcopy(self.record)
+        self.store.read_policy.return_value = {"retention_seconds": 14400}
+
+    def revalidate(self):
+        def read_bank(path, maximum, *, private, keep):
+            self.assertEqual(str(self.bank_file), path)
+            self.assertEqual(run_factory.MAX_POLICY, maximum)
+            self.assertTrue(private)
+            self.assertFalse(keep)
+            return SimpleNamespace(sha256=hashlib.sha256(self.bank_file.read_bytes()).hexdigest()), None, (7, 9)
+
+        descriptor = {"schema": 11, "successor": {
+            "source_sha": cells.TWELFTH_MAIN, "run_id": cells.TWELFTH_RUN,
+            "reusable_sha": cells.ELEVENTH_SUCCESSOR_REUSABLE,
+        }}
+        origin = {"invocation": {"selector": "original-cell"}}
+        with ExitStack() as stack:
+            stack.enter_context(patch.multiple(
+                run_factory, load_bootstrap=Mock(return_value=self.original),
+                _continuation_receipt=Mock(return_value=(descriptor, self.previous)),
+                _retired_original_entries=Mock(), _read_complete=Mock(return_value=(self.configuration, origin)),
+                _twelfth_journal=Mock(return_value=self.rows),
+            ))
+            stack.enter_context(patch.object(
+                run_factory.policy_registry, "load_registry", return_value=Mock(
+                    **{"select.return_value": self.selected}
+                ),
+            ))
+            stack.enter_context(patch.object(ledger, "_observe_historical_bank", return_value=nullcontext()))
+            stack.enter_context(patch.object(ledger, "Ledger", return_value=nullcontext(self.store)))
+            stack.enter_context(patch.object(run_factory.installation, "_file", side_effect=read_bank))
+            return run_factory._revalidate_twelfth_retirement(self.retirement, self.previous)
+
+    def test_verified_retention_and_unchanged_original_bank_allow_revalidation(self):
+        with patch.object(run_factory, "_twelfth_resources_absent") as absence:
+            self.revalidate()
+        absence.assert_called_once_with(
+            self.configuration, self.selected, self.record, self.lease, self.rows, None, None
+        )
+
+    def test_changed_state_file_is_rejected_before_resource_readback(self):
+        self.bank_file.write_bytes(b'{"retained":false}\n')
+        with (patch.object(run_factory, "_twelfth_resources_absent") as absence,
+              self.assertRaisesRegex(identity.Denied, "continuation-twelfth-original-bank")):
+            self.revalidate()
+        absence.assert_not_called()
+
+    def test_resolved_engine_effect_still_denies_when_its_record_digest_matches(self):
+        self.record["effects"][self.effect_id]["state"] = "verified"
+        self.retirement["original_record"]["sha256"] = ledger.digest(self.record)
+        with (patch.object(run_factory, "_twelfth_resources_absent") as absence,
+              self.assertRaisesRegex(identity.Denied, "continuation-twelfth-original-unknown-preserved")):
+            self.revalidate()
+        absence.assert_not_called()
+
+    def test_returned_graph_directory_denies_successor_admission(self):
+        graph = self.root / "graph"
+        graph.mkdir()
+        cell = {"engine": {"paths": {"descriptor": str(self.root)}}}
+        data = {
+            "engine": {"storage_root": str(graph), "runroot": str(self.root / "runroot")},
+            "output_path": str(self.root / "output"), "context_path": str(self.root / "context"),
+        }
+        # Use the real filesystem inventory with an unprivileged, test-owned directory.
+        def open_test_directory(path, *, private):
+            self.assertTrue(private)
+            self.assertEqual(str(self.root), path)
+            return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+
+        with (patch.object(run_factory.preparation, "_config", return_value=(SimpleNamespace(), None, None)),
+              patch.multiple(run_factory.cell_contract, _sealed=Mock(return_value=(cell, None, None)),
+                             _environment=Mock(return_value={}), _descriptor=Mock(return_value=data)),
+              patch.object(run_factory.engine, "_directory", side_effect=open_test_directory),
+              self.assertRaisesRegex(identity.Denied, "cleanup-storage-returned-path")):
+            self.revalidate()
 
 
 @unittest.skipUnless(os.geteuid() == 0 and Path("/run/proof").is_dir(), "requires private root proof tmpfs")
