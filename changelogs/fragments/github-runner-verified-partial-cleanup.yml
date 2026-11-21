@@ -1,0 +1,3 @@
+---
+bugfixes:
+  - Preserve the original Incus preparation record and verify its cleanup before admitting the next protected push.
