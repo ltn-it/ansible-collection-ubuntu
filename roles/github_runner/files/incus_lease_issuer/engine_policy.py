@@ -30,6 +30,7 @@ IMAGE = "quay.io/l-it/ee-wunder-devtools-ubi9:v1.18.2@sha256:" + IMAGE_INDEX
 # execute only this canonical reference to the exact same pinned index.
 PODMAN_IMAGE = "quay.io/l-it/ee-wunder-devtools-ubi9@sha256:" + IMAGE_INDEX
 ENGINE = "/usr/bin/podman"
+WUNDER_TMPFS = "--tmpfs=/tmp/wunder:rw,exec,nosuid,nodev,size=1g,mode=1777"
 MAX_DESCRIPTOR = 4 * 1024 * 1024
 MAX_FILES = 20000
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
@@ -358,6 +359,8 @@ def _compile(data, descriptor_sha256, *, retained_output=None):
     lease_id = network.rsplit("lit-lease-", 1)[1]
     runtime = {"name": "lit-lease-" + lease_id, "cidfile": engine["runroot"] + "/container.cid",
                "labels": {"io.lightning-it.lease": lease_id, "io.lightning-it.descriptor": _hash(descriptor_sha256)}}
+    # Podman 4.9 rejects uid/gid options on tmpfs mounts. A sticky directory
+    # remains writable by the mapped cell user on this per-container mount.
     argv = [ENGINE, "--root", engine["storage_root"], "--runroot", engine["runroot"], "--cgroup-manager=systemd",
             "--events-backend=none", "--tmpdir=" + engine["runroot"],
             "run", "--rm", "--log-driver=passthrough", "--name=" + runtime["name"], "--cidfile=" + runtime["cidfile"],
@@ -370,7 +373,7 @@ def _compile(data, descriptor_sha256, *, retained_output=None):
             "--cgroup-parent=" + data["cgroup_parent"], "--cpus=" + str(cpu // 1000) + "." + str(cpu % 1000).zfill(3),
             "--memory=" + str(memory), "--timeout=" + str(timeout), "--workdir=/workspace",
             "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
-            "--tmpfs=/tmp/wunder:rw,exec,nosuid,nodev,size=1g,mode=1777,uid=" + str(uid) + ",gid=" + str(gid)]
+            WUNDER_TMPFS]
     idmap = ",idmap=uids=0-" + str(maps[0][2]) + "-1;gids=0-" + str(maps[1][2]) + "-1"
     for key, target in (("workspace", "/workspace"), ("candidate", "/candidate"), ("controller", "/controller")):
         argv += ["--mount", "type=bind,source=" + checked_trees[key]["path"] + ",destination=" + target + ",readonly" + idmap]
@@ -430,6 +433,12 @@ def validate_retained_policy(path, descriptor_sha256, expected_manifest_sha256):
         require(_canonical(original) == canonical, "engine-retained-canonical")
         argv, environment, details = _compile(data, descriptor_sha256, retained_output=original["output"])
         details["descriptor"] = {"path": path, "sha256": descriptor_sha256}
+        if original["argv"] != details["argv"]:
+            # Earlier signed manifests also encoded the mapped owner in this
+            # mount option. Reconstruct that exact form for retained reads.
+            legacy_wunder_tmpfs = f'{WUNDER_TMPFS},uid={details["cell_uid"]},gid={details["cell_gid"]}'
+            argv = tuple(legacy_wunder_tmpfs if arg == WUNDER_TMPFS else arg for arg in argv)
+            details["argv"] = list(argv)
         require(_canonical(details) == canonical, "engine-retained-immutable-drift")
         after, _, after_stamp = installation._file(path, MAX_DESCRIPTOR, private=True, keep=True)
         saved_after, _, saved_after_stamp = installation._file(retained_path, MAX_DESCRIPTOR, private=True, keep=True)
