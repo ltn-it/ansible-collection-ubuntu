@@ -1,3 +1,4 @@
+---
 bugfixes:
   - >-
     Bind the G06 continuation after verified cleanup to the published Validation
