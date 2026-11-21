@@ -10,6 +10,10 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "roles/github_runner/files"))
 from incus_lease_issuer import identity, ledger, operating_cells as cells, run_factory
 
+# The workflow at Supplementary 7d5c209 and the published Validation #483.
+VERIFIED_WORKFLOW_SHA256 = "d388b0bd45674d3034845a569458440edfbcc1e854e9ded7696a6287cd950950"
+VERIFIED_VALIDATION_SHA = "45b0b8264d74d56ab9624d009541965e06d7693f"
+
 
 class VerifiedCleanupTests(unittest.TestCase):
     def test_next_attempt_must_be_a_new_push_with_the_closed_original_as_parent(self):
@@ -19,11 +23,11 @@ class VerifiedCleanupTests(unittest.TestCase):
             "qualification": {"path": "/unit/qualification.json", "sha256": cells.ELEVENTH_QUALIFICATION},
             "successor": {"source_sha": "a" * 40, "run_id": 100, "run_attempt": 1,
                           "first_parent": cells.ELEVENTH_MAIN,
-                          "source_workflow_sha256": cells.ELEVENTH_SUCCESSOR_WORKFLOW,
-                          "reusable_sha": cells.ELEVENTH_SUCCESSOR_REUSABLE},
+                          "source_workflow_sha256": VERIFIED_WORKFLOW_SHA256,
+                          "reusable_sha": VERIFIED_VALIDATION_SHA},
         }
         commit = {"sha": "a" * 40, "parents": [{"sha": cells.ELEVENTH_MAIN}]}
-        cells.validate_continuation_commit(commit, route, commit["sha"], 100, cells.ELEVENTH_SUCCESSOR_REUSABLE)
+        cells.validate_continuation_commit(commit, route, commit["sha"], 100, VERIFIED_VALIDATION_SHA)
         for key, bad in (("source_sha", cells.ELEVENTH_MAIN), ("run_id", cells.ELEVENTH_RUN),
                          ("run_attempt", 2), ("first_parent", cells.TENTH_MAIN),
                          ("source_workflow_sha256", cells.TENTH_SUCCESSOR_WORKFLOW),
@@ -33,12 +37,12 @@ class VerifiedCleanupTests(unittest.TestCase):
                 replay["successor"][key] = bad
                 with self.assertRaises(identity.Denied):
                     cells.validate_continuation_descriptor(
-                        replay, cells.ELEVENTH_SUCCESSOR_WORKFLOW, cells.ELEVENTH_SUCCESSOR_REUSABLE)
+                        replay, VERIFIED_WORKFLOW_SHA256, VERIFIED_VALIDATION_SHA)
         prior_workflow = "8a1669295d7788583b3834183c4451046a1ff4cb2fc5cab99e70f8df9381fb51"
         for workflow, reusable in (
             (prior_workflow, cells.TENTH_SUCCESSOR_REUSABLE),
-            (prior_workflow, cells.ELEVENTH_SUCCESSOR_REUSABLE),
-            (cells.ELEVENTH_SUCCESSOR_WORKFLOW, cells.TENTH_SUCCESSOR_REUSABLE),
+            (prior_workflow, VERIFIED_VALIDATION_SHA),
+            (VERIFIED_WORKFLOW_SHA256, cells.TENTH_SUCCESSOR_REUSABLE),
         ):
             with self.subTest(workflow=workflow, reusable=reusable):
                 replay = deepcopy(route)
@@ -47,7 +51,7 @@ class VerifiedCleanupTests(unittest.TestCase):
                     cells.validate_continuation_descriptor(replay, workflow, reusable)
         commit["parents"] = [{"sha": cells.TENTH_MAIN}, {"sha": cells.ELEVENTH_MAIN}]
         with self.assertRaises(identity.Denied):
-            cells.validate_continuation_commit(commit, route, commit["sha"], 100, cells.ELEVENTH_SUCCESSOR_REUSABLE)
+            cells.validate_continuation_commit(commit, route, commit["sha"], 100, VERIFIED_VALIDATION_SHA)
 
     def test_closed_flag_does_not_replace_retention_or_live_absence(self):
         completed = 1_700_000_000
