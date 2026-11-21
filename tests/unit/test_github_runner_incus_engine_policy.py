@@ -183,6 +183,29 @@ class RootEngineCompilerTests(unittest.TestCase):
         with self.assertRaises(Denied):
             engine.compile_engine_policy(str(self.descriptor), original.descriptor_sha256)
 
+    def test_retained_legacy_tmpfs_accepts_only_exact_original_uid_and_gid(self):
+        current, path = self.retain()
+        descriptor_path = str(self.descriptor)
+        manifest = json.loads(current.canonical_bytes)
+        index = manifest["argv"].index(engine.WUNDER_TMPFS)
+        manifest["argv"][index] += ",uid=1000,gid=1001"
+        legacy = engine._canonical(manifest)
+        path.write_bytes(legacy)
+        retained = engine.validate_retained_policy(
+            descriptor_path, current.descriptor_sha256, hashlib.sha256(legacy).hexdigest()
+        )
+        self.assertEqual(retained.canonical_bytes, legacy)
+        self.assertEqual(retained.argv, tuple(manifest["argv"]))
+        self.assertIn(engine.WUNDER_TMPFS, self.compile().argv)
+
+        manifest["argv"][index] = engine.WUNDER_TMPFS + ",uid=0,gid=0"
+        altered = engine._canonical(manifest)
+        path.write_bytes(altered)
+        with self.assertRaisesRegex(Denied, "engine-retained-immutable-drift"):
+            engine.validate_retained_policy(
+                descriptor_path, current.descriptor_sha256, hashlib.sha256(altered).hexdigest()
+            )
+
     def test_running_output_directory_identity_cannot_be_replaced(self):
         original, _ = self.retain()
         self.output.rename(self.output.with_name("old-output"))
@@ -238,6 +261,12 @@ class RootEngineCompilerTests(unittest.TestCase):
         for value in ("--platform=linux/amd64", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges=true",
                       "--pids-limit=512", "--read-only-tmpfs=false", "--user=1000:1001", "--cpus=1.500", "--memory=2147483648"):
             self.assertIn(value, result.argv)
+        self.assertEqual(
+            tuple(arg for arg in result.argv if arg.startswith("--tmpfs=")),
+            ("--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
+             "--tmpfs=/tmp/wunder:rw,exec,nosuid,nodev,size=1g,mode=1777"),
+        )
+        self.assertEqual((result.environment["HOME"], result.environment["TMPDIR"]), ("/tmp/wunder", "/tmp/wunder"))
         mounts = [result.argv[i + 1] for i, value in enumerate(result.argv[:-1]) if value == "--mount"]
         self.assertEqual(len(mounts), 5)
         for target in ("/workspace", "/candidate", "/controller", "/incus", "/quality"):
