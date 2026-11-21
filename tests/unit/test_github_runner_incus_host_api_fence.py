@@ -146,6 +146,17 @@ class HostRulesTests(unittest.TestCase):
               mock.patch.object(host, "_nft", return_value=ledger.canonical(grant)) as nft,
               mock.patch.object(ledger, "Ledger", return_value=nullcontext(store))):
             run_factory._twelfth_host_fence(*args)
+            # A new heartbeat was archived, but its attempted renewal did not change the kernel gate.
+            next_authorization = {"valid_until": deadline + 60}
+            record["authorizations"].append(next_authorization)
+            effects["partial_renewal"] = {
+                "operation": "fence-renew", "state": "unknown", "at": 12, "host_api_authorization": {
+                    **effects["grant"]["host_api_authorization"],
+                    "issued_boot_ns": 2000000000, "authorization_sha256": ledger.digest(next_authorization),
+                    "allow_expires_at": next_authorization["valid_until"],
+                },
+            }
+            run_factory._twelfth_host_fence(*args)
             effects["withdraw"] = {"operation": "fence-disable", "state": "verified", "target": target, "at": 12,
                                    "host_api_withdrawal": {"baseline_sha256": baseline["baseline_sha256"]}}
             nft.return_value = ledger.canonical(empty)
@@ -159,6 +170,9 @@ class HostRulesTests(unittest.TestCase):
                 with self.assertRaisesRegex(Denied, "continuation-twelfth-host-fence-withdrawn"):
                     run_factory._twelfth_host_fence(*args)
             nft.return_value = ledger.canonical(observed(selected, deadline=deadline - 1))
+            with self.assertRaisesRegex(Denied, "continuation-twelfth-host-fence-withdrawn"):
+                run_factory._twelfth_host_fence(*args)
+            nft.return_value = ledger.canonical(observed(selected, deadline=next_authorization["valid_until"]))
             with self.assertRaisesRegex(Denied, "continuation-twelfth-host-fence-withdrawn"):
                 run_factory._twelfth_host_fence(*args)
             nft.return_value = ledger.canonical(grant)

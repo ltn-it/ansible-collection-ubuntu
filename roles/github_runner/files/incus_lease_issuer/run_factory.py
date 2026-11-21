@@ -1197,21 +1197,23 @@ def _twelfth_host_fence(config, original_ifindex, successor_bank, successor):
                     if row["operation"] == "fence-create" and row["state"] == "verified"]
         require(len(creators) == 1 and creators[0].get("host_api") == baseline
                 and "fence" in creators[0], "continuation-twelfth-host-fence-creator")
+        archived = {ledger.digest(item) for item in active["authorizations"]}
         renewals = [row["host_api_authorization"] for row in active["effects"].values()
                     if row["operation"] == "fence-renew" and row["state"] == "verified"
                     and "host_api_authorization" in row
-                    and row["host_api_authorization"]["authorization_sha256"] == ledger.digest(active["authorizations"][-1])]
-        require(len(renewals) <= 1, "continuation-twelfth-host-fence-authorization")
+                    and row["host_api_authorization"]["authorization_sha256"] in archived]
+        require(len({row["authorization_sha256"] for row in renewals}) == len(renewals),
+                "continuation-twelfth-host-fence-authorization")
+        grant = max(renewals, key=lambda row: row["issued_boot_ns"], default=None)
         pair = None
-        if renewals:
-            row = renewals[0]
-            pair = (row["host_ifindex"], row["peer_ipv4"])
+        if grant is not None:
+            pair = (grant["host_ifindex"], grant["peer_ipv4"])
             require(pair[0] != original_ifindex and pair[0] == creators[0]["fence"]["host_ifindex"]
-                    and row["baseline_sha256"] == baseline["baseline_sha256"],
+                    and grant["baseline_sha256"] == baseline["baseline_sha256"],
                     "continuation-twelfth-host-fence-original-tuple")
         handle, _, expires, deadline = host_api_fence._readback(policy, tuple_value=pair, maximum_ms=5400000)
         require(handle == baseline["nft_table_handle"]
-                and (deadline == expires == 0 or renewals and deadline == renewals[0]["allow_expires_at"])
+                and (deadline == expires == 0 or grant is not None and deadline == grant["allow_expires_at"])
                 and store.read(claimants[0]) == active
                 and store.host_api_claimants(policy.sha256, baseline["baseline_sha256"]) == claimants,
                 "continuation-twelfth-host-fence-read-drift")
@@ -1230,7 +1232,8 @@ def _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, d
                 == (successor["run_id"], successor["source_sha"], successor["reusable_sha"]), reason)
         for effect in record["effects"].values():
             authorization = effect.get("host_api_authorization")
-            if authorization and authorization["baseline_sha256"] == baseline["baseline_sha256"]:
+            if (effect["state"] == "verified" and authorization
+                    and authorization["baseline_sha256"] == baseline["baseline_sha256"]):
                 grants.append((authorization["issued_boot_ns"], lease_id, record, effect))
     require(grants, reason)
     newest = max(grant[0] for grant in grants)

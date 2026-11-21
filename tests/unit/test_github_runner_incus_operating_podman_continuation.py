@@ -124,6 +124,7 @@ class PodmanContinuationTests(unittest.TestCase):
                              "fence": {"host_ifindex": 42}},
                 "renewing": {"operation": "fence-renew", "state": "verified", "host_api_authorization": {
                     "authorization_sha256": ledger.digest(auth), "host_ifindex": 42, "peer_ipv4": "10.0.0.2",
+                    "issued_boot_ns": 1000000000,
                     "baseline_sha256": baseline["baseline_sha256"], "allow_expires_at": auth["valid_until"],
                 }},
             },
@@ -428,6 +429,7 @@ class PodmanRetirementRevalidationTests(unittest.TestCase):
                             "fence": {"host_ifindex": 42, "netns_device": 4, "netns_inode": 1360}},
                 "grant": {"operation": "fence-renew", "state": "verified", "host_api_authorization": {
                     "authorization_sha256": ledger.digest(current_auth), "host_ifindex": 42,
+                    "issued_boot_ns": 1000000000,
                     "peer_ipv4": "10.0.0.2", "baseline_sha256": baseline["baseline_sha256"],
                     "allow_expires_at": 31000,
                 }},
