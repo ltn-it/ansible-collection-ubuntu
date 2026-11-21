@@ -164,6 +164,115 @@ class PodmanContinuationTests(unittest.TestCase):
             run_factory._revalidate_twelfth_retirement({}, {}, "/unit/successor-bank")
 
 
+class PodmanRetirementContinuationTests(unittest.TestCase):
+    def setUp(self):
+        root = Path("/unit/retirement")
+        record = "b" * 64
+        lease = cells.TWELFTH_LEASE
+        namespace = {"device": 4, "inode": 42}
+        empty_alias = {"device": 4, "inode": 43}
+        original_operation = run_factory._twelfth_original_operation(record)
+        binding = {"original_lease": lease, "original_record_sha256": record}
+        original = {"storage-identities.json": {"identities": [[4, 44]]}}
+        remaining = {}
+        for index, step in enumerate(run_factory._TWELFTH_RETIREMENT_STEPS):
+            metadata = {"test": step}
+            if step == "namespace-mounts":
+                metadata = {"namespace": namespace, "mount_ids": [17]}
+            if step == "namespace-alias":
+                metadata = {"identity": empty_alias}
+            journal = original if index <= 4 else remaining
+            intent = {**binding, "step": step, "at": 1010 + 3 * index, "metadata": metadata}
+            if journal is original:
+                intent["operation"] = original_operation
+            journal[step + "-intent.json"] = intent
+            if step == "namespace-mounts":
+                journal[step + "-unknown.json"] = {**intent, "at": 1023, "state": "unknown-no-repeat"}
+            else:
+                journal[step + "-receipt.json"] = {
+                    **intent, "at": intent["at"] + 1, "state": "separate-effect-verified",
+                    "original_unknown_resolved": False,
+                }
+        original_members = {name: ledger.digest(row) for name, row in original.items()}
+        original_digest = ledger.digest(original_members)
+        following_operation = hashlib.sha256(
+            f"G06-remaining-retirement:{original_operation}:{original_digest}".encode()
+        ).hexdigest()[:32]
+        for row in remaining.values():
+            row["operation"] = following_operation
+        remaining["namespace-mounts-observation.json"] = {
+            "namespace": namespace, "original_mount_ids": [17], "mounted_ids_observed": [],
+            "empty_alias_stamp": empty_alias, "namespace_reference_censuses": 2,
+            "original_attempt_stays_unknown": True, "original_journal_sha256": original_digest,
+            "original_unknown_sha256": original_members["namespace-mounts-unknown.json"],
+            "observed_at": 1024,
+        }
+        remaining["complete-receipt.json"] = {
+            **binding, "operation": following_operation, "scope": "exact-twelfth-unattempted-retirement",
+            "original_bank_sha256": "c" * 64, "retain_until": 1000, "at": 1050,
+            "original_unknown_resolved": False, "native_case_acceptance": False,
+            "all_original_resources_absent": True, "namespace": namespace,
+            "storage_policy_sha256": "f" * 64, "storage_unique_mount_id": 1001,
+            "completed_storage_reference_censuses": 4,
+        }
+        self.original, self.remaining = original, remaining
+        self.retirement = {
+            "original_record": {"lease_id": lease, "sha256": record},
+            "original_bank": {"path": str(root / "bank" / "original"), "state_file_sha256": "c" * 64},
+            "retain_until": 1000,
+            "journal": {
+                "path": str(root / ("partial-retirement-" + original_operation)),
+                "members": original_members,
+                "continuation": {
+                    "path": str(root / ("partial-retirement-" + following_operation)),
+                    "members": {name: ledger.digest(row) for name, row in remaining.items()},
+                },
+            },
+        }
+
+    def read(self):
+        def load_members(ref, names):
+            rows = self.remaining if ref is self.retirement["journal"]["continuation"] else self.original
+            run_factory.require(set(rows) == names, "continuation-twelfth-journal-inventory")
+            return deepcopy(rows)
+
+        with patch.object(run_factory, "_twelfth_journal_members", side_effect=load_members):
+            return run_factory._twelfth_journal(self.retirement)
+
+    def test_separate_observation_preserves_original_unknown(self):
+        rows = self.read()
+        self.assertEqual(rows["namespace-mounts-unknown.json"]["state"], "unknown-no-repeat")
+        self.assertTrue(rows["namespace-mounts-observation.json"]["original_attempt_stays_unknown"])
+        self.assertFalse(rows["complete-receipt.json"]["native_case_acceptance"])
+
+    def test_missing_observation_denies_retirement(self):
+        del self.remaining["namespace-mounts-observation.json"]
+        with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-journal-inventory"):
+            self.read()
+
+    def test_changed_operation_or_journal_location_denies_retirement(self):
+        with patch.dict(self.remaining["complete-receipt.json"], {"operation": "a" * 32}):
+            with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-journal-lineage"):
+                self.read()
+        self.retirement["journal"]["continuation"]["path"] += "-different"
+        with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-journal-lineage"):
+            self.read()
+
+    def test_changed_mount_observations_deny_retirement(self):
+        observation = self.remaining["namespace-mounts-observation.json"]
+        for key, value in (
+            ("original_journal_sha256", "0" * 64),
+            ("original_unknown_sha256", "0" * 64),
+            ("namespace", {"device": 4, "inode": 99}),
+            ("original_mount_ids", [19]),
+            ("mounted_ids_observed", [17]),
+            ("observed_at", 1022),
+        ):
+            with self.subTest(key=key), patch.dict(observation, {key: value}):
+                with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-observed-mounts"):
+                    self.read()
+
+
 @unittest.skipUnless(os.geteuid() == 0 and Path("/run/proof").is_dir(), "requires private root proof tmpfs")
 class PodmanRetirementJournalTests(unittest.TestCase):
     def setUp(self):
