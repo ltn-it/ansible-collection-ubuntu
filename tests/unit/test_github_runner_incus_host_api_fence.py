@@ -4,7 +4,7 @@ The rules/readback model is explicit: passing this suite does not qualify the
 new iface_index concatenation ABI, real endpoint isolation or installation.
 """
 from copy import deepcopy
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import datetime as dt
 import hashlib
 import os
@@ -19,6 +19,7 @@ from unittest import mock
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
 from incus_lease_issuer import host_api_fence as host, ledger, network_fence as namespace  # noqa: E402
+from incus_lease_issuer import run_factory  # noqa: E402
 from incus_lease_issuer.identity import Denied  # noqa: E402
 
 
@@ -101,6 +102,68 @@ class HostRulesTests(unittest.TestCase):
             self.read(value, tuple_value=(41, "10.250.23.2"), maximum_ms=29998)
         with self.assertRaises(Denied):
             self.read(value, tuple_value=(41, "10.250.23.2"), maximum_ms=30000, expected_deadline=1800000001)
+
+    def test_successor_grant_withdrawal_and_verified_removal_allow_empty_retained_deadline(self):
+        selected = policy()
+        config = SimpleNamespace(host_api_fence_policy_path=selected.path,
+                                 host_api_fence_policy_sha256=selected.sha256)
+        baseline = {"baseline_sha256": "f" * 64, "policy_sha256": selected.sha256, "nft_table_handle": 1}
+        lease_id = "c" * 32
+        target = "fence:" + lease_id
+        deadline = 1800000000
+        successor = {"run_id": 44910000000, "source_sha": "b" * 40, "reusable_sha": "c" * 40}
+        authorization = {"valid_until": deadline}
+        effects = {
+            "create": {"operation": "fence-create", "state": "verified", "target": target, "at": 10,
+                       "host_api": baseline, "fence": {"host_ifindex": 41}},
+            "grant": {
+                "operation": "fence-renew", "state": "verified", "at": 11, "host_api_authorization": {
+                    "baseline_sha256": baseline["baseline_sha256"], "host_ifindex": 41,
+                    "peer_ipv4": "10.250.23.2", "issued_boot_ns": 1000000000,
+                    "authorization_sha256": ledger.digest(authorization), "allow_expires_at": deadline,
+                },
+            },
+        }
+        record = {
+            "identity": {"run_id": successor["run_id"], "caller_sha": successor["source_sha"],
+                         "reusable_sha": successor["reusable_sha"]},
+            "state": "prepared", "authorizations": [authorization], "effects": effects,
+        }
+        store = mock.Mock()
+        store.lease_ids.return_value = (lease_id,)
+        store.read.side_effect = lambda _: deepcopy(record)
+        store.host_api_claimants.side_effect = lambda *_: (
+            () if effects.get("remove", {}).get("state") == "verified" else (lease_id,)
+        )
+        grant = observed(selected, deadline=deadline, tuple_value=(41, "10.250.23.2"), ttl=30)
+        empty = observed(selected, deadline=deadline)
+        args = (config, 40, "/unit/successor-bank", successor)
+        with (mock.patch.object(host, "_bound", return_value=selected),
+              mock.patch.object(host, "_host", return_value=nullcontext()),
+              mock.patch.object(host, "_baseline", return_value=baseline),
+              mock.patch.object(host.socket, "if_indextoname", return_value="g06h0"),
+              mock.patch.object(host.socket, "if_nametoindex", return_value=41),
+              mock.patch.object(host, "_nft", return_value=ledger.canonical(grant)) as nft,
+              mock.patch.object(ledger, "Ledger", return_value=nullcontext(store))):
+            run_factory._twelfth_host_fence(*args)
+            effects["withdraw"] = {"operation": "fence-disable", "state": "verified", "target": target, "at": 12,
+                                   "host_api_withdrawal": {"baseline_sha256": baseline["baseline_sha256"]}}
+            nft.return_value = ledger.canonical(empty)
+            run_factory._twelfth_host_fence(*args)
+            effects["remove"] = {"operation": "fence-remove", "state": "verified", "target": target, "at": 13}
+            record["state"] = "closed"
+            run_factory._twelfth_host_fence(*args)
+            with self.assertRaisesRegex(Denied, "host-api-deadline-drift"):
+                run_factory._twelfth_host_fence(config, 40, None, None)
+            with mock.patch.dict(effects["withdraw"], state="unknown"):
+                with self.assertRaisesRegex(Denied, "continuation-twelfth-host-fence-withdrawn"):
+                    run_factory._twelfth_host_fence(*args)
+            nft.return_value = ledger.canonical(observed(selected, deadline=deadline - 1))
+            with self.assertRaisesRegex(Denied, "continuation-twelfth-host-fence-withdrawn"):
+                run_factory._twelfth_host_fence(*args)
+            nft.return_value = ledger.canonical(grant)
+            with self.assertRaisesRegex(Denied, "host-api-tuple-timer"):
+                run_factory._twelfth_host_fence(*args)
 
     def test_foreign_accept_or_wrong_endpoint_or_order_never_adopted(self):
         original = observed(policy())

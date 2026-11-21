@@ -10,10 +10,12 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "roles/github_runner/files"))
-from incus_lease_issuer import host_api_fence, identity, ledger, operating_cells as cells, run_factory
+from incus_lease_issuer import (cleanup_storage, engine_executor, host_api_fence, identity, incus_admin,
+                               incus_mutation, ledger, network_fence, operating_cells as cells,
+                               run_factory, storage_quota)
 
 
 class PodmanContinuationTests(unittest.TestCase):
@@ -134,7 +136,7 @@ class PodmanContinuationTests(unittest.TestCase):
             store = bank.return_value.__enter__.return_value
             store.host_api_claimants.return_value = ()
             run_factory._twelfth_host_fence(config, 41, "/unit/bank", successor)
-            readback.assert_called_once_with(policy, expected_deadline=0)
+            readback.assert_called_once_with(policy)
             readback.return_value = (111, 99, 100, 3000)
             with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-host-fence-baseline"):
                 run_factory._twelfth_host_fence(config, 41, "/unit/bank", successor)
@@ -324,7 +326,7 @@ class PodmanRetirementRevalidationTests(unittest.TestCase):
         self.store.read.side_effect = lambda _lease: deepcopy(self.record)
         self.store.read_policy.return_value = {"retention_seconds": 14400}
 
-    def revalidate(self):
+    def revalidate(self, successor_bank=None, successor=None, successor_store=None):
         def read_bank(path, maximum, *, private, keep):
             self.assertEqual(str(self.bank_file), path)
             self.assertEqual(run_factory.MAX_POLICY, maximum)
@@ -350,9 +352,15 @@ class PodmanRetirementRevalidationTests(unittest.TestCase):
                 ),
             ))
             stack.enter_context(patch.object(ledger, "_observe_historical_bank", return_value=nullcontext()))
-            stack.enter_context(patch.object(ledger, "Ledger", return_value=nullcontext(self.store)))
+            stack.enter_context(patch.object(
+                ledger, "Ledger", side_effect=lambda path, **_: nullcontext(
+                    successor_store if path == successor_bank else self.store
+                ),
+            ))
             stack.enter_context(patch.object(run_factory.installation, "_file", side_effect=read_bank))
-            return run_factory._revalidate_twelfth_retirement(self.retirement, self.previous)
+            return run_factory._revalidate_twelfth_retirement(
+                self.retirement, self.previous, successor_bank, successor
+            )
 
     def test_verified_retention_and_unchanged_original_bank_allow_revalidation(self):
         with patch.object(run_factory, "_twelfth_resources_absent") as absence:
@@ -396,6 +404,157 @@ class PodmanRetirementRevalidationTests(unittest.TestCase):
               patch.object(run_factory.engine, "_directory", side_effect=open_test_directory),
               self.assertRaisesRegex(identity.Denied, "cleanup-storage-returned-path")):
             self.revalidate()
+
+    def modeled_successor_revalidation(self, stack):
+        retained = self.root
+        successor_bank = retained / "successor-bank"
+        successor_bank.mkdir()
+        successor = {"run_id": 44910000000, "source_sha": "b" * 40, "reusable_sha": "c" * 40}
+        successor_lease = "a" * 32
+        boot_id = "11111111-1111-1111-1111-111111111111"
+        namespace = {"device": 4, "inode": 1358, "host_ifindex": 41, "cookie": 1359, "boot_id": boot_id}
+        certificate = "d" * 64
+        baseline = {"nft_table_handle": 111, "baseline_sha256": "e" * 64, "policy_sha256": "f" * 64}
+        current_auth = {"valid_until": 31000}
+        current_record = {
+            "identity": {"run_id": successor["run_id"], "caller_sha": successor["source_sha"],
+                         "reusable_sha": successor["reusable_sha"]},
+            "created_at": 21000, "cell_sha256": self.selected.cell_sha256,
+            "state": "prepared", "authorizations": [current_auth],
+            "effects": {
+                "context": {"operation": "context-create", "state": "intent",
+                            "target": "context:" + self.selected.cell_sha256},
+                "creator": {"operation": "fence-create", "state": "verified", "host_api": baseline,
+                            "fence": {"host_ifindex": 42, "netns_device": 4, "netns_inode": 1360}},
+                "grant": {"operation": "fence-renew", "state": "verified", "host_api_authorization": {
+                    "authorization_sha256": ledger.digest(current_auth), "host_ifindex": 42,
+                    "peer_ipv4": "10.0.0.2", "baseline_sha256": baseline["baseline_sha256"],
+                    "allow_expires_at": 31000,
+                }},
+            },
+        }
+        successor_store = Mock()
+        successor_store.lease_ids.return_value = (successor_lease,)
+        successor_store.host_api_claimants.return_value = (successor_lease,)
+        successor_store.read.side_effect = lambda _: deepcopy(current_record)
+        successor_store._transaction.return_value = nullcontext({"leases": {successor_lease: current_record}})
+        self.record["effects"].update({
+            "fence": {"operation": "fence-create", "state": "verified", "fence": {
+                "netns_device": 4, "netns_inode": 1358, "host_ifindex": 41, "boot_id": boot_id,
+            }},
+            "tls": {"operation": "certificate-create", "state": "verified",
+                    "certificate_scope": {"initial_fingerprint": certificate}},
+        })
+        self.retirement["original_record"]["sha256"] = ledger.digest(self.record)
+        policy = SimpleNamespace(sha256=baseline["policy_sha256"])
+        config = SimpleNamespace(
+            host_api_fence_policy_path="/unit/host-api", host_api_fence_policy_sha256=policy.sha256,
+            network_fence_policy_path="/unit/network", network_fence_policy_sha256="1" * 64,
+            storage_quota_policy_path="/unit/storage", storage_quota_policy_sha256="2" * 64,
+            incus_socket_path="/unit/incus.socket",
+        )
+        descriptor = str(retained / (self.lease + ".json"))
+        data = {"engine": {"storage_root": str(retained / "graph"), "runroot": str(retained / "runroot")},
+                "output_path": str(retained / "output"), "context_path": str(retained / "context")}
+        paths = {"graph-remove": data["engine"]["storage_root"], "runroot-remove": data["engine"]["runroot"],
+                 "output-remove": data["output_path"], "context-remove": data["context_path"],
+                 "descriptor-unlink": descriptor}
+        device = retained.stat().st_dev
+        for index, (step, path) in enumerate(paths.items(), 201):
+            self.rows[step + "-receipt.json"] = {"metadata": {
+                "path": path, "device": device, "inode": index, "mount_id": 9, "sha256": ledger.digest(data),
+            }}
+        self.rows.update({
+            "complete-receipt.json": {"namespace": namespace, "at": 20000, "storage_unique_mount_id": 1001,
+                                      "storage_policy_sha256": config.storage_quota_policy_sha256},
+            "certificate-revoke-receipt.json": {"metadata": {"fingerprint": certificate}},
+            "storage-identities.json": {"identities": [[device, i] for i in range(201, 206)]},
+        })
+        cell = {"engine": {"paths": {"descriptor": str(retained)}}, "incus": {}}
+        target = {"project": "old-project", "network": "old-network", "pool": "old-pool",
+                  "ipv4_address": "10.0.0.1/24", "dns_domain": "example.invalid",
+                  "ownership": {"owner": "g06", "repository": "fixture/repo", "run_id": cells.TWELFTH_RUN,
+                                "run_attempt": 1, "scenario": "quality", "target": "isolated",
+                                "lease_id": self.lease, "cell_sha256": self.selected.cell_sha256},
+                  "project_limits": {"cpu": 2, "memory_bytes": 1073741824, "disk_bytes": 1073741824,
+                                     "instances": 1, "virtual_machines": 1}}
+
+        def open_directory(path, *, private=False):
+            self.assertIn(Path(path), (retained, successor_bank))
+            return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+
+        stack.enter_context(patch.object(run_factory.preparation, "_config", return_value=(config, None, None)))
+        stack.enter_context(patch.multiple(
+            run_factory.cell_contract, _sealed=Mock(return_value=(cell, None, None)),
+            _environment=Mock(return_value={}), _descriptor=Mock(return_value=data),
+            _incus=Mock(return_value=target),
+        ))
+        stack.enter_context(patch.object(run_factory.engine, "_directory", side_effect=open_directory))
+        stack.enter_context(patch.object(run_factory.installation, "_open_directory", side_effect=open_directory))
+        stack.enter_context(patch.object(os.path, "lexists", return_value=False))
+        admin = Mock()
+        mutator = Mock()
+        mutator.readback.return_value = {"state": "absent_observed"}
+        stack.enter_context(patch.object(incus_admin, "RootIncusAdmin", return_value=admin))
+        stack.enter_context(patch.object(incus_mutation, "RootIncusMutator", return_value=mutator))
+        certificates = stack.enter_context(patch.object(
+            incus_mutation, "_certificate_inventory", return_value=([], None)
+        ))
+        stack.enter_context(patch.multiple(
+            network_fence, _bound_policy=Mock(), _host_namespace=Mock(return_value=(4, 1)),
+            _ip=Mock(return_value=[{"ifname": "lo", "ifindex": 1}, {"ifname": "new", "ifindex": 42}]),
+        ))
+        census = stack.enter_context(patch.object(network_fence, "_namespace_refs_drained_once"))
+        stack.enter_context(patch.object(engine_executor, "_slice_inactive"))
+        gate = Mock(return_value=(111, 99, 13000, 31000))
+        stack.enter_context(patch.multiple(
+            host_api_fence, _bound=Mock(return_value=policy), _host=Mock(return_value=nullcontext()),
+            _baseline=Mock(return_value=baseline), _readback=gate,
+        ))
+        stack.enter_context(patch.multiple(
+            storage_quota, _acquire_paths=Mock(return_value=nullcontext()), _mount_id=Mock(return_value=9),
+        ))
+        consumers = Mock()
+        stack.enter_context(patch.multiple(
+            cleanup_storage, _cleanup_limits=Mock(return_value=(10, 2)),
+            _unique_mount_id=Mock(return_value=1001), _consumer_read=Mock(),
+            _consumer_mount_rows=Mock(), _consumer_mount_targets=Mock(return_value=()),
+            _no_consumers=consumers,
+        ))
+        return (str(successor_bank), successor, successor_store), SimpleNamespace(
+            mutator=mutator, certificates=certificates, certificate=certificate, census=census,
+            consumers=consumers, gate=gate,
+        )
+
+    def test_retirement_revalidation_checks_all_observations_with_a_live_successor(self):
+        with ExitStack() as stack:
+            args, provider = self.modeled_successor_revalidation(stack)
+            self.revalidate(*args)
+        self.assertEqual(provider.mutator.readback.call_args_list, [call(kind) for kind in (
+            "project", "bridge", "profile", "project", "bridge", "profile"
+        )])
+        self.assertEqual(provider.certificates.call_count, 2)
+        self.assertEqual(provider.census.call_count, 2)
+        self.assertEqual(provider.consumers.call_count, 2)
+        self.assertEqual(provider.gate.call_count, 2)
+        self.assertTrue(all(entry.kwargs["tuple_value"] == (42, "10.0.0.2")
+                            for entry in provider.gate.call_args_list))
+
+    def test_returned_certificate_denies_before_successor_admission(self):
+        with ExitStack() as stack:
+            args, provider = self.modeled_successor_revalidation(stack)
+            provider.certificates.return_value = ([
+                {"name": "renamed", "projects": [], "fingerprint": provider.certificate},
+            ], None)
+            with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-certificate-returned"):
+                self.revalidate(*args)
+
+    def test_surviving_original_namespace_reference_denies_successor_admission(self):
+        with ExitStack() as stack:
+            args, provider = self.modeled_successor_revalidation(stack)
+            provider.census.side_effect = identity.Denied("fence-namespace-fd-live")
+            with self.assertRaisesRegex(identity.Denied, "fence-namespace-fd-live"):
+                self.revalidate(*args)
 
 
 @unittest.skipUnless(os.geteuid() == 0 and Path("/run/proof").is_dir(), "requires private root proof tmpfs")

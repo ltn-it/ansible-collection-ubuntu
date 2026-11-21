@@ -1176,9 +1176,15 @@ def _twelfth_host_fence(config, original_ifindex, successor_bank, successor):
         baseline = host_api_fence._baseline(policy)
         claimants = () if store is None else store.host_api_claimants(policy.sha256, baseline["baseline_sha256"])
         if not claimants:
-            handle, _, expires, deadline = host_api_fence._readback(policy, expected_deadline=0)
-            require(handle == baseline["nft_table_handle"] and expires == deadline == 0,
+            if store is None:
+                handle, _, expires, deadline = host_api_fence._readback(policy, expected_deadline=0)
+                require(deadline == 0, "continuation-twelfth-host-fence-baseline")
+            else:
+                handle, _, expires, deadline = host_api_fence._readback(policy)
+            require(handle == baseline["nft_table_handle"] and expires == 0,
                     "continuation-twelfth-host-fence-baseline")
+            if deadline:
+                _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, deadline)
             return
         require(len(claimants) == 1, "continuation-twelfth-host-fence-owner")
         active = store.read(claimants[0])
@@ -1209,6 +1215,45 @@ def _twelfth_host_fence(config, original_ifindex, successor_bank, successor):
                 and store.read(claimants[0]) == active
                 and store.host_api_claimants(policy.sha256, baseline["baseline_sha256"]) == claimants,
                 "continuation-twelfth-host-fence-read-drift")
+
+
+def _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, deadline):
+    """Bind an empty gate's retained deadline to its last exact, withdrawn grant."""
+    reason = "continuation-twelfth-host-fence-withdrawn"
+    lease_ids = store.lease_ids()
+    grants = []
+    for lease_id in lease_ids:
+        record = store.read(lease_id)
+        identity = record["identity"]
+        require(lease_id != operating_cells.TWELFTH_LEASE
+                and (identity["run_id"], identity["caller_sha"], identity["reusable_sha"])
+                == (successor["run_id"], successor["source_sha"], successor["reusable_sha"]), reason)
+        for effect in record["effects"].values():
+            authorization = effect.get("host_api_authorization")
+            if authorization and authorization["baseline_sha256"] == baseline["baseline_sha256"]:
+                grants.append((authorization["issued_boot_ns"], lease_id, record, effect))
+    require(grants, reason)
+    newest = max(grant[0] for grant in grants)
+    latest = [grant for grant in grants if grant[0] == newest]
+    require(len(latest) == 1, reason)
+    _, lease_id, record, grant = latest[0]
+    authorization = grant["host_api_authorization"]
+    target = "fence:" + lease_id
+    creator = [row for row in record["effects"].values()
+               if row["operation"] == "fence-create" and row["state"] == "verified" and row["target"] == target]
+    withdrawal = [row for row in record["effects"].values()
+                  if row["operation"] == "fence-disable" and row["state"] == "verified" and row["target"] == target]
+    removal = [row for row in record["effects"].values()
+               if row["operation"] == "fence-remove" and row["state"] == "verified" and row["target"] == target]
+    require(len(creator) == len(withdrawal) == len(removal) == 1
+            and creator[0].get("host_api") == baseline
+            and creator[0].get("fence", {}).get("host_ifindex") == authorization["host_ifindex"] != original_ifindex
+            and grant["operation"] == "fence-renew" and grant["state"] == "verified"
+            and authorization["allow_expires_at"] == deadline
+            and withdrawal[0].get("host_api_withdrawal") == {"baseline_sha256": baseline["baseline_sha256"]}
+            and creator[0]["at"] <= grant["at"] <= withdrawal[0]["at"] <= removal[0]["at"]
+            and store.read(lease_id) == record and store.lease_ids() == lease_ids
+            and not store.host_api_claimants(baseline["policy_sha256"], baseline["baseline_sha256"]), reason)
 
 
 def _verify_closed_original_record(store, registry, selector, configuration, retirement):
