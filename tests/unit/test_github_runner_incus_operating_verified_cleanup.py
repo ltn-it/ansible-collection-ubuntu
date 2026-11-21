@@ -34,6 +34,17 @@ class VerifiedCleanupTests(unittest.TestCase):
                 with self.assertRaises(identity.Denied):
                     cells.validate_continuation_descriptor(
                         replay, cells.ELEVENTH_SUCCESSOR_WORKFLOW, cells.ELEVENTH_SUCCESSOR_REUSABLE)
+        prior_workflow = "8a1669295d7788583b3834183c4451046a1ff4cb2fc5cab99e70f8df9381fb51"
+        for workflow, reusable in (
+            (prior_workflow, cells.TENTH_SUCCESSOR_REUSABLE),
+            (prior_workflow, cells.ELEVENTH_SUCCESSOR_REUSABLE),
+            (cells.ELEVENTH_SUCCESSOR_WORKFLOW, cells.TENTH_SUCCESSOR_REUSABLE),
+        ):
+            with self.subTest(workflow=workflow, reusable=reusable):
+                replay = deepcopy(route)
+                replay["successor"].update(source_workflow_sha256=workflow, reusable_sha=reusable)
+                with self.assertRaises(identity.Denied):
+                    cells.validate_continuation_descriptor(replay, workflow, reusable)
         commit["parents"] = [{"sha": cells.TENTH_MAIN}, {"sha": cells.ELEVENTH_MAIN}]
         with self.assertRaises(identity.Denied):
             cells.validate_continuation_commit(commit, route, commit["sha"], 100, cells.ELEVENTH_SUCCESSOR_REUSABLE)
