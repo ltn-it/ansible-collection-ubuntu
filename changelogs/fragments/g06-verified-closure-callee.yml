@@ -1,0 +1,6 @@
+---
+bugfixes:
+  - >-
+    Bind the G06 continuation after verified cleanup to the published Validation
+    admission workflow and its matching collection workflow digest. Preserve the
+    original failed run's reusable revision and retirement checks.
