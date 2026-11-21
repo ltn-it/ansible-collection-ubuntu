@@ -1713,12 +1713,13 @@ def _validate_tenth_descriptor(value, workflow_sha256, reusable_sha):
             and ref["sha256"] == TENTH_QUALIFICATION, "continuation-tenth-qualification")
     _validate_pinned_operating_successor(value["successor"], workflow_sha256, reusable_sha,
                                          first_parent=TENTH_MAIN, expected_workflow=TENTH_SUCCESSOR_WORKFLOW,
+                                         expected_reusable=TENTH_SUCCESSOR_REUSABLE,
                                          reason="continuation-tenth-successor")
     return value
 
 
 def _validate_pinned_operating_successor(value, workflow_sha256, reusable_sha, *, first_parent,
-                                         expected_workflow, reason):
+                                         expected_workflow, expected_reusable, reason):
     row = engine_policy._keys(value, {"source_sha", "run_id", "run_attempt", "first_parent",
                                      "source_workflow_sha256", "reusable_sha"})
     cell_contract._commit(row["source_sha"])
@@ -1732,7 +1733,7 @@ def _validate_pinned_operating_successor(value, workflow_sha256, reusable_sha, *
             and type(row["run_attempt"]) is int and row["run_attempt"] == 1
             and row["first_parent"] == first_parent
             and row["source_workflow_sha256"] == workflow_sha256 == expected_workflow
-            and row["reusable_sha"] == reusable_sha == TENTH_SUCCESSOR_REUSABLE, reason)
+            and row["reusable_sha"] == reusable_sha == expected_reusable, reason)
 
 
 # The original push reached Runner01 but failed before creating an Incus VM.
@@ -1743,7 +1744,8 @@ ELEVENTH_CHECKS = (136510803073, 136514056559)
 ELEVENTH_GRAPH = "c7f0988cb252ff9a7203e9593ea3432502280f161c999700aa2abaf14f7f9b74"
 ELEVENTH_QUALIFICATION = "0ceb1f233f79cca0f5f57cfb6a728ab06b6da3857dc724e170209f3dde95e491"
 ELEVENTH_REASON = "terminal-original-push-with-verified-partial-cleanup"
-ELEVENTH_SUCCESSOR_WORKFLOW = "8a1669295d7788583b3834183c4451046a1ff4cb2fc5cab99e70f8df9381fb51"
+ELEVENTH_SUCCESSOR_WORKFLOW = "d388b0bd45674d3034845a569458440edfbcc1e854e9ded7696a6287cd950950"
+ELEVENTH_SUCCESSOR_REUSABLE = "45b0b8264d74d56ab9624d009541965e06d7693f"
 
 
 def eleventh_native_projection(run, inventory, checks):
@@ -1776,5 +1778,6 @@ def _validate_eleventh_descriptor(value, workflow_sha256, reusable_sha):
             "continuation-eleventh-qualification")
     _validate_pinned_operating_successor(value["successor"], workflow_sha256, reusable_sha,
                                          first_parent=ELEVENTH_MAIN, expected_workflow=ELEVENTH_SUCCESSOR_WORKFLOW,
+                                         expected_reusable=ELEVENTH_SUCCESSOR_REUSABLE,
                                          reason="continuation-eleventh-successor")
     return value

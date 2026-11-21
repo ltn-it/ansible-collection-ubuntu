@@ -20,22 +20,23 @@ class VerifiedCleanupTests(unittest.TestCase):
             "successor": {"source_sha": "a" * 40, "run_id": 100, "run_attempt": 1,
                           "first_parent": cells.ELEVENTH_MAIN,
                           "source_workflow_sha256": cells.ELEVENTH_SUCCESSOR_WORKFLOW,
-                          "reusable_sha": cells.TENTH_SUCCESSOR_REUSABLE},
+                          "reusable_sha": cells.ELEVENTH_SUCCESSOR_REUSABLE},
         }
         commit = {"sha": "a" * 40, "parents": [{"sha": cells.ELEVENTH_MAIN}]}
-        cells.validate_continuation_commit(commit, route, commit["sha"], 100, cells.TENTH_SUCCESSOR_REUSABLE)
+        cells.validate_continuation_commit(commit, route, commit["sha"], 100, cells.ELEVENTH_SUCCESSOR_REUSABLE)
         for key, bad in (("source_sha", cells.ELEVENTH_MAIN), ("run_id", cells.ELEVENTH_RUN),
                          ("run_attempt", 2), ("first_parent", cells.TENTH_MAIN),
-                         ("source_workflow_sha256", cells.TENTH_SUCCESSOR_WORKFLOW)):
+                         ("source_workflow_sha256", cells.TENTH_SUCCESSOR_WORKFLOW),
+                         ("reusable_sha", cells.TENTH_SUCCESSOR_REUSABLE)):
             with self.subTest(key=key):
                 replay = deepcopy(route)
                 replay["successor"][key] = bad
                 with self.assertRaises(identity.Denied):
                     cells.validate_continuation_descriptor(
-                        replay, cells.ELEVENTH_SUCCESSOR_WORKFLOW, cells.TENTH_SUCCESSOR_REUSABLE)
+                        replay, cells.ELEVENTH_SUCCESSOR_WORKFLOW, cells.ELEVENTH_SUCCESSOR_REUSABLE)
         commit["parents"] = [{"sha": cells.TENTH_MAIN}, {"sha": cells.ELEVENTH_MAIN}]
         with self.assertRaises(identity.Denied):
-            cells.validate_continuation_commit(commit, route, commit["sha"], 100, cells.TENTH_SUCCESSOR_REUSABLE)
+            cells.validate_continuation_commit(commit, route, commit["sha"], 100, cells.ELEVENTH_SUCCESSOR_REUSABLE)
 
     def test_closed_flag_does_not_replace_retention_or_live_absence(self):
         completed = 1_700_000_000
