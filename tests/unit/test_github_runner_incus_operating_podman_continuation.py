@@ -42,11 +42,11 @@ class PodmanContinuationTests(unittest.TestCase):
     def validate(self, route):
         return cells.validate_continuation_descriptor(route, "c" * 64, "d" * 40)
 
-    def test_successor_preserves_exact_workflow_and_cannot_readmit_the_failed_push(self):
+    def test_fourteenth_successor_binds_new_workflow_and_cannot_readmit_the_failed_push(self):
         successor = {
             "source_sha": "a" * 40, "run_id": 90000000001, "run_attempt": 1,
-            "first_parent": cells.FOURTEENTH_MAIN, "source_workflow_sha256": cells.THIRTEENTH_SUCCESSOR_WORKFLOW,
-            "reusable_sha": cells.THIRTEENTH_SUCCESSOR_REUSABLE,
+            "first_parent": cells.FOURTEENTH_MAIN, "source_workflow_sha256": cells.FOURTEENTH_SUCCESSOR_WORKFLOW,
+            "reusable_sha": cells.FOURTEENTH_SUCCESSOR_REUSABLE,
         }
         route = {"schema": 14, "reason": cells.FOURTEENTH_REASON,
                  "qualification": {"path": "/unit/qualification.json", "sha256": cells.FOURTEENTH_QUALIFICATION},
@@ -58,7 +58,8 @@ class PodmanContinuationTests(unittest.TestCase):
         cells.validate_continuation_commit(commit, route, successor["source_sha"], successor["run_id"], reusable)
         for invalid in ({"run_attempt": 2}, {"run_id": cells.FOURTEENTH_RUN},
                         {"source_sha": cells.FOURTEENTH_MAIN}, {"source_sha": cells.THIRTEENTH_MAIN},
-                        {"first_parent": cells.THIRTEENTH_MAIN}, {"reusable_sha": "b" * 40}):
+                        {"first_parent": cells.THIRTEENTH_MAIN}, {"reusable_sha": cells.THIRTEENTH_SUCCESSOR_REUSABLE},
+                        {"source_workflow_sha256": cells.THIRTEENTH_SUCCESSOR_WORKFLOW}):
             with self.subTest(invalid=invalid), self.assertRaises(identity.Denied):
                 cells.validate_continuation_descriptor(route | {"successor": successor | invalid}, digest, reusable)
 

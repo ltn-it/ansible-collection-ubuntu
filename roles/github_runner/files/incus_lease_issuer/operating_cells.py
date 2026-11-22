@@ -1948,6 +1948,8 @@ FOURTEENTH_CHECKS = (137138724568, 137141031693)
 FOURTEENTH_GRAPH = "2f42e82a7fc41263547a47353b8213e0941cb3c202149be6e38e5bdcb6134e62"
 FOURTEENTH_QUALIFICATION = "354c326a50f7a704e1139e2a25bdca2099c2c7f9eca99e09a73a23addfebe28f"
 FOURTEENTH_REASON = "terminal-native-authorization-hold-with-sealed-stage-and-config"
+FOURTEENTH_SUCCESSOR_WORKFLOW = "d5291cd73e5807721d3e85ae5b10b4037d2faa2b864a518afef0b64093353246"
+FOURTEENTH_SUCCESSOR_REUSABLE = "bba96362be83c030e6813d9219744a54b296c4b3"
 
 
 def fourteenth_native_projection(run, inventory, checks):
@@ -1963,8 +1965,8 @@ def _validate_fourteenth_descriptor(value, workflow_sha256, reusable_sha):
             "continuation-fourteenth-qualification")
     successor = value["successor"]
     _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
-        first_parent=FOURTEENTH_MAIN, expected_workflow=THIRTEENTH_SUCCESSOR_WORKFLOW,
-        expected_reusable=THIRTEENTH_SUCCESSOR_REUSABLE, reason="continuation-fourteenth-successor")
+        first_parent=FOURTEENTH_MAIN, expected_workflow=FOURTEENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=FOURTEENTH_SUCCESSOR_REUSABLE, reason="continuation-fourteenth-successor")
     require(successor["source_sha"] not in {ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN}
             and successor["run_id"] not in {ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN},
             "continuation-fourteenth-replay")
