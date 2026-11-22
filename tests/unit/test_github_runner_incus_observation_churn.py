@@ -33,6 +33,28 @@ class ObservationChurnTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 network_fence._borrow_socket(os.getpid(), -1, 9)
 
+    def test_closed_remote_socket_requires_a_complete_new_observation(self):
+        def scan(*_arguments):
+            network_fence._borrow_socket(os.getpid() + 1, 7, 9)
+
+        with mock.patch.object(network_fence.platform, "machine", return_value="x86_64"), \
+             mock.patch.object(network_fence.ctypes, "CDLL") as libc, \
+             mock.patch.object(network_fence.ctypes, "get_errno", return_value=errno.EBADF), \
+             mock.patch.object(network_fence, "_namespace_refs_drained_once",
+                               side_effect=scan) as acquire:
+            libc.return_value.syscall.side_effect = [-1, 23]
+            network_fence._namespace_refs_drained(3, "original-info", 25882)
+        self.assertEqual(acquire.call_count, 2)
+        self.assertEqual(acquire.call_args_list[0], acquire.call_args_list[1])
+
+    def test_remote_socket_permission_failure_still_denies_observation(self):
+        with mock.patch.object(network_fence.platform, "machine", return_value="x86_64"), \
+             mock.patch.object(network_fence.ctypes, "CDLL") as libc, \
+             mock.patch.object(network_fence.ctypes, "get_errno", return_value=errno.EPERM):
+            libc.return_value.syscall.return_value = -1
+            with self.assertRaisesRegex(Denied, "^fence-pidfd-getfd$"):
+                network_fence._borrow_socket(os.getpid() + 1, 7, 9)
+
     def test_complete_network_reacquire_uses_the_original_deadline(self):
         with mock.patch.object(network_fence.time, 'monotonic', side_effect=[10, 10, 11, 12]), \
              mock.patch.object(network_fence, '_namespace_refs_drained_once',
