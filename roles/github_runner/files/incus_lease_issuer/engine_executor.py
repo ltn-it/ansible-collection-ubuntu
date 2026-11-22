@@ -916,6 +916,8 @@ def _spawn(prepared, manifest, store, effect_id=None, *, storage_view=None):
     details = identity.decode_json(manifest.canonical_bytes)
     require(not os.path.lexists(details["runtime"]["cidfile"]), "engine-cidfile-exists")
     effect, pidfd, capture, owned, proc = effect_id, None, None, None, None
+    tracked_cid = None
+    restore_attempted = False
     try:
         if effect is None:
             effect = store.begin(prepared.lease_id, "engine-start", "engine:" + details["runtime"]["name"])
@@ -961,22 +963,33 @@ def _spawn(prepared, manifest, store, effect_id=None, *, storage_view=None):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             cid = _cid(details["runtime"]["cidfile"], awaiting_write=True)
-            # Podman writes the CID before StartAttach. Wait for the owned
-            # container to be running before restoring its host path modes.
-            if cid is not None and _inspect(manifest, cid)["State"]["Running"]:
-                require(_stable_process(proc.pid, manifest, pidfd) == process, "engine-supervisor-replaced")
-                if storage_view is not None:
-                    storage_view.restore_engine_modes()
-                store.bind_engine_container(prepared.lease_id, effect, cid)
-                owned.tracked(process, cid)
-                store.record(prepared.lease_id, effect, "verified", evidence_sha256=ledger.digest({
-                    "engine_policy_sha256": manifest.sha256, "process": process, "container_id": cid}))
-                return EngineStatus(prepared.lease_id, "tracked-not-test-success", cid)
+            if cid is not None:
+                require(tracked_cid is None or cid == tracked_cid, "engine-cidfile-replaced")
+                running = _inspect(manifest, cid)["State"]["Running"]
+                if tracked_cid is None:
+                    # Podman writes the CID before StartAttach. Ownership
+                    # survives incomplete startup, without proving success.
+                    owned.tracked(process, cid)
+                    tracked_cid = cid
+                    store.bind_engine_container(prepared.lease_id, effect, cid)
+                if running:
+                    require(_stable_process(proc.pid, manifest, pidfd) == process, "engine-supervisor-replaced")
+                    if storage_view is not None:
+                        restore_attempted = True
+                        storage_view.restore_engine_modes()
+                    store.record(prepared.lease_id, effect, "verified", evidence_sha256=ledger.digest({
+                        "engine_policy_sha256": manifest.sha256, "process": process, "container_id": cid}))
+                    return EngineStatus(prepared.lease_id, "tracked-not-test-success", cid)
             require(owned.pump(0.02) is None, "engine-supervisor-exited-before-tracking")
             require(not capture.problem, "engine-capture-limit-before-tracking")
         raise Denied("engine-tracking-timeout")
     except Exception as error:
         identity._diagnostic_failed("engine-spawn", error)
+        if tracked_cid is not None and storage_view is not None and not restore_attempted:
+            try:
+                storage_view.restore_engine_modes()
+            except Exception as privacy_error:
+                identity._diagnostic_failed("engine-storage-restore", privacy_error)
         if effect is not None:
             try:
                 store.record(prepared.lease_id, effect, "unknown", evidence_sha256=ledger.digest({"stage": "engine-start"}))

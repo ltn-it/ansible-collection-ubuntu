@@ -232,7 +232,7 @@ class RootExecutorTests(unittest.TestCase):
             return 0, b""
         raise AssertionError("unexpected fixed engine acquisition")
 
-    def spawn(self, *, pause_cid_write=False, storage_view=None):
+    def spawn(self, *, pause_cid_write=False, storage_view=None, expect_unknown=False):
         self.running = True
         errors = []
         bound = threading.Event()
@@ -276,10 +276,15 @@ class RootExecutorTests(unittest.TestCase):
             with mock.patch.object(executor, "_command", side_effect=self.command), \
                  mock.patch.object(executor, "_cid", side_effect=read_cid), \
                  mock.patch.object(self.store, "bind_engine_process", side_effect=bind):
-                try:
-                    result = self.traced_spawn(storage_view=storage_view)
-                except executor.EngineUnknown:
-                    self.fail("private fixed-ELF cause (no token/exception payload): " + repr(self.private_spawn_causes))
+                if expect_unknown:
+                    with self.assertRaises(executor.EngineUnknown):
+                        self.traced_spawn(storage_view=storage_view)
+                    result = None
+                else:
+                    try:
+                        result = self.traced_spawn(storage_view=storage_view)
+                    except executor.EngineUnknown:
+                        self.fail("private fixed-ELF cause (no token/exception payload): " + repr(self.private_spawn_causes))
         finally:
             thread.join(3)
         self.assertFalse(thread.is_alive())
@@ -303,7 +308,9 @@ class RootExecutorTests(unittest.TestCase):
 
         def restore():
             self.assertEqual(observed, [False, True])
-            self.assertNotIn("engine_container_id", self.engine_effect()[1])
+            effect = self.engine_effect()[1]
+            self.assertEqual(effect["engine_container_id"], self.cid)
+            self.assertEqual(effect["state"], "intent")
 
         storage_view.restore_engine_modes.side_effect = restore
         with mock.patch.object(self, "command", side_effect=inspect):
@@ -311,6 +318,61 @@ class RootExecutorTests(unittest.TestCase):
         storage_view.spawn_options.assert_called_once_with()
         storage_view.restore_engine_modes.assert_called_once_with()
         self.assertEqual(self.engine_effect()[1]["engine_container_id"], self.cid)
+
+    def test_modes_failure_preserves_the_validated_unknown_container_for_exact_stop(self):
+        storage_view = mock.Mock()
+        storage_view.spawn_options.return_value = {}
+        storage_view.restore_engine_modes.side_effect = OSError("fixture mode restore failure")
+        self.spawn(storage_view=storage_view, expect_unknown=True)
+        storage_view.restore_engine_modes.assert_called_once_with()
+        effect_id, effect = self.engine_effect()
+        self.assertEqual((effect["state"], effect["engine_container_id"]), ("unknown", self.cid))
+        owned = executor._PROCESSES[effect["engine_process"]["pid"]]
+        self.assertEqual((owned.effect_id, owned.container_id), (effect_id, self.cid))
+        with mock.patch.object(executor, "_retained", return_value=(self.manifest, effect_id, effect)), \
+             mock.patch.object(executor, "_command", side_effect=self.command), \
+             mock.patch.object(executor, "_withdraw"), mock.patch.object(executor, "_drained"):
+            stopped = executor.cancel(*self.arguments())
+        self.assertEqual(stopped.state, "owned-stopped-not-test-success")
+        self.assertEqual(self.engine_effect()[1]["state"], "verified")
+
+    def test_lost_durable_cid_reply_preserves_original_capture_owner(self):
+        bind = self.store.bind_engine_container
+
+        def lost_reply(*args):
+            bind(*args)
+            raise OSError("fixture lost durable CID reply")
+
+        with mock.patch.object(self.store, "bind_engine_container", side_effect=lost_reply) as operation:
+            self.spawn(expect_unknown=True)
+        operation.assert_called_once()
+        effect_id, effect = self.engine_effect()
+        self.assertEqual((effect["state"], effect["engine_container_id"]), ("unknown", self.cid))
+        owned = executor._PROCESSES[effect["engine_process"]["pid"]]
+        self.assertEqual((owned.effect_id, owned.container_id), (effect_id, self.cid))
+
+    def test_owned_supervisor_exit_before_running_preserves_cid_and_restores_modes(self):
+        original = self.command
+        storage_view = mock.Mock()
+        storage_view.spawn_options.return_value = {}
+        exited = False
+
+        def inspect(manifest, args, seconds=5):
+            nonlocal exited
+            self.assertEqual(args[-1], self.cid)
+            self.running = False
+            if not exited:
+                owned, = (row for row in executor._PROCESSES.values() if row.store is self.store)
+                owned.proc.terminate()
+                exited = True
+            return original(manifest, args, seconds)
+
+        with mock.patch.object(self, "command", side_effect=inspect):
+            self.spawn(storage_view=storage_view, expect_unknown=True)
+        self.assertTrue(exited)
+        storage_view.restore_engine_modes.assert_called_once_with()
+        effect = self.engine_effect()[1]
+        self.assertEqual((effect["state"], effect["engine_container_id"]), ("unknown", self.cid))
 
     def test_real_fixed_elf_pid_boot_hash_and_private_cid_are_durable(self):
         result = self.spawn(pause_cid_write=True)

@@ -171,9 +171,10 @@ class RootEngineStorageViewTests(unittest.TestCase):
         helper = r"""
 import ctypes, errno, os, subprocess, sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[1])
 from incus_lease_issuer import storage_quota as quota
 
-slot, graph, runroot, output, inputs, external = map(Path, sys.argv[1:])
+slot, graph, runroot, output, inputs, external = map(Path, sys.argv[2:])
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.unshare(quota.CLONE_NEWNS):
     if ctypes.get_errno() in (errno.EPERM, errno.EINVAL, errno.ENOSYS):
@@ -212,7 +213,7 @@ finally:
         os.close(fd)
 """
         before = Path("/proc/self/mountinfo").read_bytes()
-        result = subprocess.run([sys.executable, "-B", "-c", helper, *map(str, (
+        result = subprocess.run([sys.executable, "-B", "-c", helper, str(FILES), *map(str, (
             self.slot, self.graph, self.runroot, self.output, self.inputs, external))],
             capture_output=True, text=True, timeout=25)
         if result.returncode == 77:
