@@ -455,6 +455,101 @@ class CensusPreservationTests(unittest.TestCase):
         self.assert_held_without_changes("continuation-configuration-original-or-unknown")
 
 
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0,
+                     "isolated Root Linux preservation fixture")
+class AuthorizationHoldPreservationTests(unittest.TestCase):
+    def setUp(self):
+        from test_github_runner_incus_operating_eighth_prelease_continuation import EighthCompleteStageTests
+
+        fixture = EighthCompleteStageTests("runTest")
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        original = run_factory.load_bootstrap(fixture.original["path"], fixture.original["sha256"])
+        self.old_bank, self.new_bank = fixture.old_bank, fixture.next_bank
+        self.intake, self.configuration = Path(fixture.stage.directory), Path(fixture.configuration.directory)
+        self.paths = [Path(original.path), self.old_bank / "state.json", self.new_bank / "state.json"]
+        self.paths.extend(path for directory in (self.intake, self.configuration) for path in directory.rglob("*")
+                          if path.is_file())
+        bank_info = self.old_bank.stat()
+        self.retirement = {
+            "original_bootstrap": fixture.original | {"device": original.file_stamp[0], "inode": original.file_stamp[1]},
+            "original_bank": {"path": str(self.old_bank), "device": bank_info.st_dev, "inode": bank_info.st_ino,
+                              "state_file_sha256": hashlib.sha256((self.old_bank / "state.json").read_bytes()).hexdigest()},
+            "new_entries": {"native_intake_catalogue": fixture.prefix["intake"],
+                            "native_run_configuration_catalogue": fixture.prefix["configuration"]},
+        }
+        who = fixture.created.proof.identity
+        self.previous = {"schema": 13, "fixture": "sealed predecessor"}
+        descriptor = {"schema": 13, "successor": {
+            "run_id": who.run_id, "source_sha": who.caller_sha, "reusable_sha": who.reusable_sha}}
+        self.enterContext(patch.object(run_factory, "_continuation_receipt",
+                                       return_value=(descriptor, self.previous, fixture.counts, None)))
+        self.enterContext(patch.multiple(cells, FOURTEENTH_MAIN=who.caller_sha, FOURTEENTH_RUN=who.run_id,
+            FOURTEENTH_CHECKS=(who.job_id,), THIRTEENTH_SUCCESSOR_REUSABLE=who.reusable_sha))
+
+    def snapshot(self):
+        evidence = {}
+        for path in self.paths:
+            observed = path.stat()
+            evidence[path] = (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_mtime_ns, path.read_bytes())
+        return evidence
+
+    def observe(self, successor=None):
+        run_factory._revalidate_fourteenth_preservation(self.retirement, self.previous, str(successor or self.new_bank))
+
+    def assert_held_without_changes(self, reason, successor=None):
+        before = self.snapshot()
+        with self.assertRaisesRegex(identity.Denied, reason):
+            self.observe(successor)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_preserves_both_complete_entries_and_distinct_banks(self):
+        before = self.snapshot()
+        self.observe()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_retired_configuration_is_excluded_from_successor_catalogue(self):
+        root = self.configuration.parent
+        catalogues = {"native_run_configuration_catalogue": {
+            entry.name: run_factory._fifth_retired_entry(entry) for entry in root.iterdir()}}
+        qualified = ({"schema": 14}, {"retirement": {"catalogues": catalogues}}, None, None)
+        successor = SimpleNamespace(value={"ledger_path": str(self.new_bank)})
+        receipt = run_factory._continuation_receipt
+        before = self.snapshot()
+        with patch.object(run_factory, "_continuation_receipt",
+                          side_effect=lambda value: qualified if value is successor.value else receipt(value)), \
+             patch.object(run_factory, "_continuation_origin_absent", side_effect=lambda *_: self.observe()):
+            fd = run_factory.installation._open_directory(str(root))
+            try:
+                self.assertEqual(run_factory._current_configuration_catalogue(successor, fd), [])
+            finally:
+                os.close(fd)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_rejects_alias_and_nonempty_original_bank(self):
+        self.assert_held_without_changes("continuation-tenth-bank-reuse", self.old_bank)
+        lease_ids = ledger.Ledger.lease_ids
+        with patch.object(ledger.Ledger, "lease_ids",
+                          lambda store: ("f" * 32,) if Path(store.path) == self.old_bank else lease_ids(store)):
+            self.assert_held_without_changes("continuation-tenth-original-lease")
+
+    def test_rejects_changed_intake_seal(self):
+        seal = self.intake / "sealed.json"
+        body = json.loads(seal.read_bytes())
+        seal.write_bytes(ledger.canonical(body | {"fixture_drift": True}))
+        self.assert_held_without_changes("continuation-ninth-prefix-receipt")
+
+    def test_rejects_changed_archive(self):
+        archive = self.intake / run_factory.run_intake.ARCHIVES[0]
+        archive.write_bytes(b"damaged fixture archive")
+        self.assert_held_without_changes("intake-archive-stamps")
+
+    def test_rejects_changed_generated_configuration(self):
+        config = self.configuration / "runtime.json"
+        config.write_bytes(config.read_bytes() + b" ")
+        self.assert_held_without_changes("run-config-inventory-drift")
+
+
 class PodmanRetirementContinuationTests(unittest.TestCase):
     def setUp(self):
         root = Path("/unit/retirement")
