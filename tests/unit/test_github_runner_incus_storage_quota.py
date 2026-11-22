@@ -9,6 +9,7 @@ from dataclasses import replace
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import stat
 import struct
 import sys
@@ -212,6 +213,26 @@ class RootStorageQuotaTests(unittest.TestCase):
             self.assertGreaterEqual(len(self.loop_fds), 2)
             with self.assertRaises(OSError):
                 os.fstat(self.loop_fds[-1])
+
+    def test_engine_view_retains_only_authenticated_inputs_hidden_by_quota_projection(self):
+        workspace = self.mount / "workspace"
+        sibling = self.root / "bounded-slot-sibling"
+        for name, path in (("workspace", workspace), ("candidate", sibling)):
+            tree = self.io.data["trees"][name]
+            shutil.copytree(tree["path"], path)
+            tree["path"] = str(path)
+        manifest = self.io.compile()
+        # The root-only unit EE places the whole fixture below a private
+        # parent. Kernel namespace projection is tested separately.
+        with self.modeled_kernel(), mock.patch.object(quota._EngineView, "_inside_host"):
+            with quota._acquire_engine_view(str(self.path), self.sha, manifest) as view:
+                self.assertEqual([path for path, _ in view.readonly_paths], [str(workspace)])
+                _, workspace_fd = view.readonly_paths[0]
+                self.assertEqual(os.fstat(workspace_fd).st_ino, workspace.stat().st_ino)
+                self.assertEqual(len(view.paths), 3)
+                self.assertNotIn(str(sibling), [path for path, _ in view.paths])
+            with self.assertRaises(OSError):
+                os.fstat(workspace_fd)
 
     def test_actual_unbounded_tmpfs_denies_before_loop_attestation(self):
         mount = quota.engine._directory(str(self.mount), private=True)
