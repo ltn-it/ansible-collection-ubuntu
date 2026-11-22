@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 13:
+        return _validate_thirteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 12:
         return _validate_twelfth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 11:
@@ -154,7 +156,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     predecessors = {1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN,
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
-                    11: ELEVENTH_MAIN, 12: TWELFTH_MAIN}
+                    11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -212,6 +214,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 13:
+        return _validate_thirteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 12:
         return _validate_twelfth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 11:
@@ -1877,4 +1881,58 @@ def _validate_twelfth_qualification(value):
         require(entry["name"] not in entries and len(entries) < 256
                 and catalogues[kind] == {**entries, entry["name"]: entry["inventory_sha256"]},
                 "continuation-twelfth-preserved-catalogues")
+    return counts
+
+
+THIRTEENTH_MAIN = "e42b0cdd65536e3749f6c405ec23955e5aaa419b"
+THIRTEENTH_RUN = 44976939672
+THIRTEENTH_CHECKS = (137070844808, 137080117755)
+THIRTEENTH_GRAPH = "3dfb6a35a49541edc808210ab237ca72e76501cd981b054715082bf3149d12c9"
+THIRTEENTH_QUALIFICATION = "4ff9b14302933065d415ec9a5b4af80de05751f146124d37249767c5ce881462"
+THIRTEENTH_REASON = "terminal-native-census-hold-with-sealed-intake-and-no-lease"
+THIRTEENTH_SUCCESSOR_WORKFLOW = "2c1659c03115a856f4e532fab2d6a53c76cfb48d83e3cc630c1e0338bb8039e7"
+THIRTEENTH_SUCCESSOR_REUSABLE = "a936e9ea75af84e6b47fc23cd8f11f8a000a52ed"
+
+
+def thirteenth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, TWELFTH_SUCCESSOR_REUSABLE,
+                                       THIRTEENTH_GRAPH, THIRTEENTH_CHECKS, THIRTEENTH_MAIN)
+
+
+def _validate_thirteenth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == THIRTEENTH_REASON and ref["sha256"] == THIRTEENTH_QUALIFICATION,
+            "continuation-thirteenth-qualification")
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+                                         first_parent=THIRTEENTH_MAIN, expected_workflow=THIRTEENTH_SUCCESSOR_WORKFLOW,
+                                         expected_reusable=THIRTEENTH_SUCCESSOR_REUSABLE,
+                                         reason="continuation-thirteenth-successor")
+    require(successor["source_sha"] not in {ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN}
+            and successor["run_id"] not in {ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN},
+            "continuation-thirteenth-replay")
+    return value
+
+
+def _validate_thirteenth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_thirteenth", "previous_qualification", "retirement"})
+    require(ledger.digest(value) == THIRTEENTH_QUALIFICATION and value["purpose"] == THIRTEENTH_REASON
+            and ledger.digest(value["native_thirteenth"]) == THIRTEENTH_GRAPH, "continuation-thirteenth-history")
+    previous = value["previous_qualification"]
+    counts = _validate_twelfth_qualification(previous)
+    retirement = engine_policy._keys(value["retirement"], {
+        "schema", "kind", "original_bootstrap", "original_bank", "intake", "catalogues",
+    })
+    require(type(retirement["schema"]) is int and retirement["schema"] == 1
+            and retirement["kind"] == "sealed-source-intake-with-no-configuration-or-lease",
+            "continuation-thirteenth-retirement")
+    entry = retirement["intake"]
+    old = previous["retirement"]["catalogues"]
+    config_key, intake_key = "native_run_configuration_catalogue", "native_intake_catalogue"
+    require(entry["name"] not in old[intake_key] and len(old[intake_key]) < 256
+            and retirement["catalogues"] == {
+                config_key: old[config_key], intake_key: old[intake_key] | {entry["name"]: entry["inventory_sha256"]},
+            }, "continuation-thirteenth-preserved-catalogues")
     return counts

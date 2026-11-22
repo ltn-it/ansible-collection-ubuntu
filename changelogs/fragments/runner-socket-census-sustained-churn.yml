@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - continue bounded observation retries through a burst of
+    discarded process snapshots while keeping the original census deadline.

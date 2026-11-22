@@ -51,7 +51,7 @@ class DiagnosticsTests(unittest.TestCase):
             with self.assertRaises(network_fence.KernelHold):
                 with identity._diagnostic_request():
                     network_fence._namespace_refs_drained(-1, None, 0)
-        self.assertEqual(scan.call_count, 8)
+        self.assertEqual(scan.call_count, 32)
         record = self.record()
         self.assertEqual((record["stage"], record["reason"]),
                          ("namespace-census", "fence-proc-acquire-unstable"))

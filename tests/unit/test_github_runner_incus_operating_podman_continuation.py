@@ -71,6 +71,51 @@ class PodmanContinuationTests(unittest.TestCase):
         with self.assertRaisesRegex(identity.Denied, "continuation-ninth-original-failed-graph"):
             cells.twelfth_native_projection(captured["run"], captured["inventory"], captured["checks"])
 
+    def test_census_hold_requires_a_new_protected_push_bound_to_the_sealed_prefix(self):
+        parent = cells.THIRTEENTH_MAIN
+        candidate = {
+            "schema": 13,
+            "reason": cells.THIRTEENTH_REASON,
+            "qualification": {"path": "/unit/qualification.json", "sha256": cells.THIRTEENTH_QUALIFICATION},
+            "successor": self.route["successor"] | {
+                "first_parent": parent,
+                "source_workflow_sha256": cells.THIRTEENTH_SUCCESSOR_WORKFLOW,
+                "reusable_sha": cells.THIRTEENTH_SUCCESSOR_REUSABLE,
+            },
+        }
+        caller = candidate["successor"]
+        commit = {"sha": caller["source_sha"], "parents": [{"sha": parent}]}
+        cells.validate_continuation_commit(commit, candidate, caller["source_sha"], caller["run_id"], caller["reusable_sha"])
+        for field, invalid in (("first_parent", cells.TWELFTH_MAIN), ("run_id", cells.THIRTEENTH_RUN),
+                               ("run_attempt", 2), ("reusable_sha", cells.TWELFTH_SUCCESSOR_REUSABLE)):
+            changed = deepcopy(candidate)
+            changed["successor"][field] = invalid
+            with self.subTest(field=field), self.assertRaises(identity.Denied):
+                cells.validate_continuation_descriptor(changed, caller["source_workflow_sha256"], caller["reusable_sha"])
+
+    def test_census_hold_preserves_only_one_additional_intake_and_no_configuration(self):
+        intake_key = "native_intake_catalogue"
+        config_key = "native_run_configuration_catalogue"
+        previous = {"retirement": {"catalogues": {intake_key: {"old": "intake"}, config_key: {"old": "config"}}}}
+        value = {
+            "schema": 13, "purpose": cells.THIRTEENTH_REASON, "native_thirteenth": {},
+            "previous_qualification": previous,
+            "retirement": {
+                "schema": 1, "kind": "sealed-source-intake-with-no-configuration-or-lease",
+                "original_bootstrap": {}, "original_bank": {},
+                "intake": {"name": "new", "inventory_sha256": "seal"},
+                "catalogues": {intake_key: {"old": "intake", "new": "seal"}, config_key: {"old": "config"}},
+            },
+        }
+        with patch.object(cells, "_validate_twelfth_qualification", return_value={"old": "counts"}), \
+             patch.object(cells, "THIRTEENTH_GRAPH", ledger.digest({})):
+            with patch.object(cells, "THIRTEENTH_QUALIFICATION", ledger.digest(value)):
+                self.assertEqual(cells.validate_continuation_qualification(value), {"old": "counts"})
+            value["retirement"]["catalogues"][config_key]["new"] = "unpublished"
+            with patch.object(cells, "THIRTEENTH_QUALIFICATION", ledger.digest(value)), \
+                 self.assertRaisesRegex(identity.Denied, "continuation-thirteenth-preserved-catalogues"):
+                cells.validate_continuation_qualification(value)
+
     def test_storage_manifest_covers_distinct_full_inode_identities(self):
         raw = {"identities": [[1792, 8], [1792, 9]]}
         self.assertEqual(run_factory._twelfth_storage_identities(raw, 2), {(1792, 8), (1792, 9)})
