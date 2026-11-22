@@ -258,8 +258,10 @@ class RootRuntimeClientTests(unittest.TestCase):
                 return  # check() closes without sending a selector or auth.
             selector = receive(connected)
             operation = selector["operation"]
-            intake = self.mode == "intake" and "configuration" not in selector
-            nonce = ("a" * 64 if intake else NONCE)
+            intake = self.mode in {"intake", "split-intake", "split-hold"} and "configuration" not in selector
+            staging = intake and selector.get("snapshot", "") is None
+            configuring = intake and "snapshot" in selector and not staging
+            nonce = "b" * 64 if configuring else "a" * 64 if intake else NONCE
             connected.sendall(frame({"schema": 2, "type": "challenge", "operation": operation, "nonce": nonce,
                 "audience": self.auth.AUDIENCE + nonce, "expires_at": int(time.time()) + 60,
                 **({"phase": "intake"} if intake else {})}))
@@ -269,12 +271,22 @@ class RootRuntimeClientTests(unittest.TestCase):
             self.assertEqual(auth["token"], TOKEN)
             self.assertEqual(auth["api_token"], API)
             self.assertEqual(auth["nonce"], nonce)
+            if staging:
+                if self.mode == "split-hold":
+                    connected.sendall(frame({"schema": 2, "type": "failure", "operation": operation,
+                                             "disposition": "unknown-hold"}))
+                else:
+                    connected.sendall(frame({"schema": 2, "type": "snapshot-ready", "operation": operation,
+                        "cell": selector["cell"], "snapshot": "e" * 64, "lease_created": False}))
+                return
+            if configuring:
+                self.assertEqual(selector["snapshot"], "e" * 64)
             if intake:
                 connected.sendall(frame({"schema": 2, "type": "intake-ready", "operation": operation,
                     "cell": selector["cell"], "configuration": "f" * 64, "deadline": int(time.time()) + 300,
                     "lease_created": False}))
                 return
-            if self.mode == "intake":
+            if self.mode in {"intake", "split-intake"}:
                 self.assertEqual(selector["configuration"], "f" * 64)
             if self.mode == "drop":
                 return
@@ -410,6 +422,25 @@ class RootRuntimeClientTests(unittest.TestCase):
         self.assertEqual(self.requests[1][0]["configuration"], "f" * 64)
         self.assertEqual(self.auth._oidc.call_args_list,
             [mock.call(self.auth.AUDIENCE + "a" * 64), mock.call(self.auth.AUDIENCE + NONCE)])
+        self.assertFalse(self.errors)
+
+    def test_sealed_split_intake_restarts_authorization_only_after_each_verified_reply(self):
+        self.config.write_text(json.dumps({"schema": 2, "socket_path": str(self.path),
+            "signing_public_key_hex": "d" * 64, "split_intake": True}))
+        self.mode = "split-hold"
+        with self.assertRaises(client.ClientUnknown):
+            client.run_cell("registered-cell")
+        self.assertEqual(len(self.requests), 1)
+        self.requests.clear()
+        self.auth._oidc.reset_mock()
+        self.mode = "split-intake"
+        self.assertTrue(client.run_cell("registered-cell")["transport_only"])
+        self.assertEqual(len(self.requests), 3)
+        self.assertIsNone(self.requests[0][0]["snapshot"])
+        self.assertEqual(self.requests[1][0]["snapshot"], "e" * 64)
+        self.assertEqual(self.requests[2][0]["configuration"], "f" * 64)
+        self.assertEqual(self.auth._oidc.call_args_list,
+            [mock.call(self.auth.AUDIENCE + nonce) for nonce in ("a" * 64, "b" * 64, NONCE)])
         self.assertFalse(self.errors)
 
     def test_same_socket_challenge_auth_and_complete_capture_is_transport_only(self):

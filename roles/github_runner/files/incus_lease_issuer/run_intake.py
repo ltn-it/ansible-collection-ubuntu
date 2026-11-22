@@ -445,7 +445,7 @@ def _sealed_state_unchanged(stage, expected_sha):
 
 
 @identity._diagnostic_step("intake-stage")
-def stage_run_snapshot(proof, connected_socket, selected, token, api_token):
+def stage_run_snapshot(proof, connected_socket, selected, token, api_token, *, expected_receipt_sha256=None):
     """Fresh native proof -> exclusive per-run stage or read-only exact reuse.
 
     ROOT is installed by Root delivery, never a caller path. Failed/partial
@@ -470,14 +470,20 @@ def stage_run_snapshot(proof, connected_socket, selected, token, api_token):
         root = installation._open_directory(ROOT)
         root_identity = _directory_identity(root)
         created = False
-        try:
-            os.mkdir(name, 0o700, dir_fd=root)
-            os.fsync(root)
-            created = True
-        except FileExistsError:
-            pass
+        if expected_receipt_sha256 is None:
+            try:
+                os.mkdir(name, 0o700, dir_fd=root)
+                os.fsync(root)
+                created = True
+            except FileExistsError:
+                pass
+        else:
+            acquisition._hash(expected_receipt_sha256)
         stage = os.open(name, installation.DIR_FLAGS, dir_fd=root)
         stage_identity = _directory_identity(stage)
+        if expected_receipt_sha256 is not None:
+            require(_entries(stage) == INVENTORY and _read_at(stage, "sealed.json")[1] == expected_receipt_sha256,
+                    "intake-stage-receipt-drift")
         if created:
             intent_sha = _write_at(stage, "intent.json", {"schema": 1, "binding": binding,
                 "original_job": _job_binding(worker, who, selected)})
@@ -499,6 +505,8 @@ def stage_run_snapshot(proof, connected_socket, selected, token, api_token):
                 "snapshot": asdict(snapshot), "archive_stamps": stamps})
         # Newly sealed and reused snapshots pass the same full readback.
         snapshot, receipt_sha = _reuse(stage, binding, request, api_token, deadline)
+        require(expected_receipt_sha256 is None or expected_receipt_sha256 == receipt_sha,
+                "intake-stage-receipt-drift")
         again = admission.require_intake_native(proof, connected_socket, selected, token, api_token)
         require(again[0] == worker and again[1] == who and time.monotonic() < deadline,
                 "intake-stage-native-drift")

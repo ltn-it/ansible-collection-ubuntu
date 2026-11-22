@@ -145,14 +145,16 @@ def _object(raw):
 def _configuration():
     raw, stamp = _root_file(CONFIG, 2048)
     value = _object(raw)
-    require(set(value) in ({"schema", "socket_path"}, {"schema", "socket_path", "signing_public_key_hex"})
+    require(set(value) in ({"schema", "socket_path"}, {"schema", "socket_path", "signing_public_key_hex"},
+                           {"schema", "socket_path", "signing_public_key_hex", "split_intake"})
+            and ("split_intake" not in value or value["split_intake"] is True)
             and ("signing_public_key_hex" not in value or type(value["signing_public_key_hex"]) is str
                  and HEX.fullmatch(value["signing_public_key_hex"])) and type(value["schema"]) is int and value["schema"] == 2
             and type(value["socket_path"]) is str and value["socket_path"].startswith("/run/")
             and len(value["socket_path"].encode()) < 108)
     _parent_check, _ = _parent(value["socket_path"])
     os.close(_parent_check)
-    return value["socket_path"], hashlib.sha256(raw).hexdigest(), stamp
+    return value["socket_path"], hashlib.sha256(raw).hexdigest(), stamp, value.get("split_intake", False)
 
 
 def _frame(value, maximum):
@@ -256,7 +258,7 @@ def _failure(reply, operation):
     raise _BeforeIntent("incus-runtime-client-denied")
 
 
-def _authenticate(selector, operation, lease_id=None, *, artifact=None):
+def _authenticate(selector, operation, lease_id=None, *, artifact=None, snapshot=None):
     require(sys.platform == "linux" and type(selector) is str and SELECTOR.fullmatch(selector) and operation in OPS)
     require((operation in {"heartbeat", "status", "cancel"} and type(lease_id) is str and LEASE.fullmatch(lease_id))
             or (operation in {"run", "recover", "record-upload"} | OBSERVER_OPS and lease_id is None))
@@ -266,10 +268,14 @@ def _authenticate(selector, operation, lease_id=None, *, artifact=None):
         connection = _connect()
         connected = connection[0]
         locator = _CONFIGURATIONS.get(selector) if operation not in OBSERVER_OPS else None
+        split_intake = operation == "run" and locator is None and connection[1][3]
+        require(snapshot is None or (split_intake and type(snapshot) is str and HEX.fullmatch(snapshot)))
         message = {"schema": 2, "cell": selector, "operation": operation}
         if locator is not None:
             require(type(locator) is str and HEX.fullmatch(locator))
             message["configuration"] = locator
+        elif split_intake:
+            message["snapshot"] = snapshot
         connected.sendall(_frame(message, 1024))
         # Root collects complete installed/process evidence before issuing its
         # nonce. Reuse the existing auth idle wait; frame/nonce deadlines stay fixed.
@@ -277,6 +283,7 @@ def _authenticate(selector, operation, lease_id=None, *, artifact=None):
         _failure(challenge, operation)
         intake = challenge.get("phase") == "intake"
         observer = challenge.get("phase") == "observer"
+        require(not split_intake or intake)
         require(not observer or operation in OBSERVER_OPS)
         challenge_keys = {"schema", "type", "operation", "nonce", "audience", "expires_at"} | ({"phase"} if intake or observer else set())
         require(set(challenge) == challenge_keys
@@ -304,6 +311,18 @@ def _authenticate(selector, operation, lease_id=None, *, artifact=None):
             require(select.select([connected], [], [], 600)[0])
             ready = _receive(connected)
             _failure(ready, operation)
+            if split_intake and snapshot is None:
+                require(set(ready) == {"schema", "type", "operation", "cell", "snapshot", "lease_created"}
+                        and type(ready["schema"]) is int and ready["schema"] == 2 and ready["type"] == "snapshot-ready"
+                        and ready["operation"] == operation and ready["cell"] == selector and ready["lease_created"] is False
+                        and type(ready["snapshot"]) is str and HEX.fullmatch(ready["snapshot"])
+                        and connected.recv(1) == b"")
+                _stable(connection)
+                _close(connection)
+                connection = None
+                # The snapshot is a locator. A separately scoped nonce and
+                # authenticated connection are required to configure the job.
+                return _authenticate(selector, operation, snapshot=ready["snapshot"])
             require(set(ready) == {"schema", "type", "operation", "cell", "configuration", "deadline", "lease_created"}
                     and type(ready["schema"]) is int and ready["schema"] == 2 and ready["type"] == "intake-ready"
                     and ready["operation"] == operation and ready["cell"] == selector and ready["lease_created"] is False
