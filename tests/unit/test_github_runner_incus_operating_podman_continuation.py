@@ -212,6 +212,164 @@ class PodmanContinuationTests(unittest.TestCase):
             run_factory._revalidate_twelfth_retirement({}, {}, "/unit/successor-bank")
 
 
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0,
+                     "isolated Root Linux preservation fixture")
+class CensusPreservationTests(unittest.TestCase):
+    def setUp(self):
+        parent = Path("/run/proof")
+        if not parent.is_dir() or parent.stat().st_uid != 0 or parent.stat().st_mode & 0o077:
+            self.skipTest("private Root fixture directory /run/proof required")
+        temporary = tempfile.TemporaryDirectory(dir=parent, prefix="census-preservation-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.original_bank, self.successor_bank, self.earlier_bank = (
+            self.root / name for name in ("previous-ledger", "successor-ledger", "earlier-ledger"))
+        self.intakes, self.configs = self.root / "intakes", self.root / "configs"
+        for path in (self.original_bank, self.successor_bank, self.earlier_bank, self.intakes, self.configs):
+            path.mkdir(mode=0o700)
+        for bank in (self.original_bank, self.successor_bank, self.earlier_bank):
+            ledger.Ledger.initialize(str(bank))
+        self.state = self.original_bank / "state.json"
+        self.original = self.root / "bootstrap.json"
+        self.write(self.original, {"fixture": "original bootstrap"})
+        predecessor = {"run_id": cells.THIRTEENTH_RUN, "source_sha": cells.THIRTEENTH_MAIN}
+        self.original_bootstrap = SimpleNamespace(
+            value={"ledger_path": str(self.original_bank)}, path=str(self.original),
+            sha256=hashlib.sha256(self.original.read_bytes()).hexdigest(),
+            file_stamp=self.coordinate(self.original),
+        )
+
+        job = cells.THIRTEENTH_CHECKS[0]
+        binding = {"artifact": {"run_id": cells.THIRTEENTH_RUN, "run_attempt": 1},
+                   "source": {"commit_sha": cells.THIRTEENTH_MAIN},
+                   "controller": {"commit_sha": cells.TWELFTH_SUCCESSOR_REUSABLE}}
+        self.intake = self.intakes / ledger.digest(binding)
+        self.intake.mkdir(mode=0o700)
+        for name in run_factory.run_intake.ARCHIVES:
+            archive = self.intake / name
+            archive.write_bytes(("fixture archive " + name).encode())
+            archive.chmod(0o600)
+        intent = {"binding": binding, "original_job": {"run_id": cells.THIRTEENTH_RUN, "job_id": job, "check_run_id": job}}
+        intent_sha = self.write(self.intake / "intent.json", intent)
+        self.sealed = {"binding": binding, "intent_sha256": intent_sha}
+        seal_sha = self.write(self.intake / "sealed.json", self.sealed)
+        prior_config = self.configs / ("d" * 64)
+        prior_config.mkdir(mode=0o700)
+        self.write(prior_config / "intent.json", {"fixture": "earlier admitted configuration"})
+
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(run_factory, "ROOT", str(self.configs)))
+        stack.enter_context(patch.object(run_factory.run_intake, "ROOT", str(self.intakes)))
+        catalogues = {
+            "native_intake_catalogue": {self.intake.name: run_factory._fifth_retired_entry(self.intake)},
+            "native_run_configuration_catalogue": {prior_config.name: run_factory._fifth_retired_entry(prior_config)},
+        }
+        ninth = {"retirement": {"original_bootstrap": {}}, "previous_qualification": {}}
+        tenth = {"previous_bank": self.reference(self.earlier_bank), "previous_qualification": ninth}
+        eleventh = {"retirement": {}, "previous_qualification": tenth}
+        twelfth = {"retirement": {"catalogues": {}}, "previous_qualification": eleventh}
+        record = {
+            "original_bootstrap": self.reference(self.original) | {"sha256": self.original_bootstrap.sha256},
+            "original_bank": self.reference(self.original_bank) | {
+                "state_file_sha256": hashlib.sha256(self.state.read_bytes()).hexdigest()
+            },
+            "intake": self.reference(self.intake) | {"name": self.intake.name, "receipt_sha256": seal_sha},
+            "catalogues": catalogues,
+        }
+        self.receipt = {"retirement": record, "previous_qualification": twelfth}
+        self.successor = SimpleNamespace(value={"ledger_path": str(self.successor_bank), "cells": {"heavy": {}}},
+                                         sha256="c" * 64)
+        self.descriptor = {"schema": 13, "successor": {"run_id": 90000000001,
+                           "source_sha": "a" * 40, "reusable_sha": "b" * 40}}
+        self.counts = {}
+        for kind, directory in (("native_intake_catalogue", self.intakes),
+                                ("native_run_configuration_catalogue", self.configs)):
+            device, inode = self.coordinate(directory)
+            self.counts[kind] = {"directory_device": device, "directory_inode": inode}
+        # Isolate already-tested earlier generations and bootstrap parsing.
+        stack.enter_context(patch.object(run_factory, "load_bootstrap", return_value=self.original_bootstrap))
+        stack.enter_context(patch.object(run_factory, "_continuation_receipt",
+              return_value=({"schema": 12, "successor": predecessor}, twelfth)))
+        stack.enter_context(patch.object(run_factory, "_revalidate_twelfth_retirement"))
+        stack.enter_context(patch.object(run_factory, "_revalidate_eleventh_retirement"))
+        stack.enter_context(patch.object(run_factory, "_ninth_retired_partial_projection", return_value=ninth["retirement"]))
+        stack.enter_context(patch.dict(cells.NINTH_RETIRED_PARTIAL, original_bank=self.reference(self.earlier_bank)))
+
+    @staticmethod
+    def coordinate(path):
+        info = path.stat()
+        return info.st_dev, info.st_ino
+
+    def reference(self, path):
+        device, inode = self.coordinate(path)
+        return {"path": str(path), "device": device, "inode": inode}
+
+    @staticmethod
+    def write(path, value):
+        raw = ledger.canonical(value)
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return hashlib.sha256(raw).hexdigest()
+
+    def revalidate(self):
+        run_factory._continuation_origin_absent(
+            self.successor, (self.descriptor, self.receipt, self.counts, None))
+
+    def snapshot(self):
+        return {path.relative_to(self.root): (self.coordinate(path), path.stat().st_mtime_ns, path.read_bytes())
+                for path in self.root.rglob("*") if path.is_file()}
+
+    def assert_held_without_changes(self, reason):
+        before = self.snapshot()
+        with self.assertRaisesRegex(identity.Denied, reason):
+            self.revalidate()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_successor_observes_the_original_files_read_only(self):
+        before = self.snapshot()
+        self.revalidate()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_reused_or_nonempty_predecessor_bank_is_held(self):
+        with patch.dict(self.successor.value, ledger_path=str(self.original_bank)):
+            self.assert_held_without_changes("continuation-tenth-bank-reuse")
+        lease_ids = ledger.Ledger.lease_ids
+        with patch.object(ledger.Ledger, "lease_ids",
+                          lambda store: ("e" * 32,) if Path(store.path) == self.original_bank else lease_ids(store)):
+            self.assert_held_without_changes("continuation-tenth-original-lease")
+
+    def test_altered_ledger_digest_is_held(self):
+        proof = self.receipt["retirement"]["original_bank"]
+        with patch.dict(proof, state_file_sha256="0" * 64):
+            self.assert_held_without_changes("continuation-thirteenth-original-bank")
+
+    def test_missing_or_altered_sealed_intake_is_held(self):
+        seal = self.intake / "sealed.json"
+        self.write(seal, self.sealed | {"unexpected": True})
+        self.assert_held_without_changes("continuation-thirteenth-intake-seal")
+        seal.unlink()
+        self.assert_held_without_changes("continuation-thirteenth-intake-identity")
+
+    def test_changed_retired_archive_is_held(self):
+        archive = self.intake / next(iter(run_factory.run_intake.ARCHIVES))
+        archive.write_bytes(b"unexpected archive content")
+        self.assert_held_without_changes("continuation-fifth-retired-entry-drift")
+
+    def test_configuration_from_the_held_predecessor_is_rejected(self):
+        invocation = {"repository": run_factory.SOURCE, "run_id": cells.THIRTEENTH_RUN, "run_attempt": 1,
+                      "check_run_id": cells.THIRTEENTH_CHECKS[0], "job_id": cells.THIRTEENTH_CHECKS[0],
+                      "source_sha": cells.THIRTEENTH_MAIN, "reusable_sha": cells.TWELFTH_SUCCESSOR_REUSABLE,
+                      "selector": "heavy", "bootstrap_sha256": self.original_bootstrap.sha256}
+        identity_fields = ("repository", "run_id", "check_run_id", "selector")
+        directory = self.configs / ledger.digest({key: invocation[key] for key in identity_fields})
+        directory.mkdir(mode=0o700)
+        self.write(directory / "intent.json", {"schema": 1, "invocation": invocation,
+            "snapshot_receipt_sha256": "a" * 64, "created_at": 1, "deadline": 2,
+            "worker": {}, "job_started_at": 1, "template_sha256": "b" * 64})
+        self.assert_held_without_changes("continuation-configuration-original-or-unknown")
+
+
 class PodmanRetirementContinuationTests(unittest.TestCase):
     def setUp(self):
         root = Path("/unit/retirement")
