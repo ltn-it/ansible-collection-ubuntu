@@ -947,10 +947,12 @@ def _require_drained_socket(borrowed, observed, cookie):
 
 @identity._diagnostic_step("namespace-census")
 def _namespace_refs_drained(witness_fd, info, cookie):
-    """Reacquire whole observations after churn within one original budget."""
+    """Reacquire whole observations after churn under the original deadline."""
     deadline = time.monotonic() + 10
     transient = {"fence-proc-fds-changed", "fence-proc-changed", "fence-proc-task-changed"}
-    for _ in range(8):
+    # A burst of quickly discarded snapshots can consume the attempt limit
+    # before the observation deadline. Each retry still scans every reference.
+    for _ in range(32):
         require(time.monotonic() < deadline, "fence-proc-bounds")
         try:
             _namespace_refs_drained_once(witness_fd, info, cookie, deadline)

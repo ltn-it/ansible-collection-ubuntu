@@ -250,7 +250,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 12 or receipt.get("schema") == 12:
+    if descriptor["schema"] == 13 or receipt.get("schema") == 13:
+        require(descriptor["schema"] == receipt.get("schema") == 13, "continuation-thirteenth-receipt-kind")
+    elif descriptor["schema"] == 12 or receipt.get("schema") == 12:
         require(descriptor["schema"] == receipt.get("schema") == 12, "continuation-twelfth-receipt-kind")
     elif descriptor["schema"] == 11 or receipt.get("schema") == 11:
         require(descriptor["schema"] == receipt.get("schema") == 11, "continuation-eleventh-receipt-kind")
@@ -732,7 +734,14 @@ def _continuation_origin_absent(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 13:
+        _revalidate_thirteenth_preservation(receipt["retirement"], receipt["previous_qualification"],
+                                            bootstrap.value["ledger_path"])
+        thirteenth_catalogues = receipt["retirement"]["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 12
     if schema == 12:
         _revalidate_twelfth_retirement(receipt["retirement"], receipt["previous_qualification"],
                                       bootstrap.value["ledger_path"], descriptor["successor"])
@@ -755,7 +764,7 @@ def _continuation_origin_absent(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = twelfth_catalogues if twelfth_catalogues is not None else (retirement or receipt["retirement"])["catalogues"]
+        retired = thirteenth_catalogues or twelfth_catalogues or (retirement or receipt["retirement"])["catalogues"]
     elif schema == 8:
         require(_eighth_failed_prefix_projection(bootstrap.value["ledger_path"],
                     receipt["failed_prefix"]["original_bootstrap"], receipt["previous_qualification"],
@@ -797,6 +806,52 @@ def _continuation_origin_absent(bootstrap, qualified):
 
     if previous_bank is not None:
         _check_empty_previous_bank(previous_bank, bootstrap.value["ledger_path"])
+
+
+def _revalidate_thirteenth_preservation(retirement, previous, successor_bank=None):
+    """Read the sealed pre-lease predecessor without reusing it for a new job."""
+    ref = retirement["original_bootstrap"]
+    original = load_bootstrap(ref["path"], ref["sha256"])
+    qualified = _continuation_receipt(original.value)
+    bank = retirement["original_bank"]
+    require(original.file_stamp[:2] == (ref["device"], ref["inode"]) and qualified is not None
+            and qualified[0]["schema"] == 12 and qualified[1] == previous
+            and qualified[0]["successor"]["run_id"] == operating_cells.THIRTEENTH_RUN
+            and qualified[0]["successor"]["source_sha"] == operating_cells.THIRTEENTH_MAIN
+            and original.value["ledger_path"] == bank["path"], "continuation-thirteenth-original-bootstrap")
+    if successor_bank is not None:
+        _check_empty_previous_bank(bank, successor_bank)
+    with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
+        with ledger.Ledger(bank["path"]) as store:
+            state, _, _ = installation._file(bank["path"] + "/state.json", MAX_POLICY, private=True, keep=True)
+            require(not store.lease_ids() and state.sha256 == bank["state_file_sha256"],
+                    "continuation-thirteenth-original-bank")
+
+    entry = retirement["intake"]
+    directory = Path(run_intake.ROOT) / entry["name"]
+    fd = installation._open_directory(str(directory))
+    try:
+        device, inode, *_ = run_intake._directory_identity(fd)
+        require((device, inode) == (entry["device"], entry["inode"])
+                and run_intake._entries(fd) == run_intake.INVENTORY, "continuation-thirteenth-intake-identity")
+        sealed, digest, _ = run_intake._read_at(fd, "sealed.json")
+        intent, intent_digest, _ = run_intake._read_at(fd, "intent.json")
+        require(digest == entry["receipt_sha256"] and sealed["binding"] == intent["binding"]
+                and sealed["intent_sha256"] == intent_digest, "continuation-thirteenth-intake-seal")
+        who = intent["original_job"]
+        binding = intent["binding"]
+        require(who["run_id"] == binding["artifact"]["run_id"] == operating_cells.THIRTEENTH_RUN
+                and binding["artifact"]["run_attempt"] == 1
+                and who["job_id"] == who["check_run_id"] == operating_cells.THIRTEENTH_CHECKS[0]
+                and binding["source"]["commit_sha"] == operating_cells.THIRTEENTH_MAIN
+                and binding["controller"]["commit_sha"] == operating_cells.TWELFTH_SUCCESSOR_REUSABLE,
+                "continuation-thirteenth-intake-origin")
+        # The required catalogue read also checks the complete archive inventory
+        # and every file digest for exactly this retired directory.
+    finally:
+        os.close(fd)
+    require(load_bootstrap(original.path, original.sha256) == original,
+            "continuation-thirteenth-original-bootstrap-drift")
 
 
 def _revalidate_eleventh_retirement(retirement, previous, successor_ledger_path):
@@ -1308,6 +1363,10 @@ def _check_empty_previous_bank(bank, current_path):
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
     generation = descriptor["schema"]
+    thirteenth = receipt if generation == 13 else None
+    if thirteenth is not None:
+        receipt = thirteenth["previous_qualification"]
+        generation = 12
     twelfth = receipt if generation == 12 else None
     if twelfth is not None:
         receipt = twelfth["previous_qualification"]
@@ -1360,6 +1419,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if twelfth is not None:
         families.append((_continuation_twelfth_native, {}, twelfth["native_twelfth"],
                          "continuation-twelfth-native-drift"))
+    if thirteenth is not None:
+        families.append((_continuation_thirteenth_native, {}, thirteenth["native_thirteenth"],
+                         "continuation-thirteenth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -1418,7 +1480,7 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             # Origin validation may read a network namespace cookie. Its observer
             # needs the process to be single-threaded after the history reads.
             _continuation_origin_absent(selected.bootstrap, qualified)
-            needs_commit = descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12} or identity.decode_json(selected.template_bytes)["kind"] == "operating"
+            needs_commit = descriptor["schema"] in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13} or identity.decode_json(selected.template_bytes)["kind"] == "operating"
             if needs_commit:
                 commit = get("/git/commits/" + who.caller_sha)
                 operating_cells.validate_continuation_commit(commit, descriptor, who.caller_sha, who.run_id,
@@ -1691,7 +1753,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["failed_prefix"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
     directory_identity = run_intake._directory_identity(root)
     names = run_intake._entries(root)
@@ -2123,6 +2185,11 @@ def _continuation_eleventh_native(get):
 def _continuation_twelfth_native(get):
     return _terminal_family(get, operating_cells.TWELFTH_RUN, operating_cells.TWELFTH_CHECKS,
                             operating_cells.twelfth_native_projection)
+
+
+def _continuation_thirteenth_native(get):
+    return _terminal_family(get, operating_cells.THIRTEENTH_RUN, operating_cells.THIRTEENTH_CHECKS,
+                            operating_cells.thirteenth_native_projection)
 
 
 def _terminal_family(get, run_id, check_ids, projection):

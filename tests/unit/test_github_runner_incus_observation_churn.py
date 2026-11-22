@@ -71,12 +71,21 @@ class ObservationChurnTests(unittest.TestCase):
                     network_fence._namespace_refs_drained(3, 'info', 25882)
                 self.assertEqual(acquire.call_count, 1)
 
+    def test_burst_of_discarded_scans_can_finish_inside_the_same_deadline(self):
+        transient = [Denied("fence-proc-fds-changed"), FileNotFoundError()] * 5
+        with mock.patch.object(network_fence.time, "monotonic", return_value=10), \
+             mock.patch.object(network_fence, "_namespace_refs_drained_once",
+                               side_effect=[*transient, None]) as acquire:
+            network_fence._namespace_refs_drained(3, "actual-info", 25882)
+        self.assertEqual(acquire.call_args_list, [mock.call(3, "actual-info", 25882, 20)] * 11)
+
     def test_reacquisition_exhaustion_is_a_hold(self):
-        with mock.patch.object(network_fence, '_namespace_refs_drained_once',
+        with mock.patch.object(network_fence.time, "monotonic", return_value=10), \
+             mock.patch.object(network_fence, '_namespace_refs_drained_once',
                                side_effect=Denied('fence-proc-fds-changed')) as acquire:
             with self.assertRaisesRegex(Denied, 'fence-proc-acquire-unstable'):
                 network_fence._namespace_refs_drained(3, 'info', 25882)
-        self.assertEqual(acquire.call_count, 8)
+        self.assertEqual(acquire.call_count, 32)
 
     def test_deadline_expiry_prevents_another_complete_acquire(self):
         with mock.patch.object(network_fence.time, 'monotonic', side_effect=[10, 10, 20]), \
