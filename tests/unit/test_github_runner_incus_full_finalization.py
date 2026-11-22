@@ -147,6 +147,11 @@ class RootFullCoreFinalizationTests(unittest.TestCase):
         @contextmanager
         def acquired(*args,**kwargs):
             yield
+        @contextmanager
+        def acquired_engine_view(*args, **kwargs):
+            # This fixture runs the compiled engine and finalization, while
+            # native mount projection is exercised in the quota tests.
+            yield storage_quota._EngineView(str(self.io.root), -1, ())
         def nft(policy,prepared,*args,payload=None):
             if payload is None:
                 return ledger.canonical(self.model.fence.readback(ttl=self.private_ttl,deadline=self.private_deadline))
@@ -176,7 +181,9 @@ class RootFullCoreFinalizationTests(unittest.TestCase):
              mock.patch.object(network_fence,"_namespace_refs_drained"), \
              mock.patch.object(network_fence.installation,"_open_directory",side_effect=native_directory), \
              mock.patch.object(ctypes,"CDLL",return_value=LibcObservation()), \
-             mock.patch.object(engine_executor,"_preflight",side_effect=acquired), \
+             mock.patch.object(engine_executor,"_preflight",side_effect=acquired_engine_view), \
+             mock.patch.object(storage_quota._EngineView, "spawn_options", autospec=True, return_value={}), \
+             mock.patch.object(storage_quota._EngineView, "restore_engine_modes", autospec=True), \
              mock.patch.object(engine_executor,"_idmapped_preflight"), \
              mock.patch.object(engine_executor,"_cgroup",return_value=(cgroup_info.st_dev,cgroup_info.st_ino)), \
              mock.patch.object(storage_quota,"acquire_existing_evidence_quota",side_effect=acquired), \
