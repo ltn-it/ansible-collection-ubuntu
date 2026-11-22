@@ -7,9 +7,9 @@ paths, including capture/libpod data, must share that mount. Container tmpfs
 ceilings remain separate. Incus SERVER VM/storage quotas are not proven here.
 
 Caller retains its Root preparation lock and this context through engine use.
-No filesystem creation, allocation, mount, resize, device configuration or
-cleanup is implemented. Root platform provenance, exclusive slot provisioning,
-idmapped/runtime/native functional qualification and custody remain mandatory.
+A child may project its four lease directories in a private mount namespace.
+The projection creates no persistent filesystem or additional writable storage
+outside the verified quota. Platform provisioning and custody remain separate.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from pathlib import PurePosixPath
 import re
 import stat
 import struct
+import threading
 import time
 
 from . import engine_policy as engine, identity, installation, kernel, ledger
@@ -34,6 +35,13 @@ SYSFS = 0x62656572
 EXT4 = 0xef53
 NS_GET_NSTYPE = 0xb703
 CLONE_NEWNS = 0x00020000
+MS_NODEV = 4
+MS_NOSUID = 2
+MS_REC = 16384
+MS_PRIVATE = 262144
+AT_FDCWD = -100
+OPEN_TREE_CLONE = 1
+MOVE_MOUNT_F_EMPTY_PATH = 4
 LOOP_GET_STATUS64 = 0x4c05
 BLKGETSIZE64 = 0x80081272
 FS_IOC_FIEMAP = 0xc020660b
@@ -62,6 +70,99 @@ class QuotaObservation:
     total_bytes: int
     total_inodes: int
     # Observation only; no reusable approval flag or execution authority.
+
+
+@dataclass(frozen=True)
+class _EngineView:
+    quota_path: str
+    quota_fd: int
+    paths: tuple[tuple[str, int], ...]
+
+    def _inside_host(self):
+        # Podman may add traversal bits. Every host parent of a backing
+        # leaf stays Root0700, and every existing ancestor above the quota
+        # already has the traversal bits that Podman would otherwise add.
+        quota = PurePosixPath(self.quota_path)
+        checked = set()
+        for name, fd in ((self.quota_path, self.quota_fd), *self.paths):
+            _same_directory(name, fd)
+            for parent in PurePosixPath(name).parents:
+                if parent == PurePosixPath("/") or parent in checked:
+                    continue
+                checked.add(parent)
+                internal = parent == quota or quota in parent.parents
+                current = engine._directory(str(parent), private=internal)
+                try:
+                    if not internal:
+                        require(os.fstat(current).st_mode & 0o111 == 0o111,
+                                "storage-view-outer-ancestor-mode")
+                finally:
+                    os.close(current)
+
+    def spawn_options(self):
+        require(threading.active_count() == 1, "storage-view-single-thread-required")
+        self._inside_host()
+        return {"preexec_fn": self._prepare_child,
+                "pass_fds": (self.quota_fd, *(fd for _, fd in self.paths))}
+
+    def _prepare_child(self):
+        _root()
+        require(os.uname().machine in {"x86_64", "aarch64"}, "storage-view-architecture")
+        library = ctypes.CDLL(None, use_errno=True)
+        library.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                                  ctypes.c_ulong, ctypes.c_char_p)
+        library.mount.restype = ctypes.c_int
+        self._inside_host()
+        require(library.unshare(CLONE_NEWNS) == 0, "storage-view-unshare")
+        require(library.mount(None, b"/", None, MS_REC | MS_PRIVATE, None) == 0,
+                "storage-view-private")
+        with ExitStack() as clones:
+            detached = []
+            for path, original in self.paths:
+                path = os.fsencode(path)
+                # open_tree(OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC). A detached,
+                # nonrecursive clone cannot expose sibling lease directories.
+                fd = library.syscall(428, AT_FDCWD, path, OPEN_TREE_CLONE | os.O_CLOEXEC)
+                require(fd >= 0, "storage-view-open-tree")
+                clones.callback(os.close, fd)
+                require(_directory_identity(os.fstat(fd)) == _directory_identity(os.fstat(original)),
+                        "storage-view-source-replaced")
+                detached.append((path, fd))
+            require(library.mount(b"tmpfs", os.fsencode(self.quota_path), b"tmpfs", MS_NOSUID | MS_NODEV,
+                                  b"mode=0700,size=128k,nr_inodes=64") == 0,
+                    "storage-view-projection")
+            for path, fd in detached:
+                os.makedirs(path, mode=0o700)
+                # move_mount(MOVE_MOUNT_F_EMPTY_PATH)
+                require(library.syscall(429, fd, b"", AT_FDCWD, path, MOVE_MOUNT_F_EMPTY_PATH) == 0,
+                        "storage-view-move-mount")
+        for fd in (self.quota_fd, *(fd for _, fd in self.paths)):
+            os.close(fd)
+
+    def restore_engine_modes(self):
+        self._inside_host()
+        engine_paths = self.paths[:2]
+        modes = [stat.S_IMODE(os.fstat(fd).st_mode) for _, fd in engine_paths]
+        require(all(mode in {0o700, 0o711} for mode in modes), "storage-view-engine-mode-drift")
+        for (path, fd), mode in zip(engine_paths, modes):
+            _same_directory(path, fd)
+            if mode == 0o711:
+                os.fchmod(fd, 0o700)
+                os.fsync(fd)
+            require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700, "storage-view-engine-mode")
+
+
+def _directory_identity(info):
+    return info.st_dev, info.st_ino, info.st_uid, info.st_gid
+
+
+def _same_directory(path, pinned):
+    current = engine._directory(path)
+    try:
+        require(_directory_identity(os.fstat(current)) == _directory_identity(os.fstat(pinned))
+                and _mount_id(current) == _mount_id(pinned), "storage-view-directory-replaced")
+    finally:
+        os.close(current)
 
 
 def _root():
@@ -265,8 +366,7 @@ def _manifest(manifest):
     prefix, arguments = argv[:run], argv[run + 1:]
     runroot = _path(data["engine"]["runroot"])
     storage = _path(data["engine"]["storage_root"])
-    require(prefix == [engine.ENGINE, "--root", storage, "--runroot", runroot, "--cgroup-manager=systemd",
-                       "--events-backend=none", "--tmpdir=" + runroot], "storage-quota-backend-routing")
+    require(prefix == engine._podman_prefix(storage, runroot), "storage-quota-backend-routing")
     require(arguments.count("--log-driver=passthrough") == 1 and not any(arg.startswith(("--log-driver", "--log-opt"))
             and arg != "--log-driver=passthrough" for arg in arguments)
             and not any(arg.startswith(("--syslog", "--out", "--remote", "--url", "--connection", "--device")) for arg in argv)
@@ -346,6 +446,16 @@ def acquire_existing_quota(root_policy_path, expected_sha256, manifest):
 
 
 @contextmanager
+def _acquire_engine_view(root_policy_path, expected_sha256, manifest):
+    _root()
+    paths = _manifest(manifest)
+    data = identity.decode_json(manifest.canonical_bytes)
+    context = _path(data["context"]["path"])
+    with _acquire_paths(root_policy_path, expected_sha256, (*paths, context), for_engine=True) as view:
+        yield view
+
+
+@contextmanager
 def acquire_existing_evidence_quota(root_policy_path, expected_sha256, evidence_directory):
     """Read-only quota acquisition for the Root-derived retained evidence path.
 
@@ -359,7 +469,7 @@ def acquire_existing_evidence_quota(root_policy_path, expected_sha256, evidence_
 
 
 @contextmanager
-def _acquire_paths(root_policy_path, expected_sha256, mutable):
+def _acquire_paths(root_policy_path, expected_sha256, mutable, *, for_engine=False):
     try:
         policy, proof, stamp = _policy(root_policy_path, expected_sha256)
         with ExitStack() as stack:
@@ -372,7 +482,10 @@ def _acquire_paths(root_policy_path, expected_sha256, mutable):
             backing = retain(_open_file(policy["backing_file"]["path"]))
             paths = tuple((path, retain(engine._directory(path, private=True))) for path in mutable)
             observation = _check(policy, mount, namespace, loop, backing, paths)
-            yield QuotaObservation(expected_sha256, observation.mount_id, observation.total_bytes, observation.total_inodes)
+            if for_engine:
+                yield _EngineView(policy["mount"]["path"], mount, paths)
+            else:
+                yield QuotaObservation(expected_sha256, observation.mount_id, observation.total_bytes, observation.total_inodes)
             require(_policy(root_policy_path, expected_sha256) == (policy, proof, stamp), "storage-quota-policy-drift")
             _check(policy, mount, namespace, loop, backing, paths)
     except Exception:

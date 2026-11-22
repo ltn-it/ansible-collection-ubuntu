@@ -45,6 +45,32 @@ class ExecutorGuardTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             executor._idmapped_preflight(None, None, qualified=True)
 
+    @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "Requires private Root Linux files")
+    def test_startup_reads_podman_id_after_its_separate_write(self):
+        with tempfile.TemporaryDirectory(prefix="engine-cid-", dir="/run") as directory:
+            path = str(Path(directory) / "container.cid")
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb", buffering=0) as writer:
+                self.assertIsNone(executor._cid(path, awaiting_write=True))
+                with self.assertRaisesRegex(Denied, "engine-cidfile"):
+                    executor._cid(path)
+                cid = "1" * 64
+                reader = os.read
+                inode = os.fstat(writer.fileno()).st_ino
+
+                def write_during_read(fd, size):
+                    if os.fstat(fd).st_ino == inode and writer.tell() == 0:
+                        writer.write(cid.encode())
+                    return reader(fd, size)
+
+                with mock.patch.object(os, "read", side_effect=write_during_read):
+                    self.assertIsNone(executor._cid(path, awaiting_write=True))
+                self.assertEqual(executor._cid(path, awaiting_write=True), cid)
+                self.assertEqual(executor._cid(path), cid)
+                writer.seek(0)
+                writer.write(b"z")
+                with self.assertRaisesRegex(Denied, "engine-cidfile"):
+                    executor._cid(path, awaiting_write=True)
+
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
 class RootExecutorTests(unittest.TestCase):
@@ -154,7 +180,7 @@ class RootExecutorTests(unittest.TestCase):
                         os.close(owned.pidfd)
             del executor._PROCESSES[pid]
 
-    def traced_spawn(self):
+    def traced_spawn(self, *, storage_view=None):
         self.private_spawn_causes = []
         previous = sys.gettrace()
         def trace(frame, event, value):
@@ -180,7 +206,7 @@ class RootExecutorTests(unittest.TestCase):
             return trace
         sys.settrace(trace)
         try:
-            return executor._spawn(self.prepared, self.manifest, self.store)
+            return executor._spawn(self.prepared, self.manifest, self.store, storage_view=storage_view)
         finally:
             sys.settrace(previous)
 
@@ -206,14 +232,27 @@ class RootExecutorTests(unittest.TestCase):
             return 0, b""
         raise AssertionError("unexpected fixed engine acquisition")
 
-    def spawn(self):
+    def spawn(self, *, pause_cid_write=False, storage_view=None):
         self.running = True
         errors = []
         bound = threading.Event()
+        opened = threading.Event()
+        read_empty = threading.Event()
         original_bind = self.store.bind_engine_process
+        original_cid = executor._cid
+
         def bind(*args, **kwargs):
             original_bind(*args, **kwargs)
             bound.set()  # Actual durable binding completed; no competing NB read.
+            if pause_cid_write and not opened.wait(2):
+                raise AssertionError("CID writer did not open its file")
+
+        def read_cid(*args, **kwargs):
+            cid = original_cid(*args, **kwargs)
+            if pause_cid_write and cid is None and opened.is_set():
+                read_empty.set()
+            return cid
+
         def cid_writer():
             try:
                 if not bound.wait(2):
@@ -222,6 +261,9 @@ class RootExecutorTests(unittest.TestCase):
                 fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 try:
                     os.fchmod(fd, 0o600)
+                    opened.set()
+                    if pause_cid_write and not read_empty.wait(2):
+                        raise AssertionError("Supervisor never observed the empty CID file")
                     os.write(fd, self.cid.encode())
                     os.fsync(fd)
                 finally:
@@ -232,9 +274,10 @@ class RootExecutorTests(unittest.TestCase):
         thread.start()
         try:
             with mock.patch.object(executor, "_command", side_effect=self.command), \
+                 mock.patch.object(executor, "_cid", side_effect=read_cid), \
                  mock.patch.object(self.store, "bind_engine_process", side_effect=bind):
                 try:
-                    result = self.traced_spawn()
+                    result = self.traced_spawn(storage_view=storage_view)
                 except executor.EngineUnknown:
                     self.fail("private fixed-ELF cause (no token/exception payload): " + repr(self.private_spawn_causes))
         finally:
@@ -247,8 +290,30 @@ class RootExecutorTests(unittest.TestCase):
         return (str(self.fixture.config), self.fixture.sha, self.fixture.fixture.registry,
                 "approved", self.store, self.lease, self.receipt)
 
+    def test_modes_are_restored_after_owned_container_starts(self):
+        original = self.command
+        observed = []
+        storage_view = mock.Mock()
+        storage_view.spawn_options.return_value = {}
+
+        def inspect(manifest, args, seconds=5):
+            self.running = bool(observed)
+            observed.append(self.running)
+            return original(manifest, args, seconds)
+
+        def restore():
+            self.assertEqual(observed, [False, True])
+            self.assertNotIn("engine_container_id", self.engine_effect()[1])
+
+        storage_view.restore_engine_modes.side_effect = restore
+        with mock.patch.object(self, "command", side_effect=inspect):
+            self.spawn(storage_view=storage_view)
+        storage_view.spawn_options.assert_called_once_with()
+        storage_view.restore_engine_modes.assert_called_once_with()
+        self.assertEqual(self.engine_effect()[1]["engine_container_id"], self.cid)
+
     def test_real_fixed_elf_pid_boot_hash_and_private_cid_are_durable(self):
-        result = self.spawn()
+        result = self.spawn(pause_cid_write=True)
         _, effect = self.engine_effect()
         actual = executor._process(effect["engine_process"]["pid"], self.manifest)
         self.assertEqual(effect["state"], "verified")

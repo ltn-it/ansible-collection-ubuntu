@@ -275,8 +275,8 @@ def _reservations(details):
 
 
 def _prefix(manifest):
-    details = identity.decode_json(manifest.canonical_bytes)
-    return [engine.ENGINE, "--root", details["engine"]["storage_root"], "--runroot", details["engine"]["runroot"], "--cgroup-manager=systemd", "--events-backend=none", "--tmpdir=" + details["engine"]["runroot"]]
+    # Both freshly compiled and retained manifests carry the exact backend.
+    return list(manifest.argv[:manifest.argv.index("run")])
 
 
 def _environment(manifest):
@@ -742,10 +742,10 @@ def _preflight(config, prepared, store, manifest):
             raise Denied("engine-native-network-fence-unavailable") from None
         worker = ledger.Worker(**store.read(prepared.lease_id)["worker"])
         with network_fence.acquire_existing_fence(prepared, store, worker, config):
-            with storage_quota.acquire_existing_quota(config.storage_quota_policy_path,
-                    config.storage_quota_policy_sha256, manifest):
+            with storage_quota._acquire_engine_view(config.storage_quota_policy_path,
+                    config.storage_quota_policy_sha256, manifest) as storage_view:
                 _backend(manifest)
-                yield
+                yield storage_view
 
 
 def _bound(config, registry, selector, store, lease_id, receipt):
@@ -875,10 +875,19 @@ def _stable_process(pid, manifest, pidfd):
             time.sleep(0.005)
 
 
-def _cid(path):
+def _cid(path, *, awaiting_write=False):
     if not os.path.lexists(path):
         return None
-    _, raw, _ = installation._file(path, 128, private=True, keep=True)
+    try:
+        _, raw, _ = installation._file(path, 128, private=True, keep=True)
+    except Denied as error:
+        if awaiting_write and error.args == ("installation-file-changed",):
+            return None
+        raise
+    # Podman creates the private file before writing its ID. Only the original
+    # owner's bounded startup poll can wait for that write to complete.
+    if awaiting_write and not raw:
+        return None
     value = raw.decode("ascii").removesuffix("\n")
     require(CID.fullmatch(value) and raw in (value.encode(), value.encode() + b"\n"), "engine-cidfile")
     return value
@@ -900,7 +909,7 @@ def _inspect(manifest, cid):
     return row
 
 
-def _spawn(prepared, manifest, store, effect_id=None):
+def _spawn(prepared, manifest, store, effect_id=None, *, storage_view=None):
     require(os.geteuid() == 0, "engine-executor-root-required")
     require(type(manifest) is engine.EngineManifest and manifest.sha256 == hashlib.sha256(manifest.canonical_bytes).hexdigest()
             and manifest.argv[0] == engine.ENGINE, "engine-compiled-input")
@@ -935,9 +944,11 @@ def _spawn(prepared, manifest, store, effect_id=None):
         cgroup_device, cgroup_inode = _start_cgroup(details, store, prepared.lease_id)
         capture = engine_supervision.Capture(manifest, store, prepared.lease_id, effect, cgroup_device, cgroup_inode)
         from . import runtime_entry
+        options = {} if storage_view is None else storage_view.spawn_options()
         with runtime_entry._spawn_adoption():
             proc = subprocess.Popen(manifest.argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=_environment(manifest), close_fds=True, start_new_session=True, umask=0o077)
+                stderr=subprocess.PIPE, env=_environment(manifest), close_fds=True, start_new_session=True,
+                umask=0o077, **options)
             _UNTRACKED_PROCESSES[proc.pid] = (proc, capture)
             owned = engine_supervision.OwnedRun(proc, None, capture, store, prepared.lease_id, effect)
             owned.prepared = prepared
@@ -949,10 +960,13 @@ def _spawn(prepared, manifest, store, effect_id=None):
         store.bind_engine_process(prepared.lease_id, effect, **process)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            cid = _cid(details["runtime"]["cidfile"])
-            if cid is not None:
-                _inspect(manifest, cid)
+            cid = _cid(details["runtime"]["cidfile"], awaiting_write=True)
+            # Podman writes the CID before StartAttach. Wait for the owned
+            # container to be running before restoring its host path modes.
+            if cid is not None and _inspect(manifest, cid)["State"]["Running"]:
                 require(_stable_process(proc.pid, manifest, pidfd) == process, "engine-supervisor-replaced")
+                if storage_view is not None:
+                    storage_view.restore_engine_modes()
                 store.bind_engine_container(prepared.lease_id, effect, cid)
                 owned.tracked(process, cid)
                 store.record(prepared.lease_id, effect, "verified", evidence_sha256=ledger.digest({
@@ -961,7 +975,8 @@ def _spawn(prepared, manifest, store, effect_id=None):
             require(owned.pump(0.02) is None, "engine-supervisor-exited-before-tracking")
             require(not capture.problem, "engine-capture-limit-before-tracking")
         raise Denied("engine-tracking-timeout")
-    except Exception:
+    except Exception as error:
+        identity._diagnostic_failed("engine-spawn", error)
         if effect is not None:
             try:
                 store.record(prepared.lease_id, effect, "unknown", evidence_sha256=ledger.digest({"stage": "engine-start"}))
@@ -991,7 +1006,7 @@ def _start_locked(session, registry, selector, store, lease_id, receipt):
     try:
         prepared, manifest = _bound(config, registry, selector, store, lease_id, receipt)
         _start_budget(prepared, manifest)
-        with _preflight(config, prepared, store, manifest):
+        with _preflight(config, prepared, store, manifest) as storage_view:
             _bound(config, registry, selector, store, lease_id, receipt)
             _start_budget(prepared, manifest)
             effect = store.begin(lease_id, "engine-start", "engine:lit-lease-" + lease_id)
@@ -1001,7 +1016,9 @@ def _start_locked(session, registry, selector, store, lease_id, receipt):
             current, compiled = _bound(config, registry, selector, store, lease_id, receipt)
             require(current == prepared and compiled == manifest, "engine-probe-binding-drift")
             _start_budget(current, compiled)
-            return _spawn(prepared, manifest, store, effect)
+            from . import storage_quota
+            require(type(storage_view) is storage_quota._EngineView, "engine-storage-view-required")
+            return _spawn(prepared, manifest, store, effect, storage_view=storage_view)
     except EngineUnknown:
         raise
     except Exception:

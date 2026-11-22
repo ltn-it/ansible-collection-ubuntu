@@ -299,7 +299,17 @@ def _environment(value, runner_uid, cell_uid, cell_gid):
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "/workspace"}
 
 
-def _compile(data, descriptor_sha256, *, retained_output=None):
+def _podman_prefix(storage_root, runroot, *, legacy=False):
+    argv = [ENGINE, "--root", storage_root, "--runroot", runroot, "--cgroup-manager=systemd",
+            "--events-backend=none", "--tmpdir=" + runroot]
+    if not legacy:
+        # The quota preflight requires an already private loop mount.
+        # Avoid a second overlay-home bind that survives a failed CLI.
+        argv += ["--storage-driver=overlay", "--storage-opt=overlay.skip_mount_home=true"]
+    return argv
+
+
+def _compile(data, descriptor_sha256, *, retained_output=None, legacy_storage=False):
     _keys(data, {"schema", "image", "runner_uid", "runner_gid", "cell_uid", "cell_gid", "uid_map", "gid_map", "limits",
                  "network_namespace_path", "cgroup_parent", "engine", "archives", "trees", "context_path", "output_path", "environment", "capture"})
     require(type(data["schema"]) is int and data["schema"] == 1, "engine-schema")
@@ -361,8 +371,7 @@ def _compile(data, descriptor_sha256, *, retained_output=None):
                "labels": {"io.lightning-it.lease": lease_id, "io.lightning-it.descriptor": _hash(descriptor_sha256)}}
     # Podman 4.9 rejects uid/gid options on tmpfs mounts. A sticky directory
     # remains writable by the mapped cell user on this per-container mount.
-    argv = [ENGINE, "--root", engine["storage_root"], "--runroot", engine["runroot"], "--cgroup-manager=systemd",
-            "--events-backend=none", "--tmpdir=" + engine["runroot"],
+    argv = [*_podman_prefix(engine["storage_root"], engine["runroot"], legacy=legacy_storage),
             "run", "--rm", "--log-driver=passthrough", "--name=" + runtime["name"], "--cidfile=" + runtime["cidfile"],
             *["--label=" + key + "=" + value for key, value in sorted(runtime["labels"].items())],
             "--pull=never", "--platform=linux/amd64", "--read-only", "--cap-drop=ALL",
@@ -431,7 +440,10 @@ def validate_retained_policy(path, descriptor_sha256, expected_manifest_sha256):
         require(saved.sha256 == _hash(expected_manifest_sha256), "engine-retained-manifest-drift")
         original = decode_json(canonical)
         require(_canonical(original) == canonical, "engine-retained-canonical")
-        argv, environment, details = _compile(data, descriptor_sha256, retained_output=original["output"])
+        legacy_prefix = _podman_prefix(data["engine"]["storage_root"], data["engine"]["runroot"], legacy=True)
+        legacy_storage = original["argv"][:len(legacy_prefix) + 1] == [*legacy_prefix, "run"]
+        argv, environment, details = _compile(data, descriptor_sha256, retained_output=original["output"],
+                                              legacy_storage=legacy_storage)
         details["descriptor"] = {"path": path, "sha256": descriptor_sha256}
         if original["argv"] != details["argv"]:
             # Earlier signed manifests also encoded the mapped owner in this

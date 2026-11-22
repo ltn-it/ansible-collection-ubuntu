@@ -393,6 +393,10 @@ class RootStorageQuotaTests(unittest.TestCase):
         def replace_arg(data, old, new):
             data["argv"][data["argv"].index(old)] = new
         changes = [lambda d: replace_arg(d, "--events-backend=none", "--events-backend=journald"),
+                   lambda d: replace_arg(d, "--storage-driver=overlay", "--storage-driver=vfs"),
+                   lambda d: d["argv"].remove("--storage-opt=overlay.skip_mount_home=true"),
+                   lambda d: replace_arg(d, "--storage-opt=overlay.skip_mount_home=true",
+                                         "--storage-opt=overlay.skip_mount_home=false"),
                    lambda d: replace_arg(d, "--log-driver=passthrough", "--log-driver=k8s-file"),
                    lambda d: replace_arg(d, "--tmpdir=" + d["engine"]["runroot"], "--tmpdir=/var/tmp"),
                    lambda d: d["argv"].insert(1, "--syslog"),

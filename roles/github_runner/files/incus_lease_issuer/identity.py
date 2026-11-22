@@ -48,7 +48,7 @@ _DIAGNOSTIC_STAGES = frozenset({
     "native-current", "native-histories", "intake-stage", "intake-discovery",
     "snapshot-acquisition", "snapshot-readback", "observer", "observer-lookup",
     "observer-native", "runtime-selected", "continuation-origin", "continuation-commit",
-    "namespace-census", "collector-finish",
+    "namespace-census", "collector-finish", "engine-spawn",
 })
 _DIAGNOSTIC_REASONS = frozenset({
     "fence-proc-acquire-unstable", "bootstrap-challenge-expired", "bootstrap-native-denied", "bootstrap-native-drift",
@@ -88,6 +88,8 @@ _DIAGNOSTIC_REASONS = frozenset({
     "intake-snapshot-held", "intake-stage-held", "run-configuration-held",
     "run-config-lookup-unique", "run-config-observer", "run-configuration-lookup-held", "runtime-observer-original-lease",
     "runtime-observer-original-invocation", "runtime-bootstrap-selector", "ledger-busy",
+    "engine-cidfile", "engine-container-inspect", "engine-container-not-owned",
+    "engine-supervisor-exited-before-tracking", "engine-capture-limit-before-tracking", "engine-tracking-timeout",
 })
 
 
