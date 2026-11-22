@@ -985,7 +985,10 @@ def _spawn(prepared, manifest, store, effect_id=None, *, storage_view=None):
         raise Denied("engine-tracking-timeout")
     except Exception as error:
         identity._diagnostic_failed("engine-spawn", error)
-        if tracked_cid is not None and storage_view is not None and not restore_attempted:
+        # A spawned Podman may have changed a pinned leaf before it wrote a
+        # CID. The original view can restore those two leaves without using
+        # a container identifier or claiming the startup outcome.
+        if proc is not None and storage_view is not None and not restore_attempted:
             try:
                 storage_view.restore_engine_modes()
             except Exception as privacy_error:

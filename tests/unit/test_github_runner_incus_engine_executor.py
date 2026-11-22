@@ -374,6 +374,17 @@ class RootExecutorTests(unittest.TestCase):
         effect = self.engine_effect()[1]
         self.assertEqual((effect["state"], effect["engine_container_id"]), ("unknown", self.cid))
 
+    def test_failed_start_without_a_cid_still_restores_the_pinned_storage_modes(self):
+        storage_view = mock.Mock()
+        storage_view.spawn_options.return_value = {}
+        with mock.patch.object(executor, "_cid", side_effect=Denied("fixture unavailable CID evidence")):
+            with self.assertRaises(executor.EngineUnknown):
+                self.traced_spawn(storage_view=storage_view)
+        storage_view.restore_engine_modes.assert_called_once_with()
+        effect = self.engine_effect()[1]
+        self.assertEqual(effect["state"], "unknown")
+        self.assertNotIn("engine_container_id", effect)
+
     def test_real_fixed_elf_pid_boot_hash_and_private_cid_are_durable(self):
         result = self.spawn(pause_cid_write=True)
         _, effect = self.engine_effect()
