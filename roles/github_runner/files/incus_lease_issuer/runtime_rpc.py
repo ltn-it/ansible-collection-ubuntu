@@ -706,16 +706,22 @@ class BootstrapRuntimeRPC:
 
     @identity._diagnostic_request(reuse=True)
     def handle(self, connected):
-        from . import run_factory
+        from . import run_factory, run_intake
         operation, handed_off, staging = None, False, False
         try:
             admission._socket(connected)
             message = _read(connected, 1024, IO_SECONDS)
-            require(set(message) in ({"schema", "cell", "operation"}, {"schema", "cell", "operation", "configuration"})
+            require(set(message) in ({"schema", "cell", "operation"}, {"schema", "cell", "operation", "configuration"},
+                                     {"schema", "cell", "operation", "snapshot"})
                     and type(message.get("schema")) is int and message["schema"] == 2
                     and type(message.get("cell")) is str and SELECTOR.fullmatch(message["cell"])
                     and message.get("operation") in OPERATIONS | OBSERVER_OPERATIONS, "runtime-bootstrap-selector")
             selector, operation = message["cell"], message["operation"]
+            split_intake = "snapshot" in message
+            snapshot = message.get("snapshot")
+            if split_intake:
+                require(operation == "run" and (snapshot is None
+                    or type(snapshot) is str and ledger.HEX.fullmatch(snapshot)), "runtime-bootstrap-snapshot")
             bootstrap = run_factory.load_bootstrap(self._bootstrap.path, self._bootstrap.sha256)
             if operation in OBSERVER_OPERATIONS:
                 require("configuration" not in message, "runtime-observer-no-admission-locator")
@@ -727,13 +733,23 @@ class BootstrapRuntimeRPC:
                 handed_off = True
                 return RuntimeRPC(configuration.runtime_config_path, configuration.runtime_config_sha256,
                     derived_configuration=configuration)._handle_selected(connected, (selector, operation))
-            challenge = run_factory.challenge_bootstrap(connected, bootstrap, selector)
+            challenge = run_factory.challenge_bootstrap(connected, bootstrap, selector,
+                                                         snapshot_receipt_sha256=snapshot)
             _write(connected, {"schema": 2, "type": "challenge", "operation": operation,
                               "phase": "intake", **challenge})
             request = _authentication(connected, operation, challenge["nonce"],
                                       bootstrap.value["runtime"]["authentication_timeout_seconds"])
             proof = run_factory.verify_bootstrap_native(connected, bootstrap, selector, request["nonce"],
-                                                        request["token"], request["api_token"])
+                                                        request["token"], request["api_token"],
+                                                        snapshot_receipt_sha256=snapshot)
+            if split_intake and snapshot is None:
+                staging = True
+                sealed = run_intake.stage_run_snapshot(proof, connected, proof.policy, request["token"], request["api_token"])
+                del request["token"], request["api_token"]
+                result = {"schema": 2, "type": "snapshot-ready", "operation": operation, "cell": selector,
+                    "snapshot": sealed.receipt_sha256, "lease_created": False}
+                _write(connected, result)
+                return result
             if operation == "run":
                 staging = True
                 # This factory performs the single authoritative archive stage;

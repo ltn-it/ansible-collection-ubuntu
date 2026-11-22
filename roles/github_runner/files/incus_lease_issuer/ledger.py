@@ -34,7 +34,8 @@ AUDIENCE = "urn:lightning-it:legacy-incus:"
 # Fixed trusted implementation path; never a request/configuration parameter.
 ENGINE_EXECUTABLE = "/usr/bin/podman"
 MAX_CAPTURE_STREAM_BYTES = 64 * 1024 * 1024
-RUNTIME_OPERATIONS = frozenset({"run", "heartbeat", "status", "cancel", "recover", "record-upload"})
+RUNTIME_OPERATIONS = frozenset({"run", "heartbeat", "status", "cancel", "recover", "record-upload",
+                                "bootstrap-configuration"})
 CERTIFICATE_AUTHORIZER_PROFILE = "incus-7.6-tls-8f5e6c2235f6424ec59d3dc06f12e344a4a416e2"
 
 

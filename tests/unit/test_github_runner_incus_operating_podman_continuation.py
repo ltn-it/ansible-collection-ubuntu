@@ -42,6 +42,26 @@ class PodmanContinuationTests(unittest.TestCase):
     def validate(self, route):
         return cells.validate_continuation_descriptor(route, "c" * 64, "d" * 40)
 
+    def test_successor_preserves_exact_workflow_and_cannot_readmit_the_failed_push(self):
+        successor = {
+            "source_sha": "a" * 40, "run_id": 90000000001, "run_attempt": 1,
+            "first_parent": cells.FOURTEENTH_MAIN, "source_workflow_sha256": cells.THIRTEENTH_SUCCESSOR_WORKFLOW,
+            "reusable_sha": cells.THIRTEENTH_SUCCESSOR_REUSABLE,
+        }
+        route = {"schema": 14, "reason": cells.FOURTEENTH_REASON,
+                 "qualification": {"path": "/unit/qualification.json", "sha256": cells.FOURTEENTH_QUALIFICATION},
+                 "successor": successor}
+        digest = successor["source_workflow_sha256"]
+        reusable = successor["reusable_sha"]
+        self.assertEqual(cells.validate_continuation_descriptor(route, digest, reusable), route)
+        commit = {"sha": successor["source_sha"], "parents": [{"sha": cells.FOURTEENTH_MAIN}]}
+        cells.validate_continuation_commit(commit, route, successor["source_sha"], successor["run_id"], reusable)
+        for invalid in ({"run_attempt": 2}, {"run_id": cells.FOURTEENTH_RUN},
+                        {"source_sha": cells.FOURTEENTH_MAIN}, {"source_sha": cells.THIRTEENTH_MAIN},
+                        {"first_parent": cells.THIRTEENTH_MAIN}, {"reusable_sha": "b" * 40}):
+            with self.subTest(invalid=invalid), self.assertRaises(identity.Denied):
+                cells.validate_continuation_descriptor(route | {"successor": successor | invalid}, digest, reusable)
+
     def test_unproduced_retirement_cannot_authorize_a_successor(self):
         with patch.object(cells, "TWELFTH_QUALIFICATION", None):
             with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-qualification"):
@@ -612,7 +632,7 @@ class PodmanRetirementRevalidationTests(unittest.TestCase):
             stack.enter_context(patch.multiple(
                 run_factory, load_bootstrap=Mock(return_value=self.original),
                 _continuation_receipt=Mock(return_value=(descriptor, self.previous)),
-                _retired_original_entries=Mock(), _read_complete=Mock(return_value=(self.configuration, origin)),
+                _retired_original_entries=Mock(return_value=({}, self.configuration, origin)),
                 _twelfth_journal=Mock(return_value=self.rows),
             ))
             stack.enter_context(patch.object(

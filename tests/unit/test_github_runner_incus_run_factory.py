@@ -152,6 +152,24 @@ class RootBootstrapTests(unittest.TestCase):
         with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
             with store._transaction() as state: self.assertEqual(state["leases"], {})
 
+    def test_configuration_requires_distinct_nonce_for_exact_snapshot(self):
+        snapshot = "a" * 64
+        stage = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector)
+        config = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector,
+                                             snapshot_receipt_sha256=snapshot)
+        self.assertNotEqual(config["nonce"], stage["nonce"])
+        self.native.claims["aud"] = config["audience"]
+        token = self.native.token()
+        for other in (None, "b" * 64):
+            with self.assertRaisesRegex(Denied, "^bootstrap-native-denied$"):
+                factory.verify_bootstrap_native(self.server, self.bootstrap, self.selector,
+                    config["nonce"], token, "synthetic-job-token", snapshot_receipt_sha256=other)
+        proof = factory.verify_bootstrap_native(self.server, self.bootstrap, self.selector, config["nonce"],
+            token, "synthetic-job-token", snapshot_receipt_sha256=snapshot)
+        self.assertEqual(proof.snapshot_receipt_sha256, snapshot)
+        self.assertEqual(factory.require_bootstrap_native(proof, self.server, proof.policy, token,
+            "synthetic-job-token")[1], proof.identity)
+
     def test_invalid_workflow_cannot_trigger_final_job_read(self):
         challenge = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector)
         self.native.claims["aud"] = challenge["audience"]
@@ -174,29 +192,23 @@ class RootBootstrapTests(unittest.TestCase):
         collector.discard_worker_acquisition.assert_called_once()
         collector.finish_worker_acquisition.assert_not_called()
 
-    def test_immutable_commit_read_joins_on_failed_origin_before_validation(self):
+    def test_failed_origin_stops_before_commit_read_or_validation(self):
         challenge = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector)
         self.native.claims["aud"] = challenge["audience"]
         selected = factory.derive_selection(self.bootstrap, self.selector, self.native.claims["sha"])
         successor = {"source_sha": selected.identity.caller_sha, "run_id": self.native.run["id"],
                      "reusable_sha": selected.identity.reusable_sha}
         qualification = ({"schema": 9, "successor": successor, "qualification": {"sha256": "a" * 64}}, {}, None, (1,))
-        read_started = threading.Event()
-        origin_checked = threading.Event()
-        read_finished = threading.Event()
+        commit_reads = []
         reader = identity.HTTPSReader()
         read = reader.read
 
         def read_commit(url, **kwargs):
             if "/git/commits/" in url:
-                read_started.set()
-                self.assertTrue(origin_checked.wait(timeout=5))
-                read_finished.set()
+                commit_reads.append(url)
             return read(url, **kwargs)
 
         def fail_origin(*args):
-            self.assertTrue(read_started.wait(timeout=5))
-            origin_checked.set()
             raise Denied("origin-drift")
 
         with mock.patch.object(reader, "read", side_effect=read_commit), \
@@ -206,7 +218,7 @@ class RootBootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "origin-drift"):
                 factory._native(self.server, selected, challenge["nonce"], self.native.token(),
                                 "synthetic-job-token", check_origin=False)
-        self.assertTrue(read_finished.is_set())
+        self.assertEqual(commit_reads, [])
         validate.assert_not_called()
         collector.finish_worker_acquisition.assert_not_called()
         collector.discard_worker_acquisition.assert_called_once()
@@ -369,6 +381,91 @@ class RootConfigurationTests(unittest.TestCase):
         self.assertFalse((Path(result.directory) / "published.json").exists())
         with ledger.Ledger(self.helper.store_path, clock=factory.time.time) as store:
             with store._transaction() as state: self.assertEqual(state["leases"], {})
+
+    def test_split_intake_preserves_real_snapshot_and_resolves_config_with_separate_authenticated_proof(self):
+        intake = factory.run_intake
+        rpc = factory.runtime_rpc
+        acquisition = intake.acquisition
+        staged = self.root / "split-intake"
+        bindings = self.root / "split-bindings"
+        for path in (staged, bindings):
+            path.mkdir(mode=0o700)
+        acquired = self.snapshot.snapshot.acquisition
+        commit_requests = tuple(acquisition.CommitRequest(item.repository, item.repository_id, item.commit_sha)
+                                for item in (acquired.source, acquired.controller))
+        request = intake.MemoryRequest(*commit_requests, acquired.artifact, acquisition.MAX_ARCHIVE, 20000,
+                                       512 * 1024 * 1024, 240)
+        native = {"fixture": "native artifact projection"}
+        proven = replace(acquired, provenance_sha256=hashlib.sha256(repr(native).encode("ascii")).hexdigest())
+
+        def download(_request, _api, *, artifact_fd, source_fd, controller_fd, **_):
+            for fd, raw in zip((artifact_fd, source_fd, controller_fd),
+                               (self.pub.artifact_raw, self.pub.source_raw, self.pub.controller_raw)):
+                with os.fdopen(os.dup(fd), "wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            return proven
+
+        def read_tree(commit, *_):
+            original = acquired.source if commit.repository == factory.SOURCE else acquired.controller
+            return original.tree_sha, original.files, original.directories
+
+        dispatcher = rpc.BootstrapRuntimeRPC(self.bootstrap.path, self.bootstrap.sha256)
+        phases = []
+
+        def round_trip(snapshot):
+            received, errors = [], []
+            server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+            with server, client:
+                def participate():
+                    try:
+                        rpc._write(client, {"schema": 2, "cell": self.selector,
+                                            "operation": "run", "snapshot": snapshot})
+                        challenge = rpc._read(client, rpc.MAX_REPLY, 8)
+                        phases.append(challenge["nonce"])
+                        issued_at = int(factory.time.time())
+                        self.helper.native.claims.update(aud=challenge["audience"], jti="split-fixture-" + str(len(phases)),
+                                                         iat=issued_at, nbf=issued_at, exp=issued_at + 300)
+                        rpc._write(client, {"schema": 2, "operation": "run", "nonce": challenge["nonce"],
+                            "token": self.helper.native.token(), "api_token": "synthetic-job-token"})
+                        client.shutdown(socket.SHUT_WR)
+                        received.append(rpc._read(client, rpc.MAX_REPLY, 8))
+                    except Exception as error:
+                        errors.append(error)
+
+                thread = threading.Thread(target=participate)
+                thread.start()
+                try:
+                    outcome = dispatcher.handle(server)
+                finally:
+                    thread.join(9)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(received, [outcome])
+                return outcome
+
+        self.stage.stop()  # Use the actual archived-file writer and reader.
+        with mock.patch.object(intake, "ROOT", str(staged)), mock.patch.object(rpc, "BOOTSTRAP_BINDINGS", str(bindings)), \
+             mock.patch.object(intake, "_native_request", return_value=request), \
+             mock.patch.object(intake, "_acquire_memory", side_effect=download) as writer, \
+             mock.patch.object(acquisition, "_tree", side_effect=read_tree), mock.patch.object(acquisition, "_native", return_value=native):
+            snapshot = round_trip(None)
+            self.assertEqual(snapshot["type"], "snapshot-ready")
+            self.assertEqual(list(self.directory.iterdir()), [])
+            self.assertEqual(list(bindings.iterdir()), [])
+            failed = round_trip("0" * 64)
+            self.assertEqual(failed["disposition"], "unknown-hold")
+            self.assertEqual(list(self.directory.iterdir()), [])
+            ready = round_trip(snapshot["snapshot"])
+            self.assertEqual(ready["type"], "intake-ready")
+            result = factory.resolve_configuration(self.bootstrap, self.selector, ready["configuration"])
+            self.assertEqual(result.manifest_sha256, ready["configuration"])
+            self.assertEqual(len(list(bindings.iterdir())), 1)
+            self.assertEqual(writer.call_count, 1)
+        self.assertEqual(len(set(phases)), 3)
+        with ledger.Ledger(self.helper.store_path, clock=factory.time.time) as store:
+            self.assertEqual(store.lease_ids(), ())
 
     def test_same_job_reuses_original_deadline_and_inodes_never_extends(self):
         first = self.create()
