@@ -661,7 +661,8 @@ def main():
                 selected = load_bootstrap(config_path,digest)
                 require(selected.value["preparation"]["signing_public_key_hex"] == public_pin)
                 client = decode(sealed("/etc/lightning-it/incus-runtime-client.json",private=False))
-                require(client == {"schema":2,"socket_path":SOCKET,"signing_public_key_hex":public_pin})
+                require(client == {"schema":2,"socket_path":SOCKET,"signing_public_key_hex":public_pin,
+                                   "split_intake":True})
             else:
                 from incus_lease_issuer.runtime_rpc import RuntimeRPC
                 dispatcher = RuntimeRPC(config_path,digest)

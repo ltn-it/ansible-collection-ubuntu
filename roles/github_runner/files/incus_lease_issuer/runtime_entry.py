@@ -114,7 +114,8 @@ def serve_inherited():
         require(again == value and after == proof and after_stamp == stamp, "runtime-entry-anchor-drift")
         handed_off = True
         outcome = dispatcher.handle(connected)
-        if outcome.get("type") in {"result", "intake-ready", "final-receipt", "operating-receipt", "operating-terminal"}:
+        if outcome.get("type") in {"result", "snapshot-ready", "intake-ready", "final-receipt",
+                                   "operating-receipt", "operating-terminal"}:
             return 0
         if outcome.get("type") == "terminal" and outcome.get("capture", {}).get("state") == "verified":
             return 0

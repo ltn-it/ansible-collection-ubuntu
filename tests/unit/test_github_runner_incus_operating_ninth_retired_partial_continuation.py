@@ -286,8 +286,8 @@ class NinthCollectorTests(unittest.TestCase):
         patch(factory, "_eighth_failed_prefix_projection", return_value=self.previous["failed_prefix"])
         patch(factory, "_ninth_preserved_journals", return_value={k: fixed[k] for k in (
             "native_journal", "prior_journal", "veth_receipt", "certificate_receipt")})
-        patch(factory, "_ninth_original_entries", return_value={k: fixed[k] for k in ("intake", "configuration")})
-        patch(factory, "_read_complete", return_value=(object(), None))
+        patch(factory, "_ninth_original_entries",
+              return_value=({k: fixed[k] for k in ("intake", "configuration")}, object(), None))
         self.observe = patch(factory, "_ninth_original_resources_absent")
         for key, module in (("intake", factory.run_intake), ("configuration", factory)):
             root = fixture.root / key
@@ -429,8 +429,11 @@ class NinthOriginalEntryReaderTests(unittest.TestCase):
                 "NINTH_JOB": cells.EIGHTH_JOB,
             }.items():
                 stack.enter_context(mock.patch.object(cells, name, value))
-            self.assertEqual(factory._ninth_original_entries(old, revalidating=False), expected)
-            self.assertEqual(factory._ninth_original_entries(old, revalidating=True), expected)
+            for revalidating in (False, True):
+                entries, config, receipt = factory._ninth_original_entries(old, revalidating=revalidating)
+                self.assertEqual(entries, expected)
+                self.assertEqual(config.manifest_sha256, expected["configuration"]["receipt_sha256"])
+                self.assertEqual(receipt["invocation"]["job_id"], cells.EIGHTH_JOB)
 
 
 class NinthNativeDispatchTests(unittest.TestCase):

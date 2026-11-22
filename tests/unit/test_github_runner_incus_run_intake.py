@@ -330,11 +330,12 @@ class RootStageTests(unittest.TestCase):
         self.native_calls += 1
         return self.worker, self.who, 240
 
-    def stage(self, ticket=None):
+    def stage(self, ticket=None, *, expected_receipt_sha256=None):
         with mock.patch.object(intake.admission, "require_intake_native", create=True,
                                side_effect=self.ticket if ticket is None else ticket), \
              mock.patch.object(acquisition.http.client, "HTTPSConnection", side_effect=self.fx.factory):
-            return intake.stage_run_snapshot(object(), object(), self.selected, "fake-oidc", self.helper.token)
+            return intake.stage_run_snapshot(object(), object(), self.selected, "fake-oidc", self.helper.token,
+                expected_receipt_sha256=expected_receipt_sha256)
 
     def downloads(self):
         return len([path for host, _, path, _ in self.fx.calls
@@ -367,6 +368,18 @@ class RootStageTests(unittest.TestCase):
         self.assertEqual(Path(first.directory, "intent.json").read_bytes(), original)
         self.assertEqual(json.loads(original)["original_job"]["job_id"], 551)
         self.assertEqual(self.downloads(), 1)
+
+    def test_configuration_intake_requires_the_exact_complete_snapshot_without_creating_any_stage(self):
+        with self.assertRaisesRegex(Denied, "^intake-stage-held$"):
+            self.stage(expected_receipt_sha256="0" * 64)
+        self.assertEqual(list(self.root.iterdir()), [])
+        snapshot = self.stage()
+        before = self.stamps(snapshot.directory)
+        with self.assertRaisesRegex(Denied, "^intake-stage-held$"):
+            self.stage(expected_receipt_sha256="0" * 64)
+        self.assertEqual(self.stage(expected_receipt_sha256=snapshot.receipt_sha256), snapshot)
+        self.assertEqual(self.downloads(), 1)
+        self.assertEqual(self.stamps(snapshot.directory), before)
 
     def test_partial_original_intent_holds_without_second_acquisition_or_repair(self):
         with mock.patch.object(intake, "acquire_run_snapshot", side_effect=Denied("possible partial")) as acquire:

@@ -487,6 +487,15 @@ configuration preserve these exact paths. A second identical preparation is
 idempotent; replacement of a different existing payload/configuration requires
 a separately qualified inactive update procedure and is deliberately refused.
 
+Bootstrap clients stage the source and controller archives under a nonce-bound
+GitHub identity. After the broker seals and verifies the snapshot, the client
+opens another connection and requests a distinct nonce scoped to that snapshot.
+The broker revalidates the GitHub assignment and reads the exact sealed
+archives before generating the private job configuration. Lease preparation
+requires a third authenticated connection. Each connection keeps its original
+authorization lifetime. An incomplete stage or uncertain response leaves any
+existing receipts available for readback.
+
 This source unit does not bootstrap a native engine, establish host firewall
 baseline, migrate any registered runner, authorize a custodian/window/retention,
 activate a watchdog, or qualify service hardening/runtime privileges. Actual
