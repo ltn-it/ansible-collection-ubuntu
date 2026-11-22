@@ -74,7 +74,8 @@ a=sys.argv[1:]
 graph=Path(a[a.index("--root")+1]); run=Path(a[a.index("--runroot")+1])
 assert os.geteuid()==0 and os.environ["TMPDIR"]==str(run)
 assert os.environ["HOME"]==str(run) and "HTTP_PROXY" not in os.environ
-command=a[7:]
+assert a[7:9]==["--storage-driver=overlay","--storage-opt=overlay.skip_mount_home=true"]
+command=a[9:]
 mode=MODE
 image=IMAGE
 metadata={"Digest":"sha256:"+INDEX,"Id":"sha256:"+CONFIG,"Architecture":"amd64","Os":"linux"}

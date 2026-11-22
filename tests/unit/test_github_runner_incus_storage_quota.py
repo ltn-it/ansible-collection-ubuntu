@@ -5,12 +5,15 @@ regular-file pseudo-loop negatives remain real. Only Parent runs proper EE.
 """
 from contextlib import contextmanager
 from copy import deepcopy
+import ctypes
 from dataclasses import replace
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace, ModuleType
@@ -95,6 +98,134 @@ class RootFilesystemStatTests(unittest.TestCase):
         self.assertEqual(counts["calls"], 35)
         self.assertEqual(counts["library"], 1)
         self.assertEqual(counts["symbol"], 1)
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux proper EE only")
+class RootEngineStorageViewTests(unittest.TestCase):
+    def setUp(self):
+        base = Path("/run/proof")
+        if not base.is_dir() or base.stat().st_uid != 0 or stat.S_IMODE(base.stat().st_mode) != 0o700:
+            self.skipTest("requires private Root0700 /run/proof")
+        # The quota itself is private. Its outer ancestors must already have
+        # traversal bits so Podman cannot widen an existing host directory.
+        temporary = tempfile.TemporaryDirectory(prefix="storage-view-", dir=base.parent)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.root.chmod(0o711)
+        self.slot = self.root / "quota"
+        self.graph = self.slot / "storage" / "graph"
+        self.runroot = self.slot / "transient" / "runroot"
+        self.output = self.slot / "results" / "output"
+        self.inputs = self.slot / "inputs" / "workspace"
+        for path in (self.slot, self.graph.parent, self.runroot.parent, self.output.parent,
+                     self.inputs.parent, self.graph, self.runroot, self.output, self.inputs):
+            path.mkdir(mode=0o700)
+        self.fds = {path: os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    for path in (self.slot, self.graph, self.runroot, self.output, self.inputs)}
+        for fd in self.fds.values():
+            self.addCleanup(os.close, fd)
+        paths = tuple((str(path), self.fds[path]) for path in (self.graph, self.runroot, self.output))
+        self.view = quota._EngineView(str(self.slot), self.fds[self.slot], paths,
+                                      ((str(self.inputs), self.fds[self.inputs]),))
+
+    def test_modes_restored_on_pinned_engine_leaves_only(self):
+        for path in (self.graph, self.runroot):
+            path.chmod(0o711)
+        self.view.restore_engine_modes()
+        self.assertEqual([stat.S_IMODE(path.stat().st_mode) for path in self.fds], [0o700] * len(self.fds))
+
+    def test_replaced_path_is_rejected_before_child_creation(self):
+        self.graph.rename(self.graph.with_name("original"))
+        self.graph.mkdir(mode=0o700)
+        with self.assertRaisesRegex(Denied, "storage-view-directory-replaced"):
+            self.view.spawn_options()
+
+    def test_failed_clone_and_replaced_clone_are_denied_before_covering_quota(self):
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement):
+                library = mock.Mock()
+                library.unshare.return_value = 0
+                library.mount.return_value = 0
+                clone = os.dup(self.fds[self.runroot]) if replacement else -1
+                library.syscall.return_value = clone
+                expected = "storage-view-source-replaced" if replacement else "storage-view-open-tree"
+                with mock.patch.object(quota.ctypes, "CDLL", return_value=library):
+                    with self.assertRaisesRegex(Denied, expected):
+                        self.view._prepare_child()
+                library.mount.assert_called_once_with(None, b"/", None, quota.MS_REC | quota.MS_PRIVATE, None)
+                if replacement:
+                    with self.assertRaises(OSError):
+                        os.fstat(clone)
+
+    def test_native_child_keeps_only_selected_quota_paths_and_recursively_readonly_input(self):
+        sibling = self.slot / "untested-sibling"
+        sibling.write_bytes(b"host-only")
+        nested = self.inputs / "nested"
+        nested.mkdir(mode=0o700)
+        external = self.root / "input-mount-source"
+        external.mkdir(mode=0o700)
+        (self.inputs / "plain").write_bytes(b"input")
+        (external / "file").write_bytes(b"nested input")
+        # Create the nested input mount from an isolated process. The product
+        # then creates another mount namespace for the actual child.
+        helper = r"""
+import ctypes, errno, os, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from incus_lease_issuer import storage_quota as quota
+
+slot, graph, runroot, output, inputs, external = map(Path, sys.argv[2:])
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.unshare(quota.CLONE_NEWNS):
+    if ctypes.get_errno() in (errno.EPERM, errno.EINVAL, errno.ENOSYS):
+        sys.exit(77)
+    raise OSError(ctypes.get_errno(), "test namespace")
+assert libc.mount(None, b"/", None, quota.MS_REC | quota.MS_PRIVATE, None) == 0
+assert libc.mount(os.fsencode(external), os.fsencode(inputs / "nested"), None, 4096, None) == 0
+paths = (slot, graph, runroot, output, inputs)
+fds = {path: os.open(path, os.O_RDONLY | os.O_DIRECTORY) for path in paths}
+view = quota._EngineView(str(slot), fds[slot], tuple((str(p), fds[p]) for p in paths[1:4]),
+                         ((str(inputs), fds[inputs]),))
+original_mounts = Path("/proc/self/mountinfo").read_bytes()
+child = '''
+import errno, sys
+from pathlib import Path
+slot, graph, output, inputs = map(Path, sys.argv[1:])
+assert not (slot / "untested-sibling").exists()
+assert (inputs / "plain").read_bytes() == b"input"
+assert (inputs / "nested" / "file").read_bytes() == b"nested input"
+for path in (inputs / "plain", inputs / "nested" / "file"):
+    try:
+        path.write_bytes(b"mutation")
+    except OSError as error:
+        assert error.errno == errno.EROFS
+    else:
+        raise AssertionError("authenticated input was writable")
+(graph / "persist").write_bytes(b"graph")
+(output / "persist").write_bytes(b"output")
+'''
+try:
+    subprocess.run([sys.executable, "-B", "-c", child, *map(str, (slot, graph, output, inputs))],
+                   check=True, timeout=15, **view.spawn_options())
+    assert Path("/proc/self/mountinfo").read_bytes() == original_mounts
+finally:
+    for fd in fds.values():
+        os.close(fd)
+"""
+        before = Path("/proc/self/mountinfo").read_bytes()
+        result = subprocess.run([sys.executable, "-B", "-c", helper, str(FILES), *map(str, (
+            self.slot, self.graph, self.runroot, self.output, self.inputs, external))],
+            capture_output=True, text=True, timeout=25)
+        if result.returncode == 77:
+            self.skipTest("mount namespace capability unavailable for the native child fixture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path("/proc/self/mountinfo").read_bytes(), before)
+        self.assertEqual(sibling.read_bytes(), b"host-only")
+        self.assertEqual((self.graph / "persist").read_bytes(), b"graph")
+        self.assertEqual((self.output / "persist").read_bytes(), b"output")
+        self.assertEqual((self.inputs / "plain").read_bytes(), b"input")
+        self.assertEqual((external / "file").read_bytes(), b"nested input")
+        self.assertEqual(list(nested.iterdir()), [])
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux proper EE only")
@@ -212,6 +343,26 @@ class RootStorageQuotaTests(unittest.TestCase):
             self.assertGreaterEqual(len(self.loop_fds), 2)
             with self.assertRaises(OSError):
                 os.fstat(self.loop_fds[-1])
+
+    def test_engine_view_retains_only_authenticated_inputs_hidden_by_quota_projection(self):
+        workspace = self.mount / "workspace"
+        sibling = self.root / "bounded-slot-sibling"
+        for name, path in (("workspace", workspace), ("candidate", sibling)):
+            tree = self.io.data["trees"][name]
+            shutil.copytree(tree["path"], path)
+            tree["path"] = str(path)
+        manifest = self.io.compile()
+        # The root-only unit EE places the whole fixture below a private
+        # parent. Kernel namespace projection is tested separately.
+        with self.modeled_kernel(), mock.patch.object(quota._EngineView, "_inside_host"):
+            with quota._acquire_engine_view(str(self.path), self.sha, manifest) as view:
+                self.assertEqual([path for path, _ in view.readonly_paths], [str(workspace)])
+                _, workspace_fd = view.readonly_paths[0]
+                self.assertEqual(os.fstat(workspace_fd).st_ino, workspace.stat().st_ino)
+                self.assertEqual(len(view.paths), 3)
+                self.assertNotIn(str(sibling), [path for path, _ in view.paths])
+            with self.assertRaises(OSError):
+                os.fstat(workspace_fd)
 
     def test_actual_unbounded_tmpfs_denies_before_loop_attestation(self):
         mount = quota.engine._directory(str(self.mount), private=True)
@@ -393,6 +544,10 @@ class RootStorageQuotaTests(unittest.TestCase):
         def replace_arg(data, old, new):
             data["argv"][data["argv"].index(old)] = new
         changes = [lambda d: replace_arg(d, "--events-backend=none", "--events-backend=journald"),
+                   lambda d: replace_arg(d, "--storage-driver=overlay", "--storage-driver=vfs"),
+                   lambda d: d["argv"].remove("--storage-opt=overlay.skip_mount_home=true"),
+                   lambda d: replace_arg(d, "--storage-opt=overlay.skip_mount_home=true",
+                                         "--storage-opt=overlay.skip_mount_home=false"),
                    lambda d: replace_arg(d, "--log-driver=passthrough", "--log-driver=k8s-file"),
                    lambda d: replace_arg(d, "--tmpdir=" + d["engine"]["runroot"], "--tmpdir=/var/tmp"),
                    lambda d: d["argv"].insert(1, "--syslog"),
