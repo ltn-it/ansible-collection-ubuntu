@@ -63,6 +63,64 @@ class PodmanContinuationTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(identity.Denied):
                 cells.validate_continuation_descriptor(route | {"successor": successor | invalid}, digest, reusable)
 
+    def test_fifteenth_successor_requires_completed_retirement_and_fresh_push(self):
+        descriptor = {"schema": 15, "reason": cells.FIFTEENTH_REASON, "qualification": self.lookup,
+                      "successor": self.route["successor"] | {"first_parent": cells.FIFTEENTH_MAIN}}
+        with patch.object(cells, "FIFTEENTH_QUALIFICATION", None):
+            with self.assertRaisesRegex(identity.Denied, "continuation-fifteenth-qualification"):
+                self.validate(descriptor)
+        with patch.multiple(cells, FIFTEENTH_QUALIFICATION="b" * 64,
+                            FIFTEENTH_SUCCESSOR_WORKFLOW="c" * 64, FIFTEENTH_SUCCESSOR_REUSABLE="d" * 40):
+            row = descriptor["successor"]
+            commit = {"sha": row["source_sha"], "parents": [{"sha": cells.FIFTEENTH_MAIN}]}
+            cells.validate_continuation_commit(commit, descriptor, row["source_sha"], row["run_id"], row["reusable_sha"])
+            for stale in ({"run_id": cells.FIFTEENTH_RUN}, {"source_sha": cells.FIFTEENTH_MAIN},
+                          {"run_attempt": 2}, {"first_parent": cells.FOURTEENTH_MAIN}):
+                with self.subTest(stale=stale), self.assertRaises(identity.Denied):
+                    self.validate(descriptor | {"successor": row | stale})
+
+    def test_fifteenth_journals_preserve_retention_scope_and_order(self):
+        lease = cells.FIFTEENTH_LEASE
+        original = {"lease_id": lease, "sha256": "e" * 64}
+        floor = cells.FIFTEENTH_RETAIN_UNTIL
+        identity_fields = {"run": cells.FIFTEENTH_RUN, "original_lease": lease,
+                           "original_record_sha256": original["sha256"]}
+        names = ("overlay-retirement", "quota-privacy", "network-retirement")
+        journals, rows = {}, {}
+        for index, ((phase, steps), name) in enumerate(zip(cells.FIFTEENTH_RETIREMENT_STEPS.items(), names)):
+            path = f"/unit/c14-{name}-{cells.FIFTEENTH_RUN}"
+            start = floor + 30 * index
+            journals[phase] = {"path": path}
+            data = {"complete-receipt.json": identity_fields | {"at": start + len(steps) * 2,
+                    "original_unknown_preserved": True, "all_original_resources_absent": True,
+                    "native_case_acceptance": False, "engine_parent_mode": "0o700"}}
+            for offset, step in enumerate(steps):
+                intent = identity_fields | {"at": start + 2 * offset, "step": step, "metadata": {}}
+                data[step + "-intent.json"] = intent
+                data[step + "-receipt.json"] = intent | {"at": intent["at"] + 1,
+                    "state": "separate-effect-verified", "original_unknown_resolved": False}
+            if phase == "network":
+                data["storage-identities.json"] = {"identities": [[1, 2]]}
+            rows[path] = data
+        retirement = {"original_record": original, "retain_until": floor, "journals": journals}
+
+        def read(ref, expected_names):
+            self.assertEqual(set(rows[ref["path"]]), expected_names)
+            return rows[ref["path"]]
+
+        with (patch.object(run_factory, "_twelfth_journal_members", side_effect=read),
+              patch.object(run_factory.time, "time", return_value=floor + 100)):
+            self.assertEqual(run_factory._fifteenth_journals(retirement, Path("/unit")), rows[journals["network"]["path"]])
+            overlay = rows[journals["overlay"]["path"]]
+            overlay["overlay-unmount-intent.json"]["at"] = floor - 1
+            with self.assertRaisesRegex(identity.Denied, "continuation-fifteenth-journal-effect"):
+                run_factory._fifteenth_journals(retirement, Path("/unit"))
+            overlay["overlay-unmount-intent.json"]["at"] = floor
+            quota = rows[journals["quota"]["path"]]
+            quota["restore-quota-mode-receipt.json"]["original_unknown_resolved"] = True
+            with self.assertRaisesRegex(identity.Denied, "continuation-fifteenth-journal-effect"):
+                run_factory._fifteenth_journals(retirement, Path("/unit"))
+
     def test_unproduced_retirement_cannot_authorize_a_successor(self):
         with patch.object(cells, "TWELFTH_QUALIFICATION", None):
             with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-qualification"):
