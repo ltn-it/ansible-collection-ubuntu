@@ -206,6 +206,27 @@ class RootEngineCompilerTests(unittest.TestCase):
                 descriptor_path, current.descriptor_sha256, hashlib.sha256(altered).hexdigest()
             )
 
+    def test_retained_original_storage_prefix_is_preserved(self):
+        current, path = self.retain()
+        manifest = json.loads(current.canonical_bytes)
+        manifest["argv"].remove("--storage-driver=overlay")
+        manifest["argv"].remove("--storage-opt=overlay.skip_mount_home=true")
+        legacy = engine._canonical(manifest)
+        path.write_bytes(legacy)
+        retained = engine.validate_retained_policy(
+            str(self.descriptor), current.descriptor_sha256, hashlib.sha256(legacy).hexdigest()
+        )
+        self.assertEqual(retained.canonical_bytes, legacy)
+        self.assertEqual(retained.argv, tuple(manifest["argv"]))
+
+        manifest["argv"].insert(manifest["argv"].index("run"), "--storage-opt=overlay.skip_mount_home=false")
+        changed = engine._canonical(manifest)
+        path.write_bytes(changed)
+        with self.assertRaisesRegex(Denied, "engine-retained-immutable-drift"):
+            engine.validate_retained_policy(
+                str(self.descriptor), current.descriptor_sha256, hashlib.sha256(changed).hexdigest()
+            )
+
     def test_running_output_directory_identity_cannot_be_replaced(self):
         original, _ = self.retain()
         self.output.rename(self.output.with_name("old-output"))

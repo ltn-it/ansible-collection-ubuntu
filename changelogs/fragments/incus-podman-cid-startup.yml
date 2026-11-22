@@ -1,0 +1,9 @@
+---
+bugfixes:
+  - >-
+    Wait for Podman to finish writing its private container ID file during the
+    existing bounded Incus runner startup. Record fixed startup failure codes
+    in the local runtime diagnostics. Keep Podman storage inside the existing
+    private quota mount without an additional bind on the overlay directory.
+    Expose only the cell's own storage paths to Podman's mount namespace and
+    restore host-side directory modes after tracking the container.

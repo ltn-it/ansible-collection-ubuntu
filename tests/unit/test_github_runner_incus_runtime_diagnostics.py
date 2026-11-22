@@ -117,6 +117,18 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(self.record()["reason"], expected)
         self.assertNotIn(b"synthetic-secret", self.log.call_args.args[0])
 
+    def test_engine_spawn_records_only_fixed_startup_failures(self):
+        for reason, expected in (
+            ("engine-cidfile", "engine-cidfile"),
+            ("engine-supervisor-exited-before-tracking", "engine-supervisor-exited-before-tracking"),
+            ("engine-cidfile synthetic-secret", "unclassified"),
+        ):
+            with self.subTest(reason=reason), identity._diagnostic_request():
+                identity._diagnostic_failed("engine-spawn", identity.Denied(reason))
+            self.assertEqual(self.record()["stage"], "engine-spawn")
+            self.assertEqual(self.record()["reason"], expected)
+        self.assertNotIn(b"synthetic-secret", self.log.call_args.args[0])
+
     def test_first_inner_error_survives_wrapping_with_one_terminal_record(self):
         @identity._diagnostic_step("collector")
         def inner():

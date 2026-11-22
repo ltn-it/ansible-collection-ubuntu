@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 15:
+        return _validate_fifteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 14:
         return _validate_fourteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 13:
@@ -158,7 +160,8 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     parents = commit_native.get("parents")
     predecessors = {1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN,
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
-                    11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN}
+                    11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
+                    15: FIFTEENTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -216,6 +219,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 15:
+        return _validate_fifteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 14:
         return _validate_fourteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 13:
@@ -1993,4 +1998,98 @@ def _validate_fourteenth_qualification(value):
         require(entry["name"] not in entries and len(entries) < 256
                 and catalogues[kind] == {**entries, entry["name"]: entry["inventory_sha256"]},
                 "continuation-fourteenth-preserved-catalogues")
+    return counts
+
+FIFTEENTH_MAIN = "5759a628d9fadb258036390483cb158c8ea36570"
+FIFTEENTH_RUN = 45024203618
+FIFTEENTH_CHECKS = (137215600784, 137218259302)
+FIFTEENTH_GRAPH = "422b4c3b5dc294c50296463120d90cc0ee83099d1853c28ba30a7e6fb5d439d4"
+FIFTEENTH_LEASE = "e28020f6802145fa92d3d1221edeb8a5"
+FIFTEENTH_RETAIN_UNTIL = 1795367199
+FIFTEENTH_REASON = "terminal-original-push-with-separate-engine-retirement"
+FIFTEENTH_QUALIFICATION = "c725a4ebbf47a82ebdad7f962ba3122b2f1ecd5e572d3f055eb737315dac377d"
+FIFTEENTH_SUCCESSOR_WORKFLOW = "b123611a65bc81aeed1692175f8a29010dab4366f268cabaa87cadd5d2fa24e8"
+FIFTEENTH_SUCCESSOR_REUSABLE = "46d298f20ffb597477c23ee6262887b937e2c997"
+FIFTEENTH_RETIREMENT_STEPS = {
+    "overlay": ("overlay-unmount",),
+    "quota": ("restore-quota-mode",),
+    "network": (
+        "fence-withdraw", "certificate-revoke", "veth-remove", "slice-stop",
+        "namespace-mounts", "namespace-alias", "graph-remove", "runroot-remove",
+        "output-remove", "context-remove", "descriptor-unlink",
+        "restore-engine-parent-privacy", "project-delete", "bridge-delete",
+    ),
+}
+
+
+def fifteenth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, FOURTEENTH_SUCCESSOR_REUSABLE,
+                                       FIFTEENTH_GRAPH, FIFTEENTH_CHECKS, FIFTEENTH_MAIN)
+
+
+def _validate_fifteenth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == FIFTEENTH_REASON
+            and engine_policy._hash(ref["sha256"]) == FIFTEENTH_QUALIFICATION,
+            "continuation-fifteenth-qualification")
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=FIFTEENTH_MAIN, expected_workflow=FIFTEENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=FIFTEENTH_SUCCESSOR_REUSABLE, reason="continuation-fifteenth-successor")
+    require(successor["source_sha"] not in {
+                ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN, FIFTEENTH_MAIN}
+            and successor["run_id"] not in {
+                ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN, FIFTEENTH_RUN},
+            "continuation-fifteenth-replay")
+    return value
+
+
+def _validate_fifteenth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_fifteenth", "previous_qualification", "retirement"})
+    require(ledger.digest(value) == FIFTEENTH_QUALIFICATION and value["purpose"] == FIFTEENTH_REASON
+            and ledger.digest(value["native_fifteenth"]) == FIFTEENTH_GRAPH, "continuation-fifteenth-history")
+    previous = value["previous_qualification"]
+    counts = _validate_fourteenth_qualification(previous)
+    retirement = engine_policy._keys(value["retirement"], {
+        "original_bootstrap", "original_bank", "original_record", "new_entries", "catalogues",
+        "retain_until", "journals", "storage_unique_mount_id", "namespace_cookie",
+    })
+    require(type(retirement["retain_until"]) is int and retirement["retain_until"] == FIFTEENTH_RETAIN_UNTIL,
+            "continuation-fifteenth-retention")
+    for key in ("storage_unique_mount_id", "namespace_cookie"):
+        engine_policy._integer(retirement[key], 1, 2**64 - 1)
+    original = engine_policy._keys(retirement["original_record"], {"lease_id", "sha256", "unknown_effect_id"})
+    require(original["lease_id"] == FIFTEENTH_LEASE and type(original["unknown_effect_id"]) is str
+            and ledger.ID.fullmatch(original["unknown_effect_id"]), "continuation-fifteenth-record")
+    engine_policy._hash(original["sha256"])
+    for name, digest_key in (("original_bootstrap", "sha256"), ("original_bank", "state_file_sha256")):
+        pin = engine_policy._keys(retirement[name], {"path", "device", "inode", digest_key})
+        engine_policy._path(pin["path"])
+        engine_policy._hash(pin[digest_key])
+        engine_policy._integer(pin["device"], 1, 2**63 - 1)
+        engine_policy._integer(pin["inode"], 1, 2**63 - 1)
+    journals = engine_policy._keys(retirement["journals"], set(FIFTEENTH_RETIREMENT_STEPS))
+    for phase, steps in FIFTEENTH_RETIREMENT_STEPS.items():
+        ref = engine_policy._keys(journals[phase], {"path", "members"})
+        engine_policy._path(ref["path"])
+        names = {"complete-receipt.json"} | {
+            step + "-" + event + ".json" for step in steps for event in ("intent", "receipt")}
+        if phase == "network":
+            names.add("storage-identities.json")
+        for digest in engine_policy._keys(ref["members"], names).values():
+            engine_policy._hash(digest)
+    old = previous["retirement"]["catalogues"]
+    new = engine_policy._keys(retirement["new_entries"], set(old))
+    catalogues = engine_policy._keys(retirement["catalogues"], set(old))
+    for kind, entries in old.items():
+        entry = engine_policy._keys(new[kind], {"name", "device", "inode", "receipt_sha256", "inventory_sha256"})
+        for key in ("name", "receipt_sha256", "inventory_sha256"):
+            engine_policy._hash(entry[key])
+        engine_policy._integer(entry["device"], 1, 2**63 - 1)
+        engine_policy._integer(entry["inode"], 1, 2**63 - 1)
+        require(entry["name"] not in entries and len(entries) < 256
+                and catalogues[kind] == {**entries, entry["name"]: entry["inventory_sha256"]},
+                "continuation-fifteenth-preserved-catalogues")
     return counts

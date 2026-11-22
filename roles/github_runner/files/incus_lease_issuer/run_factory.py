@@ -263,7 +263,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 14 or receipt.get("schema") == 14:
+    if descriptor["schema"] == 15 or receipt.get("schema") == 15:
+        require(descriptor["schema"] == receipt.get("schema") == 15, "continuation-fifteenth-receipt-kind")
+    elif descriptor["schema"] == 14 or receipt.get("schema") == 14:
         require(descriptor["schema"] == receipt.get("schema") == 14, "continuation-fourteenth-receipt-kind")
     elif descriptor["schema"] == 13 or receipt.get("schema") == 13:
         require(descriptor["schema"] == receipt.get("schema") == 13, "continuation-thirteenth-receipt-kind")
@@ -762,9 +764,16 @@ def _continuation_origin_absent(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    fifteenth_catalogues = None
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 15:
+        _revalidate_fifteenth_retirement(receipt["retirement"], receipt["previous_qualification"],
+                                        bootstrap.value["ledger_path"], descriptor["successor"])
+        fifteenth_catalogues = receipt["retirement"]["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 14
     if schema == 14:
         _revalidate_fourteenth_preservation(receipt["retirement"], receipt["previous_qualification"],
                                              bootstrap.value["ledger_path"])
@@ -799,7 +808,7 @@ def _continuation_origin_absent(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = (fourteenth_catalogues or thirteenth_catalogues or twelfth_catalogues
+        retired = (fifteenth_catalogues or fourteenth_catalogues or thirteenth_catalogues or twelfth_catalogues
                    or (retirement or receipt["retirement"])["catalogues"])
     elif schema == 8:
         require(_eighth_failed_prefix_projection(bootstrap.value["ledger_path"],
@@ -1092,6 +1101,124 @@ def _twelfth_observed_mounts(retirement, rows, last):
     return seen["observed_at"]
 
 
+
+def _fifteenth_journals(retirement, journal_parent):
+    """Verify the ordered Root journals while preserving the original unknown."""
+    original = retirement["original_record"]
+    expected = {"run": operating_cells.FIFTEENTH_RUN, "original_lease": original["lease_id"],
+                "original_record_sha256": original["sha256"]}
+    leaves = {"overlay": "c14-overlay-retirement", "quota": "c14-quota-privacy", "network": "c14-network-retirement"}
+    last = retirement["retain_until"]
+    for phase, steps in operating_cells.FIFTEENTH_RETIREMENT_STEPS.items():
+        ref = retirement["journals"][phase]
+        require(ref["path"] == str(journal_parent / (leaves[phase] + "-" + str(expected["run"]))),
+                "continuation-fifteenth-journal-path")
+        names = {"complete-receipt.json"} | _twelfth_step_files(steps)
+        if phase == "network":
+            names.add("storage-identities.json")
+        rows = _twelfth_journal_members(ref, names)
+        complete = rows["complete-receipt.json"]
+        require(all(complete.get(key) == value for key, value in expected.items())
+                and complete.get("original_unknown_preserved") is True
+                and type(complete.get("at")) is int and last <= complete["at"] <= time.time(),
+                "continuation-fifteenth-journal-completion")
+        for step in steps:
+            intent, receipt = (rows[step + "-" + status + ".json"] for status in ("intent", "receipt"))
+            require(all(type(row.get("at")) is int and row.get("step") == step
+                        and all(row.get(key) == value for key, value in expected.items())
+                        for row in (intent, receipt))
+                    and last <= intent["at"] <= receipt["at"] <= complete["at"]
+                    and type(intent.get("metadata")) is dict and receipt.get("metadata") == intent["metadata"]
+                    and receipt.get("state") == "separate-effect-verified"
+                    and receipt.get("original_unknown_resolved") is False,
+                    "continuation-fifteenth-journal-effect")
+            last = receipt["at"]
+        last = complete["at"]
+    require(complete.get("native_case_acceptance") is False and complete.get("all_original_resources_absent") is True
+            and complete.get("engine_parent_mode") == "0o700", "continuation-fifteenth-journal-final-state")
+    return rows
+
+
+def _revalidate_fifteenth_retirement(retirement, previous, successor_bank=None, successor=None):
+    """Read the exact retired lease, its sealed archives and live absence."""
+    require((successor_bank is None) == (successor is None), "continuation-fifteenth-successor-pair")
+    ref, bank = (retirement[key] for key in ("original_bootstrap", "original_bank"))
+    original = retirement["original_record"]
+    old = load_bootstrap(ref["path"], ref["sha256"])
+    qualified = _continuation_receipt(old.value)
+    require(old.file_stamp[:2] == (ref["device"], ref["inode"])
+            and qualified is not None and qualified[0]["schema"] == 14 and qualified[1] == previous
+            and (qualified[0]["successor"]["source_sha"], qualified[0]["successor"]["run_id"],
+                 qualified[0]["successor"]["reusable_sha"]) == (
+                     operating_cells.FIFTEENTH_MAIN, operating_cells.FIFTEENTH_RUN,
+                     operating_cells.FOURTEENTH_SUCCESSOR_REUSABLE)
+            and old.value["ledger_path"] == bank["path"] != successor_bank,
+            "continuation-fifteenth-original-bootstrap")
+    entries = {"configuration": retirement["new_entries"]["native_run_configuration_catalogue"],
+               "intake": retirement["new_entries"]["native_intake_catalogue"]}
+    _, configuration, origin = _retired_original_entries(old, entries, operating_cells.FIFTEENTH_MAIN,
+        operating_cells.FOURTEENTH_SUCCESSOR_REUSABLE, operating_cells.FIFTEENTH_RUN,
+        operating_cells.FIFTEENTH_CHECKS[0], revalidating=True)
+    registry = policy_registry.load_registry(configuration.registry_path, configuration.registry_sha256)
+    selected = registry.select(origin["invocation"]["selector"])
+    require(selected.ledger_path == bank["path"], "continuation-fifteenth-original-registry")
+    config, _, _ = preparation._config(configuration.preparation_config_path, configuration.preparation_config_sha256)
+    journal_parent = Path(config.lock_path).parent
+    rows = _fifteenth_journals(retirement, journal_parent)
+    lease_id = original["lease_id"]
+    with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]), ledger.Ledger(
+            bank["path"], clock=time.time) as store:
+        if successor_bank is not None:
+            fd = installation._open_directory(successor_bank)
+            try:
+                info = os.fstat(fd)
+                require((info.st_dev, info.st_ino) != (bank["device"], bank["inode"]),
+                        "continuation-fifteenth-bank-alias")
+            finally:
+                os.close(fd)
+        path = str(store.path / "state.json")
+        proof, _, stamp = installation._file(path, MAX_POLICY, private=True)
+        require(proof.sha256 == bank["state_file_sha256"] and store.lease_ids() == (lease_id,),
+                "continuation-fifteenth-original-bank")
+        record = store.read(lease_id)
+        require(ledger.digest(record) == original["sha256"] and record["state"] == "prepared"
+                and "owned_instance" not in record
+                and [(key, item["operation"], item["state"]) for key, item in record["effects"].items()
+                     if item["state"] != "verified"] == [(original["unknown_effect_id"], "engine-start", "unknown")],
+                "continuation-fifteenth-original-unknown-preserved")
+        effect = record["effects"][original["unknown_effect_id"]]
+        terminal = record["native_terminal"]
+        keep = store.read_policy(record["policy_sha256"])["retention_seconds"]
+        require("engine_capture" in effect and "engine_process" in effect
+                and not {"engine_container_id", "engine_exit"} & effect.keys()
+                and (terminal["source_sha"], terminal["controller_sha"], terminal["run_id"],
+                     terminal["job_id"], terminal["check_run_id"], terminal["run_attempt"], terminal["conclusion"])
+                == (operating_cells.FIFTEENTH_MAIN, operating_cells.FOURTEENTH_SUCCESSOR_REUSABLE,
+                    operating_cells.FIFTEENTH_RUN, operating_cells.FIFTEENTH_CHECKS[0],
+                    operating_cells.FIFTEENTH_CHECKS[0], 1, "failure")
+                and keep == 14400 and terminal["completed_at"] + keep == retirement["retain_until"] <= time.time(),
+                "continuation-fifteenth-original-terminal-retention")
+        fence, = (row["fence"] for row in record["effects"].values()
+                  if row["operation"] == "fence-create" and row["state"] == "verified")
+        namespace = {"device": fence["netns_device"], "inode": fence["netns_inode"],
+                     "host_ifindex": fence["host_ifindex"], "boot_id": fence["boot_id"],
+                     "cookie": retirement["namespace_cookie"]}
+        # The earlier absence verifier consumes an in-memory projection. The
+        # original receipts retain their exact on-disk bytes and schema.
+        complete = rows["complete-receipt.json"] | {
+            "namespace": namespace, "storage_policy_sha256": config.storage_quota_policy_sha256,
+            "storage_unique_mount_id": retirement["storage_unique_mount_id"],
+        }
+        _twelfth_resources_absent(configuration, selected, record, lease_id, rows | {"complete-receipt.json": complete},
+                                  successor_bank, successor, expected_cookie=retirement["namespace_cookie"],
+                                  sealed_tree_paths=True)
+        after, _, after_stamp = installation._file(path, MAX_POLICY, private=True)
+        require(store.read(lease_id) == record and (after, after_stamp) == (proof, stamp),
+                "continuation-fifteenth-original-bank-drift")
+    require(_fifteenth_journals(retirement, journal_parent) == rows and load_bootstrap(old.path, old.sha256) == old,
+            "continuation-fifteenth-original-read-drift")
+
+
 def _revalidate_twelfth_retirement(retirement, previous, successor_bank=None, successor=None):
     """Prove the original bank and the separate retirement without rewriting either."""
     require((successor_bank is None) == (successor is None), "continuation-twelfth-successor-pair")
@@ -1157,7 +1284,8 @@ def _revalidate_twelfth_retirement(retirement, previous, successor_bank=None, su
             "continuation-twelfth-original-read-drift")
 
 
-def _twelfth_resources_absent(configuration, selected, record, lease_id, rows, successor_bank, successor):
+def _twelfth_resources_absent(configuration, selected, record, lease_id, rows, successor_bank, successor,
+                              *, expected_cookie=1359, sealed_tree_paths=False):
     from types import SimpleNamespace
     from . import cleanup_storage, engine_executor, incus_admin, incus_mutation, network_fence, storage_quota
 
@@ -1184,10 +1312,10 @@ def _twelfth_resources_absent(configuration, selected, record, lease_id, rows, s
             and namespace["boot_id"] == fence["boot_id"] and namespace["host_ifindex"] == fence["host_ifindex"],
             "continuation-twelfth-original-namespace")
     cookie = engine._integer(namespace["cookie"], 1, 2**64 - 1)
-    require(cookie == 1359, "continuation-twelfth-original-namespace-cookie")
+    require(cookie == expected_cookie, "continuation-twelfth-original-namespace-cookie")
     policy = network_fence._bound_policy(config.network_fence_policy_path, config.network_fence_policy_sha256, config)
     host = network_fence._host_namespace()
-    _twelfth_host_fence(config, namespace["host_ifindex"], successor_bank, successor)
+    _twelfth_host_fence(config, namespace["host_ifindex"], successor_bank, successor, original_lease=lease_id)
     target = cell_contract._incus(cell["incus"], environment, lease_id, selected.cell_sha256)
     owner = incus_mutation.Ownership(**target["ownership"])
     project = incus_mutation.ProjectSpec(target["project"], target["network"], target["pool"],
@@ -1222,11 +1350,19 @@ def _twelfth_resources_absent(configuration, selected, record, lease_id, rows, s
         maximum, seconds = cleanup_storage._cleanup_limits(config)
         identities = _twelfth_storage_identities(rows["storage-identities.json"], maximum)
         observed_identities = set() if successor_bank is not None and _twelfth_successor_storage_started(
-            successor_bank, successor, record_proof["at"]) else identities
+            successor_bank, successor, record_proof["at"], original_lease=lease_id) else identities
         try:
             for step, path in paths.items():
                 metadata = rows[step + "-receipt.json"]["metadata"]
-                require(metadata.get("path") == path, "continuation-twelfth-original-storage-path")
+                if sealed_tree_paths and step != "descriptor-unlink":
+                    # These journals recorded the tree identity under its
+                    # fixed role. Its path comes from the sealed old cell.
+                    engine._keys(metadata, {"device", "inode", "owner_uid", "mode", "entries",
+                                            "metadata_sha256", "mount_id", "unique_mount_id"})
+                    require(metadata["unique_mount_id"] == record_proof["storage_unique_mount_id"],
+                            "continuation-retirement-tree-mount-drift")
+                else:
+                    require(metadata.get("path") == path, "continuation-twelfth-original-storage-path")
                 device = engine._integer(metadata["device"], 1, 2**63 - 1)
                 inode = engine._integer(metadata["inode"], 1, 2**63 - 1)
                 fd = installation._open_directory(str(Path(path).parent))
@@ -1250,11 +1386,12 @@ def _twelfth_resources_absent(configuration, selected, record, lease_id, rows, s
         for _ in range(2):
             network_fence._namespace_refs_drained(-1, historical, cookie)
     cleanup_storage._absent(paths.values())
-    _twelfth_host_fence(config, namespace["host_ifindex"], successor_bank, successor)
+    _twelfth_host_fence(config, namespace["host_ifindex"], successor_bank, successor, original_lease=lease_id)
     require(network_fence._host_namespace() == host, "continuation-twelfth-host-namespace-drift")
 
 
-def _twelfth_successor_storage_started(bank, successor, completed_at):
+def _twelfth_successor_storage_started(bank, successor, completed_at, *,
+                                      original_lease=operating_cells.TWELFTH_LEASE):
     """Once exact storage allocation begins, released inode numbers can be reused.
 
     The immutable retirement journal already proves that all old objects were
@@ -1266,7 +1403,7 @@ def _twelfth_successor_storage_started(bank, successor, completed_at):
         allocated = False
         for identifier, record in state["leases"].items():
             who = record["identity"]
-            require(identifier != operating_cells.TWELFTH_LEASE and (who["run_id"], who["caller_sha"], who["reusable_sha"])
+            require(identifier != original_lease and (who["run_id"], who["caller_sha"], who["reusable_sha"])
                     == (successor["run_id"], successor["source_sha"], successor["reusable_sha"])
                     and record["created_at"] >= completed_at, "continuation-twelfth-storage-generation")
             for row in record["effects"].values():
@@ -1291,7 +1428,8 @@ def _twelfth_storage_identities(value, maximum):
     return identities
 
 
-def _twelfth_host_fence(config, original_ifindex, successor_bank, successor):
+def _twelfth_host_fence(config, original_ifindex, successor_bank, successor, *,
+                        original_lease=operating_cells.TWELFTH_LEASE):
     """The original tuple must stay absent even while a successor owns the table."""
     from . import host_api_fence
 
@@ -1309,14 +1447,15 @@ def _twelfth_host_fence(config, original_ifindex, successor_bank, successor):
             require(handle == baseline["nft_table_handle"] and expires == 0,
                     "continuation-twelfth-host-fence-baseline")
             if deadline:
-                _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, deadline)
+                _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, deadline,
+                                            original_lease=original_lease)
             return
         require(len(claimants) == 1, "continuation-twelfth-host-fence-owner")
         active = store.read(claimants[0])
         who = active["identity"]
         require((who["run_id"], who["caller_sha"], who["reusable_sha"])
                 == (successor["run_id"], successor["source_sha"], successor["reusable_sha"])
-                and claimants[0] != operating_cells.TWELFTH_LEASE and active["state"] != "closed",
+                and claimants[0] != original_lease and active["state"] != "closed",
                 "continuation-twelfth-host-fence-successor")
         creators = [row for row in active["effects"].values()
                     if row["operation"] == "fence-create" and row["state"] == "verified"]
@@ -1344,7 +1483,8 @@ def _twelfth_host_fence(config, original_ifindex, successor_bank, successor):
                 "continuation-twelfth-host-fence-read-drift")
 
 
-def _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, deadline):
+def _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, deadline, *,
+                                 original_lease=operating_cells.TWELFTH_LEASE):
     """Bind an empty gate's retained deadline to its last exact, withdrawn grant."""
     reason = "continuation-twelfth-host-fence-withdrawn"
     lease_ids = store.lease_ids()
@@ -1352,7 +1492,7 @@ def _twelfth_withdrawn_host_gate(store, baseline, original_ifindex, successor, d
     for lease_id in lease_ids:
         record = store.read(lease_id)
         identity = record["identity"]
-        require(lease_id != operating_cells.TWELFTH_LEASE
+        require(lease_id != original_lease
                 and (identity["run_id"], identity["caller_sha"], identity["reusable_sha"])
                 == (successor["run_id"], successor["source_sha"], successor["reusable_sha"]), reason)
         for effect in record["effects"].values():
@@ -1433,6 +1573,10 @@ def _check_empty_previous_bank(bank, current_path):
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
     generation = descriptor["schema"]
+    fifteenth = receipt if generation == 15 else None
+    if fifteenth is not None:
+        receipt = fifteenth["previous_qualification"]
+        generation = 14
     fourteenth = receipt if generation == 14 else None
     if fourteenth is not None:
         receipt = fourteenth["previous_qualification"]
@@ -1499,6 +1643,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if fourteenth is not None:
         families.append((_continuation_fourteenth_native, {}, fourteenth["native_fourteenth"],
                          "continuation-fourteenth-native-drift"))
+    if fifteenth is not None:
+        families.append((_continuation_fifteenth_native, {}, fifteenth["native_fifteenth"],
+                         "continuation-fifteenth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -1838,7 +1985,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["failed_prefix"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
     directory_identity = run_intake._directory_identity(root)
     names = run_intake._entries(root)
@@ -2279,6 +2426,11 @@ def _continuation_thirteenth_native(get):
 def _continuation_fourteenth_native(get):
     return _terminal_family(get, operating_cells.FOURTEENTH_RUN, operating_cells.FOURTEENTH_CHECKS,
                             operating_cells.fourteenth_native_projection)
+
+
+def _continuation_fifteenth_native(get):
+    return _terminal_family(get, operating_cells.FIFTEENTH_RUN, operating_cells.FIFTEENTH_CHECKS,
+                            operating_cells.fifteenth_native_projection)
 
 
 def _terminal_family(get, run_id, check_ids, projection):
