@@ -17,6 +17,10 @@ from incus_lease_issuer import (cleanup_storage, engine_executor, host_api_fence
                                incus_mutation, ledger, network_fence, operating_cells as cells,
                                run_factory, storage_quota)
 
+def census_native_capture():
+    fixture = Path(__file__).parent / "fixtures/g06-thirteenth-failed-native-graph.json"
+    return json.loads(fixture.read_bytes())
+
 
 class PodmanContinuationTests(unittest.TestCase):
     def setUp(self):
@@ -97,8 +101,10 @@ class PodmanContinuationTests(unittest.TestCase):
         intake_key = "native_intake_catalogue"
         config_key = "native_run_configuration_catalogue"
         previous = {"retirement": {"catalogues": {intake_key: {"old": "intake"}, config_key: {"old": "config"}}}}
+        capture = census_native_capture()
+        graph = cells.thirteenth_native_projection(capture["run"], capture["inventory"], capture["checks"])
         value = {
-            "schema": 13, "purpose": cells.THIRTEENTH_REASON, "native_thirteenth": {},
+            "schema": 13, "purpose": cells.THIRTEENTH_REASON, "native_thirteenth": graph,
             "previous_qualification": previous,
             "retirement": {
                 "schema": 1, "kind": "sealed-source-intake-with-no-configuration-or-lease",
@@ -107,8 +113,7 @@ class PodmanContinuationTests(unittest.TestCase):
                 "catalogues": {intake_key: {"old": "intake", "new": "seal"}, config_key: {"old": "config"}},
             },
         }
-        with patch.object(cells, "_validate_twelfth_qualification", return_value={"old": "counts"}), \
-             patch.object(cells, "THIRTEENTH_GRAPH", ledger.digest({})):
+        with patch.object(cells, "_validate_twelfth_qualification", return_value={"old": "counts"}):
             with patch.object(cells, "THIRTEENTH_QUALIFICATION", ledger.digest(value)):
                 self.assertEqual(cells.validate_continuation_qualification(value), {"old": "counts"})
             value["retirement"]["catalogues"][config_key]["new"] = "unpublished"
@@ -210,6 +215,66 @@ class PodmanContinuationTests(unittest.TestCase):
                 run_factory._twelfth_host_fence(config, 41, None, None)
         with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-successor-pair"):
             run_factory._revalidate_twelfth_retirement({}, {}, "/unit/successor-bank")
+
+
+class CensusNativeHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.native = census_native_capture()
+        self.prefix = f"/actions/runs/{cells.THIRTEENTH_RUN}"
+        self.jobs = self.prefix + "/attempts/1/jobs?per_page=100&page=1"
+        self.graph = cells.thirteenth_native_projection(self.native["run"], self.native["inventory"],
+                                                        self.native["checks"])
+        self.responses = {self.prefix: self.native["run"], self.jobs: self.native["inventory"]}
+        self.responses.update({"/check-runs/" + str(row["id"]): row for row in self.native["checks"]})
+
+    def get(self, name):
+        return deepcopy(self.responses[name])
+
+    def test_actual_terminal_graph_and_checks_match_the_fixed_digest(self):
+        read = Mock(side_effect=self.get)
+        self.assertEqual(run_factory._continuation_thirteenth_native(read), self.graph)
+        self.assertEqual(ledger.digest(self.graph), cells.THIRTEENTH_GRAPH)
+        check_calls = [call(f"/check-runs/{check}") for check in cells.THIRTEENTH_CHECKS]
+        self.assertEqual(read.call_args_list, [call(self.prefix), call(self.jobs), *check_calls, call(self.jobs)])
+
+    def test_changed_or_missing_native_checks_and_terminal_jobs_are_held(self):
+        checks = self.native["checks"]
+        for changed in (checks[:1], [checks[0] | {"conclusion": "success"}, checks[1]], list(reversed(checks))):
+            with self.subTest(changed=len(changed)), self.assertRaisesRegex(identity.Denied, "native-check"):
+                cells.thirteenth_native_projection(self.native["run"], self.native["inventory"], changed)
+        inventory = deepcopy(self.native["inventory"])
+        inventory["jobs"][0]["conclusion"] = "cancelled"
+        with self.assertRaisesRegex(identity.Denied, "original-failed-graph"):
+            cells.thirteenth_native_projection(self.native["run"], inventory, checks)
+
+    def test_second_read_must_still_match_the_complete_inventory(self):
+        drifted = deepcopy(self.native["inventory"])
+        drifted["jobs"].pop()
+        checks = self.native["checks"]
+        read = Mock(side_effect=[self.native["run"], self.native["inventory"], *checks, drifted])
+        with self.assertRaisesRegex(identity.Denied, "native-inventory-drift"):
+            run_factory._continuation_thirteenth_native(read)
+
+    def test_schema_thirteen_joins_every_previous_family_and_the_actual_graph(self):
+        generations = ("third", "fourth", "fifth", "sixth", "seventh", "eighth",
+                       "ninth", "tenth", "eleventh", "twelfth")
+        receipt = {"legacy_qualification": {"native_origin": {"generation": "original"}},
+                   "native_prior": {"generation": "prior"}}
+        for part in generations:
+            receipt = {"previous_qualification": receipt, f"native_{part}": {"generation": part}}
+        receipt = {"previous_qualification": receipt, "native_thirteenth": self.graph}
+        with ExitStack() as stack:
+            original = stack.enter_context(patch.object(run_factory, "_continuation_original_native",
+                side_effect=lambda _, prior=False: {"generation": "prior" if prior else "original"}))
+            previous = {part: stack.enter_context(patch.object(run_factory, f"_continuation_{part}_native",
+                        return_value={"generation": part})) for part in generations}
+            run_factory._continuation_native_histories(self.get, {"schema": 13}, receipt)
+            self.assertCountEqual(original.call_args_list, [call(self.get), call(self.get, prior=True)])
+            for family in previous.values():
+                family.assert_called_once_with(self.get)
+            with self.assertRaisesRegex(identity.Denied, "continuation-thirteenth-native-drift"):
+                run_factory._continuation_native_histories(
+                    self.get, {"schema": 13}, receipt | {"native_thirteenth": {}})
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0,
