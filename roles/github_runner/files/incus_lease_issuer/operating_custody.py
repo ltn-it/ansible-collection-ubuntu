@@ -508,6 +508,19 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                             if "native_terminal" not in store.read(lease_id):
                                 store.bind_native_terminal(lease_id, observe_native_terminal(
                                     runtime._registry, selector, store, lease_id))
+                            record = store.read(lease_id)
+                            policy = store.read_policy(record["policy_sha256"])
+                            if "startup_retirement" in policy and "partial_preparation_custody" not in record:
+                                from . import startup_retirement
+                                ordinary_floor = record["native_terminal"]["completed_at"] + policy["retention_seconds"]
+                                if store._now() < ordinary_floor:
+                                    locator = startup_retirement.private_archive_locator(store, lease_id)
+                                    if locator is not None:
+                                        finalizer.retire_before_vm_authority(runtime._registry, selector, store,
+                                                                          lease_id, *locator)
+                                    else:
+                                        alarm("failed-cell-retained", lease_id, {"retain_until": ordinary_floor})
+                                    continue
                             retained = retain_partial_preparation(runtime._registry, selector, store, lease_id)
                             if store._now() < retained["retain_until"]:
                                 alarm("failed-cell-retained", lease_id, {"partial_preparation": retained})
@@ -791,8 +804,11 @@ def _partial_fence_withdrawal(record):
 def _partial_custody_record(value, record, policy):
     """A pre-engine failure is never normal stopped-VM custody or success."""
     fence_binding = _partial_fence_withdrawal(record)
+    early = "pre_vm_retirement" in value if type(value) is dict else False
+    optional = {"pre_vm_retirement"} if early else set()
     require(type(value) is dict and set(value) == {"schema", "kind", "terminal_at", "retain_until",
-            "creator_sha256", "certificate_revoke_sha256"} | fence_binding.keys() and type(value["schema"]) is int and value["schema"] == 1
+            "creator_sha256", "certificate_revoke_sha256"} | fence_binding.keys() | optional
+            and type(value["schema"]) is int and value["schema"] == 1
             and value["kind"] == "failed-partial-preparation" and "owned_instance" not in record
             and "custody" not in record and "native_terminal" in record,
             "partial-custody-shape")
@@ -808,9 +824,25 @@ def _partial_custody_record(value, record, policy):
             and all(e["state"] == "verified" for e in revoke)
             and (not any(e["operation"] == "certificate-create" for e in record["effects"].values()) or len(revoke) == 1)
             and type(value["terminal_at"]) is int and type(value["retain_until"]) is int
-            and value["terminal_at"] == record["native_terminal"]["completed_at"]
-            and value["retain_until"] == value["terminal_at"] + policy["retention_seconds"],
+            and value["terminal_at"] == record["native_terminal"]["completed_at"],
             "partial-custody-binding")
+    if early:
+        from . import startup_retirement
+        evidence = value["pre_vm_retirement"]
+        require(policy.get("startup_retirement") == startup_retirement.POLICY
+                and type(evidence) is dict and set(evidence) == {"archive_sha256", "inventory_sha256", "observed_at"}
+                and all(type(evidence[key]) is str and ledger.HEX.fullmatch(evidence[key])
+                        for key in ("archive_sha256", "inventory_sha256"))
+                and type(evidence["observed_at"]) is int
+                and record["native_terminal"]["observed_at"] <= evidence["observed_at"]
+                and value["retain_until"] == evidence["observed_at"]
+                and not fence_binding and not revoke
+                and all(row["operation"] in startup_retirement.PRE_AUTHORITY_CREATORS
+                        for row in record["effects"].values() if row["operation"] in ledger.PROVISIONING),
+                "partial-custody-pre-vm-binding")
+    else:
+        require(value["retain_until"] == value["terminal_at"] + policy["retention_seconds"],
+                "partial-custody-retention")
     return value
 
 
@@ -826,13 +858,18 @@ def require_partial_retained_proof(proof, lease_id, record, policy):
 
 
 def retain_partial_preparation(registry, selector, store, lease_id):
-    """Bind only original terminal policy after separate safety withdrawal."""
+    """Bind the original terminal policy after separate safety withdrawal."""
+    return _retain_partial_preparation(registry, selector, store, lease_id)
+
+
+def _retain_partial_preparation(registry, selector, store, lease_id, *, pre_vm=None):
     from . import cell_contract
     owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
     record = store.read(lease_id)
     require("native_terminal" in record and not any(e["state"] != "verified" for e in record["effects"].values()),
             "partial-custody-terminal-or-unknown")
     if "partial_preparation_custody" in record:
+        require(pre_vm is None, "partial-custody-must-preserve-existing")
         return _partial_custody_record(record["partial_preparation_custody"], record,
                                        store.read_policy(record["policy_sha256"]))
     policy = store.read_policy(record["policy_sha256"])
@@ -843,6 +880,10 @@ def retain_partial_preparation(registry, selector, store, lease_id):
         "retain_until": record["native_terminal"]["completed_at"] + policy["retention_seconds"],
         "creator_sha256": ledger.digest(creators), "certificate_revoke_sha256": ledger.digest(revoke),
         **_partial_fence_withdrawal(record)}
+    if pre_vm is not None:
+        require(pre_vm["original_sha256"] == ledger.digest(record), "partial-custody-pre-vm-original")
+        value.update(retain_until=pre_vm["observed_at"], pre_vm_retirement={
+            key: pre_vm[key] for key in ("archive_sha256", "inventory_sha256", "observed_at")})
     _partial_custody_record(value, record, policy)
     require(cell_contract.partial_preparation_owner(registry, selector, store, lease_id) == owner,
             "partial-custody-owner-drift")

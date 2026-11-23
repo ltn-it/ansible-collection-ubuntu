@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import time
 
 from . import (cell_contract, engine_executor, identity, incus_admin, incus_mutation,
@@ -233,6 +233,83 @@ class RootFinalizer:
                 require(cleanup.certificates_absent(), "partial-uncreated-certificate-scope-held")
             return {"lease_id": lease_id, "certificate_scope_absent": cleanup.certificates_absent(),
                     "native_acceptance": False}
+
+    def _startup_scope(self, session, registry, selector, store, lease_id):
+        from . import policy_registry, startup_retirement
+        owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
+        config = self._fresh(session, registry, selector, store, owner)
+        record = store.read(lease_id)
+        policy = store.read_policy(record["policy_sha256"])
+        require(policy.get("startup_retirement") == startup_retirement.POLICY
+                and record.get("native_terminal", {}).get("conclusion") in startup_retirement.FAILURES
+                and "partial_preparation_custody" not in record, "startup-retirement-unavailable")
+        descriptor = identity.decode_json(owner.engine_descriptor_bytes)
+        env = descriptor["environment"]
+        profile, scenario, target = (env.get("QUALITY_INPUT_" + name)
+                                     for name in ("PROFILE", "SCENARIO", "TARGET"))
+        require(profile in {"heavy", "application_acceptance"}
+                and selector == policy_registry.profile_selector(profile, scenario, target),
+                "startup-retirement-business-cell")
+        return owner, config, record, policy, profile, scenario, target
+
+    def archive_before_vm_authority(self, registry, selector, store, lease_id, diagnostic_path, diagnostic_sha256):
+        """Archive exact private diagnostics supplied by the protected native evidence reader."""
+        from . import installation, root_session, startup_retirement
+        with root_session._session(self._runtime.preparation_config_path,
+                                  self._runtime.preparation_config_sha256) as session:
+            owner, config, record, *_ = self._startup_scope(session, registry, selector, store, lease_id)
+            proof, raw, _ = installation._file(diagnostic_path, startup_retirement.MAX_ARCHIVE_MEMBER,
+                                               private=True, keep=True)
+            require(proof.sha256 == diagnostic_sha256, "startup-retirement-diagnostic-drift")
+            failure = identity.decode_json(raw)
+            require(raw == ledger.canonical(failure), "startup-retirement-diagnostic-shape")
+            inventory = startup_retirement.observe_before_context(owner, store, config)
+            return startup_retirement.publish_original_archive(store, lease_id, record, failure, inventory)
+
+    def retire_before_vm_authority(self, registry, selector, store, lease_id, archive_dir, archive_sha256):
+        """Root-only retirement through the common finalizer with archived native proof."""
+        from . import operating_custody, root_session, startup_retirement
+        with root_session._session(self._runtime.preparation_config_path,
+                                  self._runtime.preparation_config_sha256) as session:
+            owner, config, record, policy, profile, scenario, target = self._startup_scope(
+                session, registry, selector, store, lease_id)
+            require(startup_retirement.private_archive_locator(store, lease_id) == (archive_dir, archive_sha256),
+                    "startup-retirement-archive-locator")
+            archive = startup_retirement.archived_original(archive_dir, archive_sha256, record)
+            inventory = startup_retirement.observe_before_context(owner, store, config)
+            observed_at = store._now()
+            observations = {"original": ledger.digest(record), "inventory": ledger.digest(inventory),
+                "at": observed_at, "startup_boundary": startup_retirement.START_BOUNDARY, "start_effect": None,
+                "exclusive_ownership": True, "never_started_vm": True, "active_consumers": 0,
+                "access_withdrawn": True}
+            require(startup_retirement.effective_floor(record, policy, selector=selector, profile=profile,
+                    scenario=scenario, target=target, archive=archive, observations=observations,
+                    now=store._now()) == observed_at, "startup-retirement-native-gate")
+            require(startup_retirement.archived_original(archive_dir, archive_sha256, record) == archive,
+                    "startup-retirement-archive-drift")
+            operating_custody._retain_partial_preparation(registry, selector, store, lease_id, pre_vm={
+                "original_sha256": observations["original"], "observed_at": observed_at,
+                "archive_sha256": archive["sha256"], "inventory_sha256": archive["inventory"]})
+        self.finalize_partial_preparation(registry, selector, store, lease_id)
+        return self.verify_retired_before_vm_authority(registry, selector, store, lease_id, archive_dir)
+
+    def verify_retired_before_vm_authority(self, registry, selector, store, lease_id, archive_dir):
+        """Independently re-open the exact retired scope before recording absence."""
+        from . import generation_publisher, root_session, startup_retirement
+        with root_session._session(self._runtime.preparation_config_path,
+                                  self._runtime.preparation_config_sha256) as session:
+            owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
+            config = self._fresh(session, registry, selector, store, owner)
+            record = store.read(lease_id)
+            evidence = record["partial_preparation_custody"]["pre_vm_retirement"]
+            require(startup_retirement.private_archive_locator(store, lease_id)
+                    == (archive_dir, evidence["archive_sha256"]), "startup-retirement-archive-locator")
+            expected = startup_retirement.observe_before_context(owner, store, config, closed=True)
+            receipt = {"schema": 1, "lease_id": lease_id, "closed_record_sha256": ledger.digest(record),
+                       "archive_sha256": evidence["archive_sha256"], "resources": expected,
+                       "native_acceptance": False}
+            generation_publisher._json(Path(archive_dir) / "verified-absent.json", receipt)
+            return receipt
 
     def finalize_partial_preparation(self, registry, selector, store, lease_id):
         """One finite original no-engine failure lifecycle; never normal VM finalization."""

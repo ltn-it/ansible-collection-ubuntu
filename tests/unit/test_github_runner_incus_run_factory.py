@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import socket
 import stat
 import sys
@@ -138,6 +139,66 @@ class RootBootstrapTests(unittest.TestCase):
         proof = factory.verify_bootstrap_native(self.server, self.bootstrap, self.selector,
             challenge["nonce"], token, "synthetic-job-token")
         return proof, token
+
+    def test_published_startup_policy_survives_the_installer_and_scopes_each_native_cell(self):
+        from test_github_runner_runtime_v2_installation import probe
+        from incus_lease_issuer import startup_retirement
+
+        def private(path, raw=b"{}"):
+            file = Path(path)
+            file.write_bytes(raw)
+            file.chmod(0o600)
+            return hashlib.sha256(raw).hexdigest()
+
+        prep = self.value["preparation"]
+        for name in ("network_fence_policy", "host_api_fence_policy", "storage_quota_policy"):
+            prep[name + "_sha256"] = private(prep[name + "_path"])
+        private(prep["signing_key_path"], b"private test fixture")
+        private(prep["lock_path"], b"")
+        service = self.value["collector"]["service"]
+        service["fragment_sha256"] = private(service["fragment_path"])
+        private(service["installation"]["manifest_path"])
+        operating = {}
+        for case in factory.operating_cells.CASES:
+            name = factory.operating_cells.selector(case)
+            operating[name] = {"kind": "operating", "native_job_name": "Operating custody / " + case,
+                "native_observer_job_name": "Operating result / " + case,
+                "lease_seconds": 900, "job_timeout_seconds": 900, "github": {"job": "operating", "workflow": "CI"},
+                "operating": {"case": case}, "engine": {"limits": {"timeout_seconds": 600}}, "incus": {}}
+        self.value["cells"].update(operating)
+        baseline_sha = self.value["custody_policy_sha256"]
+        with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
+            original = store.read_policy(baseline_sha)
+            self.value, business = startup_retirement.bootstrap_with_business_policy(self.value, original)
+            with self.assertRaises(Denied):
+                self.seal()
+            startup_retirement.archive_bootstrap_policies(store, self.value, original)
+            self.seal()
+        account = SimpleNamespace(pw_uid=2101, pw_gid=2101, pw_name=service["service_user"])
+        group = SimpleNamespace(gr_gid=2101, gr_mem=[])
+        def group_info(name):
+            if name == "fixture_group":
+                return group
+            raise KeyError(name)
+        with mock.patch.object(probe.pwd, "getpwnam", return_value=account), \
+             mock.patch.object(probe.pwd, "getpwall", return_value=[account]), \
+             mock.patch.object(probe.grp, "getgrnam", side_effect=group_info), \
+             mock.patch.object(probe.os, "getgrouplist", return_value=[2101]):
+            self.assertEqual(probe.configurations(str(self.path), self.sha, "fixture_group",
+                                                 prep["signing_public_key_hex"]), self.value)
+            bad = self.value | {"business_startup_policy_sha256": baseline_sha}
+            self.path.write_bytes(ledger.canonical(bad))
+            with self.assertRaises(ValueError):
+                probe.configurations(str(self.path), ledger.digest(bad), "fixture_group", prep["signing_public_key_hex"])
+            self.seal()
+        for purpose in ("execution", "observer"):
+            selected = factory.derive_selection(self.bootstrap, self.selector, crypto.CALLER_SHA, purpose=purpose)
+            self.assertEqual(selected.custody_policy_sha256, ledger.digest(business))
+            for name in operating:
+                selected = factory.derive_selection(self.bootstrap, name, crypto.CALLER_SHA, purpose=purpose)
+                self.assertEqual(selected.custody_policy_sha256, baseline_sha)
+        proof, _ = self.mint()
+        self.assertEqual(proof.policy.custody_policy_sha256, ledger.digest(business))
 
     def test_real_signature_socket_nonce_ledger_and_opaque_proof_without_fake_cell(self):
         proof, token = self.mint()

@@ -106,7 +106,7 @@ def load_bootstrap(path, expected_sha256):
     value = identity.decode_json(raw)
     engine._keys(value, {"schema", "source_identity", "source_workflow_sha256", "collector", "ledger_path",
                         "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"}
-                        | ({"operating_continuation"} if "operating_continuation" in value else set()))
+                        | ({"operating_continuation", "business_startup_policy_sha256"} & value.keys()))
     require(type(value["schema"]) is int and value["schema"] == 1 and ledger.canonical(value) == raw,
             "bootstrap-policy-schema")
     base = engine._keys(value["source_identity"], policy_registry.IDENTITY_KEYS - {"caller_sha"})
@@ -128,7 +128,14 @@ def load_bootstrap(path, expected_sha256):
     engine._path(value["ledger_path"])
     custody = engine._hash(value["custody_policy_sha256"])
     with ledger.Ledger(value["ledger_path"], clock=time.time) as store:
-        require(store.read_policy(custody)["retention_seconds"] == 14400, "bootstrap-original-failure-retention")
+        original = store.read_policy(custody)
+        require(original["retention_seconds"] == 14400 and "startup_retirement" not in original,
+                "bootstrap-original-failure-retention")
+        if "business_startup_policy_sha256" in value:
+            from . import startup_retirement
+            policy_sha256 = engine._hash(value["business_startup_policy_sha256"])
+            require(store.read_policy(policy_sha256) == startup_retirement.business_policy(original),
+                    "bootstrap-business-startup-retirement-policy")
     prep = engine._keys(value["preparation"], PREPARATION_KEYS)
     for key in PREPARATION_KEYS:
         if key.endswith("sha256") or key == "signing_public_key_hex": engine._hash(prep[key])
@@ -191,8 +198,11 @@ def derive_selection(bootstrap, selector, caller_sha_locator, *, purpose="execut
     template = value["cells"][selector]
     base = {**value["source_identity"], "caller_sha": caller_sha_locator}
     native = policy_registry._identity(base, template["native_job_name" if purpose == "execution" else "native_observer_job_name"])
+    custody = value["custody_policy_sha256"]
+    if template["kind"] == "business":
+        custody = value.get("business_startup_policy_sha256", custody)
     return RootBootstrapSelection(bootstrap, selector, purpose, native, bootstrap.collector, value["ledger_path"],
-        value["custody_policy_sha256"], ledger.digest(template), ledger.canonical(template),
+        custody, ledger.digest(template), ledger.canonical(template),
         template["lease_seconds"], template["job_timeout_seconds"])
 
 
