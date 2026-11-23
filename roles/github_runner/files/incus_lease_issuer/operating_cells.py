@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 17:
+        return _validate_seventeenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 16:
         return _validate_sixteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 15:
@@ -163,7 +165,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     predecessors = {1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN,
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
-                    15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN}
+                    15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -221,6 +223,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 17:
+        return _validate_seventeenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 16:
         return _validate_sixteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 15:
@@ -2146,3 +2150,95 @@ def _validate_sixteenth_qualification(value):
         for identity_field in ("device", "inode"):
             engine_policy._integer(pin[identity_field], 1, 2**63 - 1)
     return _validate_fifteenth_qualification(value["previous_qualification"])
+
+
+SEVENTEENTH_MAIN = "33c97bee9d37f3b1901765d5ffc59a79823c7534"
+SEVENTEENTH_RUN = 45110790880
+SEVENTEENTH_CHECKS = (137485730652, 137488932073)
+SEVENTEENTH_GRAPH = "c2956fd4ebde1258a7d84d1718be5cee64c2c32225642762541bf58c972f1289"
+SEVENTEENTH_LEASE = "8b087f520acebd1b443d6c11db2e5cee"
+SEVENTEENTH_RETAIN_UNTIL = 1795422986
+SEVENTEENTH_REASON = "terminal-original-push-after-podman-cid-retirement"
+# Published from actual receipts and protected workflow bytes. The local
+# preparation cannot admit a successor while any of these pins is absent.
+SEVENTEENTH_QUALIFICATION = "44562a56aa673ff1d925796eca7ab984b6c6808f088a2880f9f5c1d9b25c5301"
+SEVENTEENTH_SUCCESSOR_WORKFLOW = "074ebc19879525fb73cb50491a05d40bf2f5002192c34820210f4439de4f0244"
+SEVENTEENTH_SUCCESSOR_REUSABLE = "39c83ce8bbfda2fbf3c702522c986ed3b993eee4"
+SEVENTEENTH_RETIREMENT_STEPS = (
+    "fence-withdraw", "certificate-revoke", "veth-remove", "slice-stop",
+    "namespace-mounts", "namespace-alias", "graph-remove", "runroot-remove",
+    "output-remove", "context-remove", "descriptor-unlink", "project-delete", "bridge-delete",
+)
+
+
+def seventeenth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, SIXTEENTH_SUCCESSOR_REUSABLE,
+                                       SEVENTEENTH_GRAPH, SEVENTEENTH_CHECKS, SEVENTEENTH_MAIN)
+
+
+def _validate_seventeenth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == SEVENTEENTH_REASON and engine_policy._hash(ref["sha256"]) == SEVENTEENTH_QUALIFICATION,
+            "continuation-seventeenth-qualification")
+    engine_policy._hash(SEVENTEENTH_SUCCESSOR_WORKFLOW)
+    cell_contract._commit(SEVENTEENTH_SUCCESSOR_REUSABLE)
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=SEVENTEENTH_MAIN, expected_workflow=SEVENTEENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=SEVENTEENTH_SUCCESSOR_REUSABLE, reason="continuation-seventeenth-successor")
+    require(successor["source_sha"] not in {
+                ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN,
+                FIFTEENTH_MAIN, SIXTEENTH_MAIN, SEVENTEENTH_MAIN}
+            and successor["run_id"] not in {
+                ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN,
+                FIFTEENTH_RUN, SIXTEENTH_RUN, SEVENTEENTH_RUN},
+            "continuation-seventeenth-replay")
+    return value
+
+
+def _validate_seventeenth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_seventeenth", "previous_qualification", "retirement"})
+    require(value["purpose"] == SEVENTEENTH_REASON and ledger.digest(value) == SEVENTEENTH_QUALIFICATION
+            and ledger.digest(value["native_seventeenth"]) == SEVENTEENTH_GRAPH,
+            "continuation-seventeenth-history")
+    previous = value["previous_qualification"]
+    catalogue_identities = _validate_sixteenth_qualification(previous)
+    retirement = engine_policy._keys(value["retirement"], {
+        "original_bootstrap", "original_bank", "original_record", "new_entries", "catalogues",
+        "retain_until", "journal", "storage_unique_mount_id", "namespace_cookie",
+    })
+    require(type(retirement["retain_until"]) is int and retirement["retain_until"] == SEVENTEENTH_RETAIN_UNTIL,
+            "continuation-seventeenth-retention")
+    for key in ("storage_unique_mount_id", "namespace_cookie"):
+        engine_policy._integer(retirement[key], 1, 2**64 - 1)
+    origin = engine_policy._keys(retirement["original_record"], {"lease_id", "sha256", "unknown_effect_id"})
+    require(origin["lease_id"] == SEVENTEENTH_LEASE and type(origin["unknown_effect_id"]) is str
+            and ledger.ID.fullmatch(origin["unknown_effect_id"]), "continuation-seventeenth-record")
+    engine_policy._hash(origin["sha256"])
+    for name, digest_key in (("original_bootstrap", "sha256"), ("original_bank", "state_file_sha256")):
+        pin = engine_policy._keys(retirement[name], {"path", "device", "inode", digest_key})
+        engine_policy._path(pin["path"])
+        engine_policy._hash(pin[digest_key])
+        engine_policy._integer(pin["device"], 1, 2**63 - 1)
+        engine_policy._integer(pin["inode"], 1, 2**63 - 1)
+    journal = engine_policy._keys(retirement["journal"], {"path", "members"})
+    engine_policy._path(journal["path"])
+    names = {"complete-receipt.json", "storage-identities.json"} | {
+        f"{step}-{phase}.json" for step in SEVENTEENTH_RETIREMENT_STEPS for phase in ("intent", "receipt")}
+    for digest in engine_policy._keys(journal["members"], names).values():
+        engine_policy._hash(digest)
+    old = previous["previous_qualification"]["retirement"]["catalogues"]
+    additions = engine_policy._keys(retirement["new_entries"], set(old))
+    catalogues = engine_policy._keys(retirement["catalogues"], set(old))
+    for kind, entries in old.items():
+        entry = engine_policy._keys(additions[kind], {"name", "device", "inode", "receipt_sha256", "inventory_sha256"})
+        for key in ("name", "receipt_sha256", "inventory_sha256"):
+            engine_policy._hash(entry[key])
+        engine_policy._integer(entry["device"], 1, 2**63 - 1)
+        engine_policy._integer(entry["inode"], 1, 2**63 - 1)
+        require(entry["name"] not in entries and len(entries) < 256
+                and catalogues[kind] == {**entries, entry["name"]: entry["inventory_sha256"]},
+                "continuation-seventeenth-preserved-catalogues")
+    return catalogue_identities
