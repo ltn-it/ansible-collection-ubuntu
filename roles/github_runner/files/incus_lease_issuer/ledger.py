@@ -528,7 +528,7 @@ class Ledger:
         if observing:
             require((info.st_dev, info.st_ino) == (historical.device, historical.inode), "ledger-history-bank-drift")
             require(read_only, "ledger-history-read-only")
-        fd = self._open("lock", os.O_RDONLY if observing else os.O_RDWR)
+        fd = self._open("lock", os.O_RDONLY if read_only else os.O_RDWR)
         try:
             if observing:
                 historical.acquire(fd)
@@ -540,13 +540,17 @@ class Ledger:
                         "ledger-history-lock-drift")
                 return
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Watchdog reads and historical admission can inspect the
+                # same state together. Only state changes require exclusivity.
+                mode = fcntl.LOCK_SH if read_only else fcntl.LOCK_EX
+                fcntl.flock(fd, mode | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Denied("ledger-busy") from None
             state = self._load()
             before = canonical(state)
             yield state
             if canonical(state) != before:
+                require(not read_only, "ledger-read-only-mutation")
                 self._save(state)
         finally:
             os.close(fd)

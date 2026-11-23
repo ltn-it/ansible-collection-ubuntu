@@ -3,6 +3,7 @@
 No live kernel collector, socket, credential, Incus executor, custody acceptance
 or test PASS is established by preparing/closing these component fixtures.
 """
+import concurrent.futures
 from dataclasses import asdict, replace
 import fcntl
 import hashlib
@@ -190,8 +191,9 @@ class IncusLedgerTests(unittest.TestCase):
         with self.open() as store, (self.path / "lock").open("rb") as other:
             original = (self.path / "state.json").read_bytes()
             fcntl.flock(other, fcntl.LOCK_SH)
+            self.assertEqual(store.lease_ids(), ())
             with self.assertRaisesRegex(Denied, "ledger-busy"):
-                store.lease_ids()
+                store.challenge(self.worker)
             with ledger._observe_historical_bank(self.path, bank.st_dev, bank.st_ino):
                 with self.open() as independent:
                     self.assertEqual(independent.lease_ids(), ())
@@ -201,6 +203,30 @@ class IncusLedgerTests(unittest.TestCase):
                 with self.assertRaisesRegex(Denied, "ledger-history-bank-drift"):
                     store.lease_ids()
             self.assertEqual((self.path / "state.json").read_bytes(), original)
+
+    def test_watchdog_read_and_retired_bank_admission_can_overlap(self):
+        bank = self.path.stat()
+        entered = threading.Event()
+        release = threading.Event()
+        with self.open() as watchdog, self.open() as admission:
+            read_state = watchdog._load
+
+            def read_until_released():
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("the watchdog reader was not released")
+                return read_state()
+
+            with mock.patch.object(watchdog, "_load", side_effect=read_until_released):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(watchdog.lease_ids)
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        with ledger._observe_historical_bank(self.path, bank.st_dev, bank.st_ino):
+                            self.assertEqual(admission.lease_ids(), ())
+                    finally:
+                        release.set()
+                    self.assertEqual(result.result(timeout=5), ())
 
     def test_historical_reader_waits_for_active_writer_then_reads_fresh_state(self):
         bank = self.path.stat()

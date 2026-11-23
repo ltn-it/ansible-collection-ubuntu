@@ -263,7 +263,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 15 or receipt.get("schema") == 15:
+    if descriptor["schema"] == 16 or receipt.get("schema") == 16:
+        require(descriptor["schema"] == receipt.get("schema") == 16, "continuation-sixteenth-receipt-kind")
+    elif descriptor["schema"] == 15 or receipt.get("schema") == 15:
         require(descriptor["schema"] == receipt.get("schema") == 15, "continuation-fifteenth-receipt-kind")
     elif descriptor["schema"] == 14 or receipt.get("schema") == 14:
         require(descriptor["schema"] == receipt.get("schema") == 14, "continuation-fourteenth-receipt-kind")
@@ -768,6 +770,10 @@ def _continuation_origin_absent(bootstrap, qualified):
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 16:
+        _revalidate_sixteenth_prelease(retirement=receipt, successor_bank=bootstrap.value["ledger_path"])
+        receipt = receipt["previous_qualification"]
+        schema = 15
     if schema == 15:
         _revalidate_fifteenth_retirement(receipt["retirement"], receipt["previous_qualification"],
                                         bootstrap.value["ledger_path"], descriptor["successor"])
@@ -1569,10 +1575,36 @@ def _check_empty_previous_bank(bank, current_path):
                 os.close(fd)
 
 
+def _revalidate_sixteenth_prelease(retirement, successor_bank):
+    """Preserve the failed start's bootstrap and bank before the first lease."""
+    ref = retirement["previous_bootstrap"]
+    bank = retirement["previous_bank"]
+    original = load_bootstrap(ref["path"], ref["sha256"])
+    qualified = _continuation_receipt(original.value)
+    require(original.file_stamp[:2] == (ref["device"], ref["inode"])
+            and qualified is not None and qualified[0]["schema"] == 15
+            and qualified[1] == retirement["previous_qualification"]
+            and qualified[0]["successor"]["run_id"] == operating_cells.SIXTEENTH_RUN
+            and qualified[0]["successor"]["source_sha"] == operating_cells.SIXTEENTH_MAIN
+            and original.value["ledger_path"] == bank["path"], "continuation-sixteenth-original-bootstrap")
+    _check_empty_previous_bank(bank, successor_bank)
+    path = str(Path(bank["path"]) / "state.json")
+    with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
+        with ledger.Ledger(bank["path"]) as store, store._transaction(read_only=True) as state:
+            proof, _, _ = installation._file(path, MAX_POLICY, private=True)
+            require(proof.sha256 == bank["state_file_sha256"] and not state["leases"] and not state["tokens"],
+                    "continuation-sixteenth-original-prelease-state")
+    require(load_bootstrap(original.path, original.sha256) == original, "continuation-sixteenth-original-drift")
+
+
 @identity._diagnostic_step("native-histories")
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
     generation = descriptor["schema"]
+    sixteenth = receipt if generation == 16 else None
+    if sixteenth is not None:
+        receipt = sixteenth["previous_qualification"]
+        generation = 15
     fifteenth = receipt if generation == 15 else None
     if fifteenth is not None:
         receipt = fifteenth["previous_qualification"]
@@ -1646,6 +1678,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if fifteenth is not None:
         families.append((_continuation_fifteenth_native, {}, fifteenth["native_fifteenth"],
                          "continuation-fifteenth-native-drift"))
+    if sixteenth is not None:
+        families.append((_continuation_sixteenth_native, {}, sixteenth["native_sixteenth"],
+                         "continuation-sixteenth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -1987,6 +2022,8 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
+        elif descriptor["schema"] == 16:
+            retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
     directory_identity = run_intake._directory_identity(root)
     names = run_intake._entries(root)
     require(len(names) <= 256 and all(re.fullmatch("[0-9a-f]{64}", name) for name in names)
@@ -2431,6 +2468,11 @@ def _continuation_fourteenth_native(get):
 def _continuation_fifteenth_native(get):
     return _terminal_family(get, operating_cells.FIFTEENTH_RUN, operating_cells.FIFTEENTH_CHECKS,
                             operating_cells.fifteenth_native_projection)
+
+
+def _continuation_sixteenth_native(get):
+    return _terminal_family(get, operating_cells.SIXTEENTH_RUN, operating_cells.SIXTEENTH_CHECKS,
+                            operating_cells.sixteenth_native_projection)
 
 
 def _terminal_family(get, run_id, check_ids, projection):

@@ -22,6 +22,134 @@ def census_native_capture():
     return json.loads(fixture.read_bytes())
 
 
+def sixteenth_native_capture():
+    fixture = Path(__file__).parent / "fixtures/g06-sixteenth-original-terminal-projection.json"
+    return json.loads(fixture.read_bytes())
+
+
+class SixteenthContinuationTests(unittest.TestCase):
+    def test_pinned_successor_admits_first_attempt_and_rejects_replay(self):
+        workflow = cells.SIXTEENTH_SUCCESSOR_WORKFLOW
+        reusable = cells.SIXTEENTH_SUCCESSOR_REUSABLE
+        successor = {
+            "source_sha": "a" * 40, "run_id": 90000000001, "run_attempt": 1,
+            "first_parent": cells.SIXTEENTH_MAIN, "source_workflow_sha256": workflow, "reusable_sha": reusable,
+        }
+        descriptor = {
+            "schema": 16, "reason": cells.SIXTEENTH_REASON,
+            "qualification": {"path": "/unit/g06-qualification.json", "sha256": cells.SIXTEENTH_QUALIFICATION},
+            "successor": successor,
+        }
+        self.assertEqual(cells.validate_continuation_descriptor(descriptor, workflow, reusable), descriptor)
+        commit = {"sha": successor["source_sha"], "parents": [{"sha": cells.SIXTEENTH_MAIN}]}
+        cells.validate_continuation_commit(commit, descriptor, successor["source_sha"], successor["run_id"], reusable)
+        for invalid in ({"run_attempt": 2}, {"run_id": cells.SIXTEENTH_RUN}, {"source_sha": cells.SIXTEENTH_MAIN},
+                        {"first_parent": cells.FIFTEENTH_MAIN}, {"reusable_sha": cells.FIFTEENTH_SUCCESSOR_REUSABLE}):
+            with self.subTest(invalid=invalid), self.assertRaises(identity.Denied):
+                cells.validate_continuation_descriptor(descriptor | {"successor": successor | invalid}, workflow, reusable)
+
+    def test_qualification_binds_the_original_terminal_graph(self):
+        graph = sixteenth_native_capture()
+        reference = {"device": 10, "inode": 20}
+        previous = {"schema": 15}
+        receipt = {
+            "schema": 16, "purpose": cells.SIXTEENTH_REASON, "native_sixteenth": graph,
+            "previous_qualification": previous,
+            "previous_bootstrap": reference | {"path": "/unit/old/bootstrap.json", "sha256": "a" * 64},
+            "previous_bank": reference | {"path": "/unit/old/ledger", "state_file_sha256": "b" * 64},
+        }
+        counts = {"native_intake_catalogue": 10, "native_run_configuration_catalogue": 9}
+        with (patch.object(cells, "SIXTEENTH_QUALIFICATION", ledger.digest(receipt)),
+              patch.object(cells, "_validate_fifteenth_qualification", return_value=counts) as validate_previous):
+            self.assertEqual(cells.validate_continuation_qualification(receipt), counts)
+            validate_previous.assert_called_once_with(previous)
+        changed = deepcopy(receipt)
+        changed["native_sixteenth"]["run"]["conclusion"] = "success"
+        with (patch.object(cells, "SIXTEENTH_QUALIFICATION", ledger.digest(changed)),
+              self.assertRaisesRegex(identity.Denied, "continuation-sixteenth-history")):
+            cells.validate_continuation_qualification(changed)
+
+    def test_native_history_observes_the_exact_original_jobs_and_checks(self):
+        graph = sixteenth_native_capture()
+        controller = cells.FIFTEENTH_SUCCESSOR_REUSABLE
+        run = graph["run"] | {
+            "repository": {"id": 1103407173, "full_name": "ltn-it/ansible-collection-supplementary",
+                           "private": False, "owner": {"id": 54334171}},
+            "referenced_workflows": [{"sha": controller,
+                "path": "ltn-it/modulix-validation/.github/workflows/collection-quality-profile-isolated.yml@" + controller}],
+        }
+        inventory = {"total_count": len(graph["jobs"]), "jobs": graph["jobs"]}
+        jobs = {row["id"]: row for row in graph["jobs"]}
+        check_ids = cells.SIXTEENTH_CHECKS
+        checks = [jobs[identifier] | {"app": {"id": 15368, "slug": "github-actions"}} for identifier in check_ids]
+        provider = Mock(side_effect=[run, inventory, *checks, inventory])
+        self.assertEqual(run_factory._continuation_sixteenth_native(provider), graph)
+        run_path = f"/actions/runs/{cells.SIXTEENTH_RUN}"
+        jobs_path = run_path + "/attempts/1/jobs?per_page=100&page=1"
+        self.assertEqual(provider.call_args_list, [call(run_path), call(jobs_path),
+            *[call(f"/check-runs/{identifier}") for identifier in check_ids], call(jobs_path)])
+        drifted = deepcopy(inventory)
+        drifted["jobs"][0]["name"] += " (modified)"
+        for before, after, reason in ((drifted, drifted, "continuation-ninth-original-failed-graph"),
+                                      (inventory, drifted, "continuation-ninth-native-inventory-drift")):
+            with self.subTest(reason=reason), self.assertRaisesRegex(identity.Denied, reason):
+                run_factory._continuation_sixteenth_native(Mock(side_effect=[run, before, *checks, after]))
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root Linux preservation fixture")
+class SixteenthBankPreservationTests(unittest.TestCase):
+    def setUp(self):
+        parent = Path("/run/proof")
+        if not parent.is_dir() or parent.stat().st_uid != 0 or parent.stat().st_mode & 0o077:
+            self.skipTest("private Root fixture directory /run/proof required")
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=parent, prefix="sixteenth-preservation-")))
+        self.old, self.new = root / "original", root / "successor"
+        for bank in (self.old, self.new):
+            bank.mkdir(mode=0o700)
+            ledger.Ledger.initialize(str(bank))
+        self.state = self.old / "state.json"
+        self.bootstrap_path = root / "bootstrap.json"
+        self.bootstrap_path.touch(mode=0o600)
+        original_stat = self.bootstrap_path.stat()
+        previous = {"schema": 15}
+        original = SimpleNamespace(path=str(self.bootstrap_path), sha256="a" * 64, value={"ledger_path": str(self.old)},
+                                   file_stamp=(original_stat.st_dev, original_stat.st_ino))
+        self.receipt = {
+            "previous_bootstrap": {"path": original.path, "sha256": original.sha256,
+                                   "device": original_stat.st_dev, "inode": original_stat.st_ino},
+            "previous_bank": {"path": str(self.old), "device": self.old.stat().st_dev, "inode": self.old.stat().st_ino,
+                              "state_file_sha256": hashlib.sha256(self.state.read_bytes()).hexdigest()},
+            "previous_qualification": previous,
+        }
+        self.load = self.enterContext(patch.object(run_factory, "load_bootstrap", return_value=original))
+        self.enterContext(patch.object(run_factory, "_continuation_receipt", return_value=(
+            {"schema": 15, "successor": {"run_id": cells.SIXTEENTH_RUN, "source_sha": cells.SIXTEENTH_MAIN}}, previous)))
+
+    def test_empty_original_is_verified_without_modifying_its_state(self):
+        state = self.state.read_bytes(), self.state.stat().st_mtime_ns
+        run_factory._revalidate_sixteenth_prelease(self.receipt, str(self.new))
+        self.assertEqual((self.state.read_bytes(), self.state.stat().st_mtime_ns), state)
+
+    def test_original_bank_reuse_and_alias_are_refused(self):
+        with self.assertRaisesRegex(identity.Denied, "continuation-tenth-bank-reuse"):
+            run_factory._revalidate_sixteenth_prelease(self.receipt, str(self.old))
+        with (patch.object(run_factory.installation, "_open_directory", return_value=os.open(self.old, os.O_RDONLY)),
+              self.assertRaisesRegex(identity.Denied, "continuation-tenth-bank-alias")):
+            run_factory._revalidate_sixteenth_prelease(self.receipt, str(self.new))
+
+    def test_changed_bank_state_and_bootstrap_inode_are_refused(self):
+        with ledger.Ledger(str(self.old)) as store:
+            store.archive_policy({"custodian_ref": "synthetic-custodian", "storage_ref": "synthetic-store",
+                                  "approval_ref": "synthetic-approval", "retention_seconds": 14400,
+                                  "max_lease_seconds": 1800})
+        with self.assertRaisesRegex(identity.Denied, "continuation-sixteenth-original-prelease-state"):
+            run_factory._revalidate_sixteenth_prelease(self.receipt, str(self.new))
+        original = self.load.return_value
+        with (patch.object(original, "file_stamp", (original.file_stamp[0], original.file_stamp[1] + 1)),
+              self.assertRaisesRegex(identity.Denied, "continuation-sixteenth-original-bootstrap")):
+            run_factory._revalidate_sixteenth_prelease(self.receipt, str(self.new))
+
+
 class PodmanContinuationTests(unittest.TestCase):
     def setUp(self):
         self.lookup = {"path": "/unit/qualification.json", "sha256": "b" * 64}
