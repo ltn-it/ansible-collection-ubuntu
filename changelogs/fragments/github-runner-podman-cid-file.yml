@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    Allow the Incus runner to read the container ID written by Podman 4.9
+    under a private lease directory and retain the existing ownership checks.

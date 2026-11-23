@@ -27,6 +27,267 @@ def sixteenth_native_capture():
     return json.loads(fixture.read_bytes())
 
 
+def seventeenth_native_capture():
+    fixture = Path(__file__).parent / "fixtures/g06-seventeenth-original-terminal-projection.json"
+    return json.loads(fixture.read_bytes())
+
+
+class SeventeenthContinuationTests(unittest.TestCase):
+    def test_bootstrap_requires_all_published_pins_and_a_fresh_first_push(self):
+        workflow, reusable, qualification = "a" * 64, "b" * 40, "c" * 64
+        successor = {"source_sha": "e" * 40, "run_id": 99910000001, "run_attempt": 1,
+                     "first_parent": cells.SEVENTEENTH_MAIN, "source_workflow_sha256": workflow,
+                     "reusable_sha": reusable}
+        descriptor = {"schema": 17, "reason": cells.SEVENTEENTH_REASON,
+                      "qualification": {"path": "/unit/new-qualification.json", "sha256": qualification},
+                      "successor": successor}
+        for missing in ("SEVENTEENTH_QUALIFICATION", "SEVENTEENTH_SUCCESSOR_WORKFLOW", "SEVENTEENTH_SUCCESSOR_REUSABLE"):
+            pins = {"SEVENTEENTH_QUALIFICATION": qualification, "SEVENTEENTH_SUCCESSOR_WORKFLOW": workflow,
+                    "SEVENTEENTH_SUCCESSOR_REUSABLE": reusable}
+            with self.subTest(missing=missing), patch.multiple(cells, **(pins | {missing: None})):
+                with self.assertRaises(identity.Denied):
+                    cells.validate_continuation_descriptor(descriptor, workflow, reusable)
+        with patch.multiple(cells, SEVENTEENTH_QUALIFICATION=qualification,
+                            SEVENTEENTH_SUCCESSOR_WORKFLOW=workflow, SEVENTEENTH_SUCCESSOR_REUSABLE=reusable):
+            self.assertEqual(cells.validate_continuation_descriptor(descriptor, workflow, reusable), descriptor)
+            commit = {"sha": successor["source_sha"], "parents": [{"sha": cells.SEVENTEENTH_MAIN}]}
+            cells.validate_continuation_commit(commit, descriptor, successor["source_sha"], successor["run_id"], reusable)
+            for invalid in ({"run_attempt": 2}, {"run_id": cells.SEVENTEENTH_RUN},
+                            {"source_sha": cells.SEVENTEENTH_MAIN}, {"first_parent": cells.SIXTEENTH_MAIN},
+                            {"reusable_sha": cells.SIXTEENTH_SUCCESSOR_REUSABLE}):
+                with self.subTest(invalid=invalid), self.assertRaises(identity.Denied):
+                    cells.validate_continuation_descriptor(
+                        descriptor | {"successor": successor | invalid}, workflow, reusable)
+
+    def test_qualification_pins_new_catalogue_entries_without_replacing_history(self):
+        kinds = ("native_run_configuration_catalogue", "native_intake_catalogue")
+        prior = {kind: {"a" * 64: "b" * 64} for kind in kinds}
+        previous = {"schema": 16, "previous_qualification": {"retirement": {"catalogues": prior}}}
+        graph = seventeenth_native_capture()["graph"]
+        additions = {kind: {"name": str(index) * 64, "device": 10, "inode": index,
+                            "receipt_sha256": "c" * 64, "inventory_sha256": "d" * 64}
+                     for index, kind in enumerate(kinds, start=1)}
+        steps = {f"{step}-{phase}.json" for step in cells.SEVENTEENTH_RETIREMENT_STEPS for phase in ("intent", "receipt")}
+        journal = {name: "e" * 64 for name in steps | {"complete-receipt.json", "storage-identities.json"}}
+        retired = {"original_bootstrap": {"path": "/unit/old/bootstrap.json", "sha256": "f" * 64, "device": 20, "inode": 21},
+                   "original_bank": {"path": "/unit/old/ledger", "state_file_sha256": "0" * 64, "device": 20, "inode": 22},
+                   "original_record": {"lease_id": cells.SEVENTEENTH_LEASE, "sha256": "a" * 64,
+                                       "unknown_effect_id": "1" * 32},
+                   "new_entries": additions,
+                   "catalogues": {kind: prior[kind] | {additions[kind]["name"]: "d" * 64} for kind in kinds},
+                   "journal": {"path": "/unit/journal", "members": journal},
+                   "retain_until": cells.SEVENTEENTH_RETAIN_UNTIL, "storage_unique_mount_id": 123,
+                   "namespace_cookie": 456}
+        receipt = {"schema": 17, "purpose": cells.SEVENTEENTH_REASON, "native_seventeenth": graph,
+                   "previous_qualification": previous, "retirement": retired}
+        identities = {kind: {"directory_device": 20, "directory_inode": index}
+                      for index, kind in enumerate(kinds, start=24)}
+        with patch.object(cells, "_validate_sixteenth_qualification", return_value=identities) as validate_previous:
+            with patch.object(cells, "SEVENTEENTH_QUALIFICATION", ledger.digest(receipt)):
+                self.assertEqual(cells.validate_continuation_qualification(receipt), identities)
+            validate_previous.assert_called_once_with(previous)
+            changed = deepcopy(receipt)
+            changed["retirement"]["catalogues"][kinds[0]]["a" * 64] = "e" * 64
+            with (patch.object(cells, "SEVENTEENTH_QUALIFICATION", ledger.digest(changed)),
+                  self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-preserved-catalogues")):
+                cells.validate_continuation_qualification(changed)
+
+    def test_native_history_uses_the_actual_seventeenth_run_checks_and_second_inventory(self):
+        capture = seventeenth_native_capture()
+        graph = capture["graph"]
+        checks = capture["checks"]
+        run = graph["run"] | {"repository": capture["repository"], "referenced_workflows": [capture["controller"]]}
+        inventory = {"total_count": len(graph["jobs"]), "jobs": graph["jobs"]}
+        provider = Mock(side_effect=[run, inventory, *checks, deepcopy(inventory)])
+        self.assertEqual(run_factory._continuation_seventeenth_native(provider), graph)
+        run_path = f"/actions/runs/{graph['run']['id']}"
+        jobs_path = run_path + "/attempts/1/jobs?per_page=100&page=1"
+        self.assertEqual(provider.call_args_list, [
+            call(run_path), call(jobs_path), *[call(f"/check-runs/{row['id']}") for row in checks], call(jobs_path),
+        ])
+        drifted = deepcopy(inventory)
+        drifted["jobs"][0]["name"] += " (changed)"
+        changed_check = checks[0] | {"app": checks[0]["app"] | {"id": 1}}
+        for first, check_rows, second, reason in (
+            (drifted, checks, drifted, "continuation-ninth-original-failed-graph"),
+            (inventory, checks, drifted, "continuation-ninth-native-inventory-drift"),
+            (inventory, [changed_check, *checks[1:]], inventory, "continuation-ninth-native-check"),
+        ):
+            with self.subTest(reason=reason), self.assertRaisesRegex(identity.Denied, reason):
+                run_factory._continuation_seventeenth_native(Mock(side_effect=[run, first, *check_rows, second]))
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0 and Path("/run/proof").is_dir(),
+                     "requires private root proof tmpfs")
+class SeventeenthRetirementJournalTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(dir="/run/proof")
+        self.addCleanup(temporary.cleanup)
+        self.parent = Path(temporary.name)
+        self.root = self.parent / f"runner01-original-retirement-{cells.SEVENTEENTH_RUN}"
+        self.root.mkdir(mode=0o700)
+        self.floor = cells.SEVENTEENTH_RETAIN_UNTIL
+        self.bank = self.parent / "original-bank"
+        self.bank.mkdir(mode=0o700)
+        self.bank_file = self.bank / "state.json"
+        self.bank_file.write_bytes(b'{"retained":true}\n')
+        self.bank_file.chmod(0o600)
+        bank = self.bank.stat()
+        self.effect = "1" * 32
+        self.lease = cells.SEVENTEENTH_LEASE
+        job = cells.SEVENTEENTH_CHECKS[0]
+        self.record = {
+            "state": "prepared", "identity": {}, "created_at": self.floor - 15000, "expires_at": self.floor - 14300,
+            "effects": {self.effect: {"operation": "engine-start", "state": "unknown",
+                                      "engine_capture": {}, "engine_process": {}}},
+            "native_terminal": {"source_sha": cells.SEVENTEENTH_MAIN, "controller_sha": cells.SIXTEENTH_SUCCESSOR_REUSABLE,
+                                "run_id": cells.SEVENTEENTH_RUN, "job_id": job, "check_run_id": job,
+                                "run_attempt": 1, "conclusion": "failure", "completed_at": self.floor - 14400},
+            "policy_sha256": "a" * 64,
+        }
+        self.retirement = {
+            "journal": {"path": str(self.root), "members": {}},
+            "original_record": {"lease_id": self.lease, "sha256": ledger.digest(self.record),
+                                "unknown_effect_id": self.effect},
+            "original_bootstrap": {"path": "/unit/bootstrap.json", "sha256": "b" * 64, "device": 20, "inode": 21},
+            "original_bank": {"path": str(self.bank), "device": bank.st_dev, "inode": bank.st_ino,
+                              "state_file_sha256": hashlib.sha256(self.bank_file.read_bytes()).hexdigest()},
+            "new_entries": {"native_run_configuration_catalogue": {"name": "original-configuration"},
+                            "native_intake_catalogue": {"name": "original-intake"}},
+            "retain_until": self.floor,
+            "storage_unique_mount_id": 123,
+            "namespace_cookie": 456,
+        }
+        self.previous = {"schema": 16}
+        self.config = SimpleNamespace(registry_path="/unit/registry", registry_sha256="e" * 64,
+                                      preparation_config_path="/unit/preparation", preparation_config_sha256="f" * 64)
+        self.preparation = SimpleNamespace(lock_path=str(self.parent / "lock"), storage_quota_policy_sha256="c" * 64)
+        self.selected = SimpleNamespace(ledger_path=str(self.bank), cell_config_path="/unit/cell",
+                                        cell_sha256="a" * 64, identity={})
+        scope = {"run": cells.SEVENTEENTH_RUN, "original_lease": self.lease,
+                 "original_record_sha256": self.retirement["original_record"]["sha256"]}
+        for position, step in enumerate(cells.SEVENTEENTH_RETIREMENT_STEPS):
+            intent = scope | {"at": self.floor + 2 * position, "step": step, "metadata": {"fixture_step": step}}
+            self.write(step + "-intent.json", intent)
+            self.write(step + "-receipt.json", intent | {"at": intent["at"] + 1,
+                "state": "separate-effect-verified", "original_unknown_resolved": False})
+        self.write("storage-identities.json", {"identities": [[1792, 8]]})
+        self.write("complete-receipt.json", scope | {"at": self.floor + 28, "scope": "exact-seventeenth-original-retirement",
+            "retain_until": self.floor, "original_bank_sha256": self.retirement["original_bank"]["state_file_sha256"],
+            "storage_policy_sha256": self.preparation.storage_quota_policy_sha256, "storage_unique_mount_id": 123,
+            "original_unknown_preserved": True, "original_unknown_resolved": False,
+            "native_case_acceptance": False, "all_original_resources_absent": True})
+
+    def write(self, name, row):
+        payload = ledger.canonical(row) + b"\n"
+        path = self.root / name
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        self.retirement["journal"]["members"][name] = hashlib.sha256(payload).hexdigest()
+
+    def read(self):
+        with patch.object(run_factory.time, "time", return_value=self.floor + 35):
+            return run_factory._seventeenth_journal(self.retirement, self.parent)
+
+    def test_separate_native_receipt_preserves_actual_failed_result(self):
+        rows = self.read()
+        name = "complete-receipt.json"
+        self.assertFalse(rows[name]["native_case_acceptance"])
+        for changed in ({"original_unknown_resolved": True}, {"native_case_acceptance": True},
+                        {"original_bank_sha256": "d" * 64}, {"at": self.floor + 36}):
+            with self.subTest(changed=changed):
+                self.write(name, rows[name] | changed)
+                with self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-journal-completion"):
+                    self.read()
+
+    def test_early_effect_or_missing_receipt_holds_admission(self):
+        rows = self.read()
+        step = cells.SEVENTEENTH_RETIREMENT_STEPS[0]
+        name = step + "-intent.json"
+        self.write(name, rows[name] | {"at": self.floor - 1})
+        with self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-journal-effect"):
+            self.read()
+        self.write(name, rows[name])
+        (self.root / (step + "-receipt.json")).unlink()
+        with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-journal-inventory"):
+            self.read()
+
+    def revalidate(self, successor_bank=None, successor=None):
+        pin = self.retirement["original_bootstrap"]
+        original = SimpleNamespace(path=pin["path"], sha256=pin["sha256"], file_stamp=(20, 21),
+                                   value={"ledger_path": str(self.bank)})
+        descriptor = {"schema": 16, "successor": {"source_sha": cells.SEVENTEENTH_MAIN,
+                     "run_id": cells.SEVENTEENTH_RUN, "reusable_sha": cells.SIXTEENTH_SUCCESSOR_REUSABLE}}
+        invocation = {"invocation": {"selector": "original-cell"}}
+        store = Mock(path=self.bank)
+        store.lease_ids.return_value = (self.lease,)
+        store.read.side_effect = lambda _: deepcopy(self.record)
+        store.read_policy.return_value = {"retention_seconds": 14400}
+        with (patch.object(run_factory.time, "time", return_value=self.floor + 35),
+              patch.multiple(run_factory, load_bootstrap=Mock(return_value=original),
+                             _continuation_receipt=Mock(return_value=(descriptor, self.previous)),
+                             _retired_original_entries=Mock(return_value=({}, self.config, invocation))),
+              patch.object(run_factory.policy_registry, "load_registry",
+                           return_value=Mock(**{"select.return_value": self.selected})),
+              patch.object(run_factory.preparation, "_config",
+                           return_value=(self.preparation, None, None)),
+              patch.object(ledger, "_observe_historical_bank", return_value=nullcontext()),
+              patch.object(ledger, "Ledger", return_value=nullcontext(store))):
+            run_factory._revalidate_seventeenth_retirement(self.retirement, self.previous, successor_bank, successor)
+
+    def reseal_record(self):
+        digest = ledger.digest(self.record)
+        self.retirement["original_record"]["sha256"] = digest
+        for name in self.retirement["journal"]["members"]:
+            row = json.loads((self.root / name).read_bytes())
+            if "original_record_sha256" in row:
+                self.write(name, row | {"original_record_sha256": digest})
+
+    def test_full_revalidation_reads_the_sealed_bank_journal_and_resource_state(self):
+        with patch.object(run_factory, "_twelfth_resources_absent") as absence:
+            self.revalidate()
+        absence.assert_called_once_with(self.config, self.selected, self.record, self.lease, self.read(), None, None,
+                                        expected_cookie=456)
+
+    def test_changed_or_aliased_bank_denies_before_resource_readback(self):
+        with (patch.object(run_factory, "_twelfth_resources_absent") as absence,
+              self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-bank-alias")):
+            successor = str(self.parent / "successor")
+            real_open = run_factory.installation._open_directory
+            with patch.object(run_factory.installation, "_open_directory",
+                              side_effect=lambda path: real_open(str(self.bank) if path == successor else path)):
+                self.revalidate(successor, {})
+        absence.assert_not_called()
+        self.bank_file.write_bytes(b'{"retained":false}\n')
+        with (patch.object(run_factory, "_twelfth_resources_absent") as absence,
+              self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-original-bank")):
+            self.revalidate()
+        absence.assert_not_called()
+
+    def test_resolved_engine_effect_denies_even_with_matching_record_hash(self):
+        self.record["effects"][self.effect]["state"] = "verified"
+        self.reseal_record()
+        with self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-original-unknown"):
+            self.revalidate()
+
+    def test_retention_must_bind_to_the_actual_terminal_time(self):
+        self.record["native_terminal"]["completed_at"] += 1
+        self.reseal_record()
+        with self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-original-terminal-retention"):
+            self.revalidate()
+
+    def test_returned_storage_path_denies_successor_admission(self):
+        graph = self.parent / "graph"
+        graph.mkdir(mode=0o700)
+        cell = {"engine": {"paths": {"descriptor": str(self.parent)}}}
+        data = {"engine": {"storage_root": str(graph), "runroot": str(self.parent / "runroot")},
+                "output_path": str(self.parent / "output"), "context_path": str(self.parent / "context")}
+        with (patch.multiple(run_factory.cell_contract, _sealed=Mock(return_value=(cell, None, None)),
+                             _environment=Mock(return_value={}), _descriptor=Mock(return_value=data)),
+              self.assertRaisesRegex(identity.Denied, "cleanup-storage-returned-path")):
+            self.revalidate()
+
+
 class SixteenthContinuationTests(unittest.TestCase):
     def test_pinned_successor_admits_first_attempt_and_rejects_replay(self):
         workflow = cells.SIXTEENTH_SUCCESSOR_WORKFLOW

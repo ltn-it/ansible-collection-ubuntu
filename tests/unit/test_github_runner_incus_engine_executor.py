@@ -48,7 +48,9 @@ class ExecutorGuardTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "Requires private Root Linux files")
     def test_startup_reads_podman_id_after_its_separate_write(self):
         with tempfile.TemporaryDirectory(prefix="engine-cid-", dir="/run") as directory:
-            path = str(Path(directory) / "container.cid")
+            runroot = Path(directory) / "lease"
+            runroot.mkdir(mode=0o700)
+            path = str(runroot / "container.cid")
             with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb", buffering=0) as writer:
                 self.assertIsNone(executor._cid(path, awaiting_write=True))
                 with self.assertRaisesRegex(Denied, "engine-cidfile"):
@@ -70,6 +72,37 @@ class ExecutorGuardTests(unittest.TestCase):
                 writer.write(b"z")
                 with self.assertRaisesRegex(Denied, "engine-cidfile"):
                     executor._cid(path, awaiting_write=True)
+
+    @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "Requires private Root Linux files")
+    def test_podman_readable_cid_stays_inside_private_lease_parent(self):
+        with tempfile.TemporaryDirectory(prefix="engine-cid-", dir="/run") as directory:
+            parent = Path(directory)
+            runroot = parent / "lease"
+            runroot.mkdir(mode=0o711)
+            runroot.chmod(0o711)
+            path = runroot / "container.cid"
+            cid = "1" * 64
+            self.assertIsNone(executor._cid(str(path), awaiting_write=True))
+            path.write_text(cid)
+            path.chmod(0o644)
+            self.assertEqual(executor._cid(str(path), awaiting_write=True), cid)
+            self.assertEqual(executor._cid(str(path)), cid)
+            parent.chmod(0o711)
+            with self.assertRaisesRegex(Denied, "engine-private-directory"):
+                executor._cid(str(path), awaiting_write=True)
+            parent.chmod(0o700)
+            path.chmod(0o664)
+            with self.assertRaisesRegex(Denied, "installation-untrusted-file"):
+                executor._cid(str(path))
+            path.chmod(0o640)
+            with self.assertRaisesRegex(Denied, "engine-cidfile"):
+                executor._cid(str(path))
+            path.chmod(0o644)
+            other = runroot / "other"
+            path.rename(other)
+            path.symlink_to(other)
+            with self.assertRaises(OSError):
+                executor._cid(str(path), awaiting_write=True)
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
@@ -258,9 +291,9 @@ class RootExecutorTests(unittest.TestCase):
                 if not bound.wait(2):
                     raise AssertionError("supervisor not bound")
                 target = self.details["runtime"]["cidfile"]
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
                 try:
-                    os.fchmod(fd, 0o600)
+                    os.fchmod(fd, 0o644)
                     opened.set()
                     if pause_cid_write and not read_empty.wait(2):
                         raise AssertionError("Supervisor never observed the empty CID file")

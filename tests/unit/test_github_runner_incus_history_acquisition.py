@@ -222,6 +222,23 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             f._continuation_native_histories(self.get, self.descriptor, broken)
 
+    def test_seventeenth_route_requires_the_new_terminal_family_and_all_earlier_families(self):
+        receipt = self.receipt
+        phases = ("eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
+                  "fifteenth", "sixteenth", "seventeenth")
+        with ExitStack() as stack:
+            checks = {}
+            for phase in phases:
+                graph = {"fixture": phase}
+                receipt = {"previous_qualification": receipt, f"native_{phase}": graph}
+                checks[phase] = stack.enter_context(patch.object(f, f"_continuation_{phase}_native", return_value=graph))
+            f._continuation_native_histories(self.get, {"schema": 17}, receipt)
+            for check in checks.values():
+                check.assert_called_once_with(self.get)
+            with self.assertRaisesRegex(Denied, "continuation-seventeenth-native-drift"):
+                f._continuation_native_histories(
+                    self.get, {"schema": 17}, receipt | {"native_seventeenth": {"fixture": "different"}})
+
     def test_data_missing_pagination_and_second_readback_still_deny(self):
         origin = '/actions/runs/' + str(self.args[0][0]['id']) + '/attempts/1/jobs?per_page=100&page='
         for mode in ['incomplete', 'bad-count', 'missing', 'second-readback']:
