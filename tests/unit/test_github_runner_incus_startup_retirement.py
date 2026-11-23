@@ -135,15 +135,27 @@ class ProtectedStartupRetirementTests(unittest.TestCase):
     def test_registered_pre_vm_failure_retires_through_the_real_root_finalizer(self):
         from incus_lease_issuer import cell_contract, finalization, operating_custody, preparation
         from test_github_runner_incus_partial_preparation import PartialPreparationTests
+        from test_github_runner_incus_run_factory import RootBootstrapTests
+
+        RootBootstrapTests.setUpClass()
+        bootstrap_fixture = RootBootstrapTests()
+        try:
+            bootstrap_fixture.setUp()
+            selected_policy, published_policy = bootstrap_fixture.publish_and_verify_startup_bootstrap()
+        finally:
+            bootstrap_fixture.doCleanups()
 
         PartialPreparationTests.setUpClass()
         fixture = PartialPreparationTests()
         self.addCleanup(fixture.doCleanups)
         archive_policy = ledger.Ledger.archive_policy
-        def opted_in(store, policy):
-            return archive_policy(store, startup_retirement.business_policy(policy))
+        def opted_in(store, _policy):
+            digest = archive_policy(store, published_policy)
+            self.assertEqual(digest, selected_policy.custody_policy_sha256)
+            return digest
         with mock.patch.object(ledger.Ledger, "archive_policy", new=opted_in):
             fixture.setUp()
+        self.assertEqual(fixture.store.read(fixture.lease)["policy_sha256"], selected_policy.custody_policy_sha256)
         cell = fixture.io.fixture
         selected = policy_registry.profile_selector("heavy", "example_heavy", "ubuntu24.04")
         entry = cell.registry_value["cells"].pop("approved")
@@ -175,22 +187,49 @@ class ProtectedStartupRetirementTests(unittest.TestCase):
         self.assertEqual({e["operation"] for e in original["effects"].values()},
                          startup_retirement.PRE_AUTHORITY_CREATORS)
         archived = Path(fixture.store.path).parent / "startup-retirement" / fixture.lease
-        failure = {"schema": 1, "native_terminal_sha256": ledger.digest(terminal),
-                   "diagnostic": "fixture-abort-before-context"}
-        diagnostic = fixture.io.root / "native-failure.json"
-        diagnostic.write_bytes(ledger.canonical(failure))
-        diagnostic.chmod(0o600)
-        locator = fixture.finalizer.archive_before_vm_authority(fixture.registry, selected, fixture.store,
-            fixture.lease, str(diagnostic), ledger.digest(failure))
-        self.assertEqual(locator[0], str(archived))
+        abort = startup_retirement.original_preparation_abort(fixture.store, fixture.lease, original)
+        self.assertEqual((abort["diagnostic"], abort["stage"]), ("preparation-unknown", "context-materialize"))
 
         requests = fixture.io.server.requests
         resources["/1.0/operations?project=" + project + "&recursion=1"] = {"running": ["/item"]}
-        with self.assertRaises(identity.Denied):
-            fixture.finalizer.retire_before_vm_authority(fixture.registry, selected, fixture.store, fixture.lease, *locator)
+        held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
+        self.assertEqual([event["kind"] for event in held["events"]], ["cleanup-unknown"])
         self.assertEqual(fixture.store.read(fixture.lease), original)
+        self.assertFalse(archived.exists())
         self.assertFalse(any(row[0] == "DELETE" for row in requests))
         resources["/1.0/operations?project=" + project + "&recursion=1"] = {}
+
+        with mock.patch.object(startup_retirement, "original_preparation_abort", return_value=None):
+            held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
+        self.assertEqual([event["kind"] for event in held["events"]], ["failed-cell-retained"])
+        self.assertFalse(archived.exists())
+
+        with mock.patch.object(finalization.RootFinalizer, "finalize_partial_preparation",
+                               side_effect=identity.Denied("fixture-interrupt-after-bind")):
+            held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
+        self.assertEqual([event["kind"] for event in held["events"]], ["cleanup-unknown"])
+        bound = fixture.store.read(fixture.lease)
+        self.assertIn("pre_vm_retirement", bound["partial_preparation_custody"])
+        self.assertFalse(any(row[0] == "DELETE" for row in requests))
+
+        archived_failure = archived / "failure.json"
+        original_failure = archived_failure.read_bytes()
+        failure = json.loads(original_failure)
+        self.assertEqual(failure["root_abort"], abort)
+        self.assertEqual(failure["native_terminal_sha256"], ledger.digest(terminal))
+        archived_failure.write_bytes(ledger.canonical({**failure, "root_abort": {**abort, "diagnostic": "changed"}}))
+        held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
+        self.assertEqual([event["kind"] for event in held["events"]], ["cleanup-unknown"])
+        self.assertEqual(fixture.store.read(fixture.lease), bound)
+        self.assertFalse(any(row[0] == "DELETE" for row in requests))
+        archived_failure.write_bytes(original_failure)
+
+        with mock.patch.object(finalization.RootFinalizer, "verify_retired_before_vm_authority",
+                               side_effect=identity.Denied("fixture-interrupt-before-independent-readback")):
+            held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
+        self.assertEqual([event["kind"] for event in held["events"]], ["cleanup-unknown"])
+        self.assertEqual(fixture.store.read(fixture.lease)["state"], "closed")
+        self.assertFalse((archived / "verified-absent.json").exists())
 
         watch = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
         self.assertEqual(watch["events"], [])
@@ -202,6 +241,11 @@ class ProtectedStartupRetirementTests(unittest.TestCase):
         self.assertFalse(result["native_acceptance"])
         self.assertEqual(result["closed_record_sha256"], ledger.digest(latest))
         self.assertEqual((archived / "original.json").read_bytes(), ledger.canonical(original))
+        self.assertEqual(archived_failure.read_bytes(), original_failure)
+        receipt = (archived / "verified-absent.json").read_bytes()
+        repeated = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
+        self.assertEqual(repeated["events"], [])
+        self.assertEqual((archived / "verified-absent.json").read_bytes(), receipt)
         self.assertEqual([request[1] for request in requests if request[0] == "DELETE"],
                          ["/1.0/projects/" + project, "/1.0/networks/" + owner.incus["network"] + "?project=default"])
 

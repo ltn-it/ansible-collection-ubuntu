@@ -354,6 +354,7 @@ def _prepare_locked(session, registry, selector, store, lease_id):
     from . import root_session
     config = root_session._require_session(session)
     started = False
+    pre_authority_stage = None
     try:
         require(type(registry) is policy_registry.Registry and registry.path == config.registry_path
                 and registry.sha256 == config.registry_sha256, "preparation-registry")
@@ -373,10 +374,13 @@ def _prepare_locked(session, registry, selector, store, lease_id):
         _remote(config, prepared, store, transport, "network-create", "network:default:" + target["network"],
                 "bridge", transport.bridge_create)
         started = True
+        pre_authority_stage = "project-create"
         _remote(config, prepared, store, transport, "project-create", "project:" + target["project"],
                 "project", transport.project_create)
+        pre_authority_stage = "profile-configure"
         _remote(config, prepared, store, transport, "profile-configure", "profile:" + target["project"] + ":default",
                 "profile", transport.configure_default_profile)
+        pre_authority_stage = "bridge-readback"
         _fresh(config, prepared, store)
         descriptor = identity.decode_json(prepared.engine_descriptor_bytes)
         if descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
@@ -384,7 +388,9 @@ def _prepare_locked(session, registry, selector, store, lease_id):
             _remote(config, prepared, store, transport, "image-copy", "image:" + target["project"] + ":" + operating_cells.IMAGE,
                     "image", transport.image_copy)
         _bridge_facts_readback(config, prepared, store, transport)
+        pre_authority_stage = "context-materialize"
         materialized = context_materializer.materialize(prepared, store)
+        pre_authority_stage = None
         certificate = incus_mutation.CertificateSpec("lit-lease-" + lease_id, target["project"],
                                                       materialized.certificate_der, prepared.expires_at)
         transport = _typed(prepared, config, certificate)
@@ -397,5 +403,12 @@ def _prepare_locked(session, registry, selector, store, lease_id):
         return PreparationReceipt(lease_id, prepared.cell_sha256, manifest.sha256, binding, prepared.expires_at)
     except Exception as error:
         if started or isinstance(error, PreparationUnknown):
+            if pre_authority_stage is not None:
+                from . import startup_retirement
+                try:
+                    startup_retirement.record_preparation_abort(store, lease_id, pre_authority_stage)
+                except (Denied, OSError):
+                    # The original exception contract stays stable if the Root proof cannot be sealed.
+                    pass
             raise PreparationUnknown("preparation-unknown") from None
         raise PreparationDenied("preparation-denied") from None

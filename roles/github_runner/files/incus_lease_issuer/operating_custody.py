@@ -481,12 +481,34 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                     matches = [(selector, selected) for selector, selected in policies
                         if record["cell_sha256"] == selected.cell_sha256
                         and record["policy_sha256"] == selected.custody_policy_sha256]
-                    if not matches or record["state"] == "closed":
+                    if not matches:
                         continue
+                    closed = record["state"] == "closed"
+                    if closed:
+                        pre_vm = record.get("partial_preparation_custody", {}).get("pre_vm_retirement")
+                        if pre_vm is None:
+                            continue
+                        from . import startup_retirement
+                        try:
+                            locator = startup_retirement.private_archive_locator(store, lease_id)
+                            require(locator is not None and locator[1] == pre_vm["archive_sha256"],
+                                    "startup-retirement-archive-locator")
+                            if startup_retirement.readback_confirmed(locator[0], lease_id, record, pre_vm):
+                                continue
+                        except (ledger.Denied, OSError):
+                            alarm("cleanup-unknown", lease_id, {"state": "startup-retirement-readback-held"})
+                            continue
                     require(len(matches) == 1, "custody-watchdog-selector-ambiguous")
                     visited += 1
                     require(visited <= 256, "custody-watchdog-lease-bound")
                     selector, _ = matches[0]
+                    if closed:
+                        try:
+                            finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)
+                            finalizer.reconcile_pre_vm_readback(runtime._registry, selector, store, lease_id)
+                        except Exception:
+                            alarm("cleanup-unknown", lease_id, {"state": "startup-retirement-readback-held"})
+                        continue
                     starts = [row for row in record["effects"].values() if row["operation"] == "engine-start"]
                     actual_exit = starts[0].get("engine_exit") if len(starts) == 1 else None
                     if not starts:
@@ -515,6 +537,9 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                                 ordinary_floor = record["native_terminal"]["completed_at"] + policy["retention_seconds"]
                                 if store._now() < ordinary_floor:
                                     locator = startup_retirement.private_archive_locator(store, lease_id)
+                                    if locator is None:
+                                        locator = finalizer.archive_before_vm_authority(
+                                            runtime._registry, selector, store, lease_id)
                                     if locator is not None:
                                         finalizer.retire_before_vm_authority(runtime._registry, selector, store,
                                                                           lease_id, *locator)
@@ -830,9 +855,9 @@ def _partial_custody_record(value, record, policy):
         from . import startup_retirement
         evidence = value["pre_vm_retirement"]
         require(policy.get("startup_retirement") == startup_retirement.POLICY
-                and type(evidence) is dict and set(evidence) == {"archive_sha256", "inventory_sha256", "observed_at"}
+                and type(evidence) is dict and set(evidence) == {"archive_sha256", "inventory_sha256", "original_sha256", "observed_at"}
                 and all(type(evidence[key]) is str and ledger.HEX.fullmatch(evidence[key])
-                        for key in ("archive_sha256", "inventory_sha256"))
+                        for key in ("archive_sha256", "inventory_sha256", "original_sha256"))
                 and type(evidence["observed_at"]) is int
                 and record["native_terminal"]["observed_at"] <= evidence["observed_at"]
                 and value["retain_until"] == evidence["observed_at"]
@@ -883,7 +908,7 @@ def _retain_partial_preparation(registry, selector, store, lease_id, *, pre_vm=N
     if pre_vm is not None:
         require(pre_vm["original_sha256"] == ledger.digest(record), "partial-custody-pre-vm-original")
         value.update(retain_until=pre_vm["observed_at"], pre_vm_retirement={
-            key: pre_vm[key] for key in ("archive_sha256", "inventory_sha256", "observed_at")})
+            key: pre_vm[key] for key in ("archive_sha256", "inventory_sha256", "original_sha256", "observed_at")})
     _partial_custody_record(value, record, policy)
     require(cell_contract.partial_preparation_owner(registry, selector, store, lease_id) == owner,
             "partial-custody-owner-drift")

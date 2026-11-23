@@ -140,7 +140,7 @@ class RootBootstrapTests(unittest.TestCase):
             challenge["nonce"], token, "synthetic-job-token")
         return proof, token
 
-    def test_published_startup_policy_survives_the_installer_and_scopes_each_native_cell(self):
+    def publish_and_verify_startup_bootstrap(self):
         from test_github_runner_runtime_v2_installation import probe
         from incus_lease_issuer import startup_retirement
 
@@ -199,6 +199,7 @@ class RootBootstrapTests(unittest.TestCase):
                 self.assertEqual(selected.custody_policy_sha256, baseline_sha)
         proof, _ = self.mint()
         self.assertEqual(proof.policy.custody_policy_sha256, ledger.digest(business))
+        return proof.policy, business
 
     def test_real_signature_socket_nonce_ledger_and_opaque_proof_without_fake_cell(self):
         proof, token = self.mint()

@@ -252,17 +252,17 @@ class RootFinalizer:
                 "startup-retirement-business-cell")
         return owner, config, record, policy, profile, scenario, target
 
-    def archive_before_vm_authority(self, registry, selector, store, lease_id, diagnostic_path, diagnostic_sha256):
-        """Archive exact private diagnostics supplied by the protected native evidence reader."""
-        from . import installation, root_session, startup_retirement
+    def archive_before_vm_authority(self, registry, selector, store, lease_id):
+        """Archive the original Root failure with its authenticated terminal job."""
+        from . import root_session, startup_retirement
         with root_session._session(self._runtime.preparation_config_path,
                                   self._runtime.preparation_config_sha256) as session:
             owner, config, record, *_ = self._startup_scope(session, registry, selector, store, lease_id)
-            proof, raw, _ = installation._file(diagnostic_path, startup_retirement.MAX_ARCHIVE_MEMBER,
-                                               private=True, keep=True)
-            require(proof.sha256 == diagnostic_sha256, "startup-retirement-diagnostic-drift")
-            failure = identity.decode_json(raw)
-            require(raw == ledger.canonical(failure), "startup-retirement-diagnostic-shape")
+            abort = startup_retirement.original_preparation_abort(store, lease_id, record)
+            if abort is None:
+                return None
+            failure = {"schema": 1, "native_terminal_sha256": ledger.digest(record["native_terminal"]),
+                       "root_abort": abort}
             inventory = startup_retirement.observe_before_context(owner, store, config)
             return startup_retirement.publish_original_archive(store, lease_id, record, failure, inventory)
 
@@ -290,8 +290,7 @@ class RootFinalizer:
             operating_custody._retain_partial_preparation(registry, selector, store, lease_id, pre_vm={
                 "original_sha256": observations["original"], "observed_at": observed_at,
                 "archive_sha256": archive["sha256"], "inventory_sha256": archive["inventory"]})
-        self.finalize_partial_preparation(registry, selector, store, lease_id)
-        return self.verify_retired_before_vm_authority(registry, selector, store, lease_id, archive_dir)
+        return self.finalize_partial_preparation(registry, selector, store, lease_id)
 
     def verify_retired_before_vm_authority(self, registry, selector, store, lease_id, archive_dir):
         """Independently re-open the exact retired scope before recording absence."""
@@ -301,12 +300,11 @@ class RootFinalizer:
             owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
             record = store.read(lease_id)
-            evidence = record["partial_preparation_custody"]["pre_vm_retirement"]
-            require(startup_retirement.private_archive_locator(store, lease_id)
-                    == (archive_dir, evidence["archive_sha256"]), "startup-retirement-archive-locator")
+            locator = self._pre_vm_archive(store, lease_id, record)
+            require(locator is not None and locator[0] == archive_dir, "startup-retirement-archive-locator")
             expected = startup_retirement.observe_before_context(owner, store, config, closed=True)
             receipt = {"schema": 1, "lease_id": lease_id, "closed_record_sha256": ledger.digest(record),
-                       "archive_sha256": evidence["archive_sha256"], "resources": expected,
+                       "archive_sha256": locator[1], "resources": expected,
                        "native_acceptance": False}
             generation_publisher._json(Path(archive_dir) / "verified-absent.json", receipt)
             return receipt
@@ -319,6 +317,7 @@ class RootFinalizer:
                                   self._runtime.preparation_config_sha256) as session:
             owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
+            self._pre_vm_archive(store, lease_id, store.read(lease_id))
             target = owner.incus
             fingerprint = owner.creator_targets.get("certificate-create", "").removeprefix("certificate:")
             client = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
@@ -363,10 +362,34 @@ class RootFinalizer:
             require(cleanup.certificates_absent(), "partial-certificate-returned")
             store.close(lease_id)
             record = store.read(lease_id)
-            return {"schema": 1, "state": "FAILED_PARTIAL_PREPARATION_CLOSED", "lease_id": lease_id,
-                    "closed_at": record["closed_at"], "effects_sha256": ledger.digest(record["effects"]),
-                    "partial_custody_sha256": ledger.digest(record["partial_preparation_custody"]),
-                    "native_acceptance": False}
+            receipt = {"schema": 1, "state": "FAILED_PARTIAL_PREPARATION_CLOSED", "lease_id": lease_id,
+                       "closed_at": record["closed_at"], "effects_sha256": ledger.digest(record["effects"]),
+                       "partial_custody_sha256": ledger.digest(record["partial_preparation_custody"]),
+                       "native_acceptance": False}
+        # A readback has its own fresh Root session and can be recovered
+        # independently from the closed ledger, without reissuing any effect.
+        self.reconcile_pre_vm_readback(registry, selector, store, lease_id)
+        return receipt
+
+    @staticmethod
+    def _pre_vm_archive(store, lease_id, record):
+        from . import startup_retirement
+        evidence = record.get("partial_preparation_custody", {}).get("pre_vm_retirement")
+        if evidence is None:
+            return None
+        locator = startup_retirement.private_archive_locator(store, lease_id)
+        require(locator is not None and locator[1] == evidence["archive_sha256"],
+                "startup-retirement-archive-locator")
+        startup_retirement.archived_original(*locator, record)
+        return locator
+
+    def reconcile_pre_vm_readback(self, registry, selector, store, lease_id):
+        from . import startup_retirement
+        record = store.read(lease_id)
+        locator = self._pre_vm_archive(store, lease_id, record)
+        if locator is not None and not startup_retirement.readback_confirmed(locator[0], lease_id, record,
+                record["partial_preparation_custody"]["pre_vm_retirement"]):
+            self.verify_retired_before_vm_authority(registry, selector, store, lease_id, locator[0])
 
     def finalize(self, registry, selector, store, lease_id):
         """Explicit Root call, serialized; no effect retry or job acceptance.

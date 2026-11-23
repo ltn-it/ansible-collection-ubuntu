@@ -18,6 +18,7 @@ FAILURES = frozenset({"failure", "startup_failure", "timed_out", "cancelled"})
 ARCHIVE_MEMBERS = ("original", "terminal", "failure", "inventory")
 MAX_ARCHIVE_MEMBER = 8 * 1024 * 1024
 PRE_AUTHORITY_CREATORS = frozenset({"network-create", "project-create", "profile-configure"})
+PRE_AUTHORITY_STAGES = frozenset({"project-create", "profile-configure", "bridge-readback", "context-materialize"})
 START_BOUNDARY = "root-journal-before-vm-authority"
 
 
@@ -68,9 +69,20 @@ def archived_original(directory, manifest_sha256, record):
                                               MAX_ARCHIVE_MEMBER, private=True, keep=True)
         require(member.sha256 == manifest[name] and member.size > 0, "startup-retirement-archive-member")
         contents[name] = data
-    require(contents["original"] == ledger.canonical(record)
-            and contents["terminal"] == ledger.canonical(record["native_terminal"]),
-            "startup-retirement-archived-original-drift")
+    bound = record.get("partial_preparation_custody", {}).get("pre_vm_retirement")
+    if bound is None:
+        require(contents["original"] == ledger.canonical(record), "startup-retirement-archived-original-drift")
+    else:
+        original = identity.decode_json(contents["original"])
+        require(manifest["original"] == bound["original_sha256"] and manifest["inventory"] == bound["inventory_sha256"]
+                and manifest_sha256 == bound["archive_sha256"]
+                and type(original) is dict and contents["original"] == ledger.canonical(original)
+                and all(original[key] == record[key] for key in ("identity", "worker", "cell_sha256", "policy_sha256",
+                                                               "native_terminal"))
+                and all(record["effects"].get(effect) == value for effect, value in original["effects"].items()),
+                "startup-retirement-armed-original-drift")
+    require(contents["terminal"] == ledger.canonical(record["native_terminal"]),
+            "startup-retirement-archived-terminal-drift")
     require(installation._file(manifest_path, 65536, private=True, keep=True) == (proof, raw, stamp),
             "startup-retirement-archive-replaced")
     return {**manifest, "sha256": manifest_sha256}
@@ -174,15 +186,56 @@ def private_archive_locator(store, lease_id):
     return str(folder), proof.sha256
 
 
+def _abort_path(store, lease_id):
+    require(os.geteuid() == 0 and type(store) is ledger.Ledger and store.owner_uid == 0
+            and type(lease_id) is str and ledger.ID.fullmatch(lease_id), "startup-retirement-root-abort")
+    return Path(store.path).parent / ("pre-vm-abort-" + lease_id + ".json")
+
+
+def _abort_record(lease_id, record, stage):
+    effects = tuple(record["effects"].values())
+    require(stage in PRE_AUTHORITY_STAGES and record["state"] in {"prepared", "cancelled"}
+            and bool(effects) and all(row["state"] == "verified" and row["operation"] in PRE_AUTHORITY_CREATORS
+                                      for row in effects), "startup-retirement-original-abort-scope")
+    return {"schema": 1, "lease_id": lease_id, "identity_sha256": ledger.digest(record["identity"]),
+            "effects_sha256": ledger.digest(record["effects"]), "stage": stage,
+            "diagnostic": "preparation-unknown"}
+
+
+def record_preparation_abort(store, lease_id, stage):
+    """Persist the original normalized error where the Root preparation attempt ends."""
+    from . import generation_publisher
+
+    path = _abort_path(store, lease_id)
+    record = store.read(lease_id)
+    policy = store.read_policy(record["policy_sha256"])
+    if policy.get("startup_retirement") == POLICY:
+        generation_publisher._json(path, _abort_record(lease_id, record, stage))
+
+
+def original_preparation_abort(store, lease_id, record):
+    """Read the preparation failure sealed before native terminal reconciliation."""
+    path = _abort_path(store, lease_id)
+    if not os.path.lexists(path):
+        return None
+    _, raw, _ = installation._file(str(path), 65536, private=True, keep=True)
+    value = identity.decode_json(raw)
+    require(type(value) is dict and type(value.get("stage")) is str
+            and raw == ledger.canonical(_abort_record(lease_id, record, value["stage"])),
+            "startup-retirement-original-abort-binding")
+    return value
+
+
 def publish_original_archive(store, lease_id, record, failure, inventory):
     """Make the validated original archive durable before publishing its locator."""
     from . import generation_publisher
 
     terminal = record["native_terminal"]
-    require(type(failure) is dict and set(failure) == {"schema", "native_terminal_sha256", "diagnostic"}
+    require(type(failure) is dict and set(failure) == {"schema", "native_terminal_sha256", "root_abort"}
             and type(failure["schema"]) is int and failure["schema"] == 1
             and failure["native_terminal_sha256"] == ledger.digest(terminal)
-            and type(failure["diagnostic"]) is str and bool(failure["diagnostic"].strip()),
+            and failure["root_abort"] is not None
+            and failure["root_abort"] == original_preparation_abort(store, lease_id, record),
             "startup-retirement-native-diagnostic")
     require(store.read(lease_id) == record, "startup-retirement-original-drift")
     folder = Path(store.path).parent / "startup-retirement" / lease_id
@@ -196,3 +249,18 @@ def publish_original_archive(store, lease_id, record, failure, inventory):
     require(archived_original(str(folder), binding, record) == hashes | {"sha256": binding},
             "startup-retirement-archive-readback")
     return str(folder), binding
+
+
+def readback_confirmed(directory, lease_id, record, evidence):
+    path = directory + "/verified-absent.json"
+    if not os.path.lexists(path):
+        return False
+    _, raw, _ = installation._file(path, 65536, private=True, keep=True)
+    value = identity.decode_json(raw)
+    require(type(value) is dict and set(value) == {"schema", "lease_id", "closed_record_sha256",
+            "archive_sha256", "resources", "native_acceptance"}
+            and type(value["schema"]) is int and value["schema"] == 1 and record["state"] == "closed"
+            and value["lease_id"] == lease_id and value["closed_record_sha256"] == ledger.digest(record)
+            and value["archive_sha256"] == evidence["archive_sha256"] and value["native_acceptance"] is False
+            and raw == ledger.canonical(value), "startup-retirement-archived-readback-drift")
+    return True
