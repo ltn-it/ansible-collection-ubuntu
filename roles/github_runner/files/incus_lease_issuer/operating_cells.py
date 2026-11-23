@@ -2204,7 +2204,7 @@ def _validate_seventeenth_qualification(value):
             and ledger.digest(value["native_seventeenth"]) == SEVENTEENTH_GRAPH,
             "continuation-seventeenth-history")
     previous = value["previous_qualification"]
-    _validate_sixteenth_qualification(previous)
+    catalogue_identities = _validate_sixteenth_qualification(previous)
     retirement = engine_policy._keys(value["retirement"], {
         "original_bootstrap", "original_bank", "original_record", "new_entries", "catalogues",
         "retain_until", "journal", "storage_unique_mount_id", "namespace_cookie",
@@ -2241,4 +2241,4 @@ def _validate_seventeenth_qualification(value):
         require(entry["name"] not in entries and len(entries) < 256
                 and catalogues[kind] == {**entries, entry["name"]: entry["inventory_sha256"]},
                 "continuation-seventeenth-preserved-catalogues")
-    return {kind: len(entries) for kind, entries in catalogues.items()}
+    return catalogue_identities
