@@ -27,6 +27,11 @@ def sixteenth_native_capture():
     return json.loads(fixture.read_bytes())
 
 
+def seventeenth_native_capture():
+    fixture = Path(__file__).parent / "fixtures/g06-seventeenth-original-terminal-projection.json"
+    return json.loads(fixture.read_bytes())
+
+
 class SeventeenthContinuationTests(unittest.TestCase):
     def test_bootstrap_requires_all_published_pins_and_a_fresh_first_push(self):
         workflow, reusable, qualification = "a" * 64, "b" * 40, "c" * 64
@@ -58,7 +63,7 @@ class SeventeenthContinuationTests(unittest.TestCase):
         kinds = ("native_run_configuration_catalogue", "native_intake_catalogue")
         prior = {kind: {"a" * 64: "b" * 64} for kind in kinds}
         previous = {"schema": 16, "previous_qualification": {"retirement": {"catalogues": prior}}}
-        graph = sixteenth_native_capture()
+        graph = seventeenth_native_capture()["graph"]
         additions = {kind: {"name": str(index) * 64, "device": 10, "inode": index,
                             "receipt_sha256": "c" * 64, "inventory_sha256": "d" * 64}
                      for index, kind in enumerate(kinds, start=1)}
@@ -77,8 +82,7 @@ class SeventeenthContinuationTests(unittest.TestCase):
                    "previous_qualification": previous, "retirement": retired}
         identities = {kind: {"directory_device": 20, "directory_inode": index}
                       for index, kind in enumerate(kinds, start=24)}
-        with (patch.object(cells, "SEVENTEENTH_GRAPH", ledger.digest(graph)),
-              patch.object(cells, "_validate_sixteenth_qualification", return_value=identities) as validate_previous):
+        with patch.object(cells, "_validate_sixteenth_qualification", return_value=identities) as validate_previous:
             with patch.object(cells, "SEVENTEENTH_QUALIFICATION", ledger.digest(receipt)):
                 self.assertEqual(cells.validate_continuation_qualification(receipt), identities)
             validate_previous.assert_called_once_with(previous)
@@ -87,6 +91,30 @@ class SeventeenthContinuationTests(unittest.TestCase):
             with (patch.object(cells, "SEVENTEENTH_QUALIFICATION", ledger.digest(changed)),
                   self.assertRaisesRegex(identity.Denied, "continuation-seventeenth-preserved-catalogues")):
                 cells.validate_continuation_qualification(changed)
+
+    def test_native_history_uses_the_actual_seventeenth_run_checks_and_second_inventory(self):
+        capture = seventeenth_native_capture()
+        graph = capture["graph"]
+        checks = capture["checks"]
+        run = graph["run"] | {"repository": capture["repository"], "referenced_workflows": [capture["controller"]]}
+        inventory = {"total_count": len(graph["jobs"]), "jobs": graph["jobs"]}
+        provider = Mock(side_effect=[run, inventory, *checks, deepcopy(inventory)])
+        self.assertEqual(run_factory._continuation_seventeenth_native(provider), graph)
+        run_path = f"/actions/runs/{graph['run']['id']}"
+        jobs_path = run_path + "/attempts/1/jobs?per_page=100&page=1"
+        self.assertEqual(provider.call_args_list, [
+            call(run_path), call(jobs_path), *[call(f"/check-runs/{row['id']}") for row in checks], call(jobs_path),
+        ])
+        drifted = deepcopy(inventory)
+        drifted["jobs"][0]["name"] += " (changed)"
+        changed_check = checks[0] | {"app": checks[0]["app"] | {"id": 1}}
+        for first, check_rows, second, reason in (
+            (drifted, checks, drifted, "continuation-ninth-original-failed-graph"),
+            (inventory, checks, drifted, "continuation-ninth-native-inventory-drift"),
+            (inventory, [changed_check, *checks[1:]], inventory, "continuation-ninth-native-check"),
+        ):
+            with self.subTest(reason=reason), self.assertRaisesRegex(identity.Denied, reason):
+                run_factory._continuation_seventeenth_native(Mock(side_effect=[run, first, *check_rows, second]))
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0 and Path("/run/proof").is_dir(),
