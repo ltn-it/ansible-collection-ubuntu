@@ -7,6 +7,7 @@ any original ledger result.
 
 import os
 from pathlib import Path, PurePosixPath
+import uuid
 
 from . import identity, installation, ledger, policy_registry
 from .identity import require
@@ -186,6 +187,27 @@ def private_archive_locator(store, lease_id):
     return str(folder), proof.sha256
 
 
+def _publish_staged(staged, target):
+    """Commit a complete Root-private file or directory under the caller's lock."""
+    require(staged.parent == target.parent and staged.name.startswith("."), "startup-retirement-stage-scope")
+    parent = installation._open_directory(str(target.parent))
+    try:
+        require(not os.path.lexists(target), "startup-retirement-output-already-sealed")
+        os.rename(staged.name, target.name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def _publish_record(path, value):
+    from . import generation_publisher
+
+    require(not os.path.lexists(path), "startup-retirement-output-already-sealed")
+    staged = path.with_name("." + path.name + "." + uuid.uuid4().hex)
+    generation_publisher._json(staged, value)
+    _publish_staged(staged, path)
+
+
 def _abort_path(store, lease_id):
     require(os.geteuid() == 0 and type(store) is ledger.Ledger and store.owner_uid == 0
             and type(lease_id) is str and ledger.ID.fullmatch(lease_id), "startup-retirement-root-abort")
@@ -204,13 +226,11 @@ def _abort_record(lease_id, record, stage):
 
 def record_preparation_abort(store, lease_id, stage):
     """Persist the original normalized error where the Root preparation attempt ends."""
-    from . import generation_publisher
-
     path = _abort_path(store, lease_id)
     record = store.read(lease_id)
     policy = store.read_policy(record["policy_sha256"])
     if policy.get("startup_retirement") == POLICY:
-        generation_publisher._json(path, _abort_record(lease_id, record, stage))
+        _publish_record(path, _abort_record(lease_id, record, stage))
 
 
 def original_preparation_abort(store, lease_id, record):
@@ -241,14 +261,22 @@ def publish_original_archive(store, lease_id, record, failure, inventory):
     folder = Path(store.path).parent / "startup-retirement" / lease_id
     if not os.path.lexists(folder.parent):
         generation_publisher._mkdir(folder.parent)
-    generation_publisher._mkdir(folder)
+    staged = folder.with_name("." + lease_id + "." + uuid.uuid4().hex)
+    generation_publisher._mkdir(staged)
     members = {"original": record, "terminal": terminal, "failure": failure, "inventory": inventory}
-    hashes = {name: generation_publisher._json(folder / (name + ".json"), value) for name, value in members.items()}
+    hashes = {name: generation_publisher._json(staged / (name + ".json"), value) for name, value in members.items()}
     require(store.read(lease_id) == record, "startup-retirement-original-drift")
-    binding = generation_publisher._json(folder / "manifest.json", hashes)
+    binding = generation_publisher._json(staged / "manifest.json", hashes)
+    require(archived_original(str(staged), binding, record) == hashes | {"sha256": binding},
+            "startup-retirement-staged-archive")
+    _publish_staged(staged, folder)
     require(archived_original(str(folder), binding, record) == hashes | {"sha256": binding},
             "startup-retirement-archive-readback")
     return str(folder), binding
+
+
+def publish_readback(directory, receipt):
+    _publish_record(Path(directory) / "verified-absent.json", receipt)
 
 
 def readback_confirmed(directory, lease_id, record, evidence):

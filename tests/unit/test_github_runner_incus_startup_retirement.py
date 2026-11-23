@@ -204,6 +204,13 @@ class ProtectedStartupRetirementTests(unittest.TestCase):
         self.assertEqual([event["kind"] for event in held["events"]], ["failed-cell-retained"])
         self.assertFalse(archived.exists())
 
+        with mock.patch.object(startup_retirement, "_publish_staged",
+                               side_effect=OSError("fixture-interrupt-before-archive-rename")):
+            held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
+        self.assertEqual([event["kind"] for event in held["events"]], ["cleanup-unknown"])
+        self.assertFalse(archived.exists())
+        self.assertEqual(fixture.store.read(fixture.lease), original)
+
         with mock.patch.object(finalization.RootFinalizer, "finalize_partial_preparation",
                                side_effect=identity.Denied("fixture-interrupt-after-bind")):
             held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
@@ -224,12 +231,13 @@ class ProtectedStartupRetirementTests(unittest.TestCase):
         self.assertFalse(any(row[0] == "DELETE" for row in requests))
         archived_failure.write_bytes(original_failure)
 
-        with mock.patch.object(finalization.RootFinalizer, "verify_retired_before_vm_authority",
-                               side_effect=identity.Denied("fixture-interrupt-before-independent-readback")):
+        with mock.patch.object(startup_retirement, "_publish_staged",
+                               side_effect=OSError("fixture-interrupt-before-independent-receipt-rename")):
             held = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
         self.assertEqual([event["kind"] for event in held["events"]], ["cleanup-unknown"])
         self.assertEqual(fixture.store.read(fixture.lease)["state"], "closed")
         self.assertFalse((archived / "verified-absent.json").exists())
+        self.assertEqual(len(list(archived.glob(".verified-absent.json.*"))), 1)
 
         watch = operating_custody.tick_runtime(str(fixture.runtime), ledger.digest(runtime), "f" * 64)
         self.assertEqual(watch["events"], [])

@@ -294,7 +294,7 @@ class RootFinalizer:
 
     def verify_retired_before_vm_authority(self, registry, selector, store, lease_id, archive_dir):
         """Independently re-open the exact retired scope before recording absence."""
-        from . import generation_publisher, root_session, startup_retirement
+        from . import root_session, startup_retirement
         with root_session._session(self._runtime.preparation_config_path,
                                   self._runtime.preparation_config_sha256) as session:
             owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
@@ -306,7 +306,7 @@ class RootFinalizer:
             receipt = {"schema": 1, "lease_id": lease_id, "closed_record_sha256": ledger.digest(record),
                        "archive_sha256": locator[1], "resources": expected,
                        "native_acceptance": False}
-            generation_publisher._json(Path(archive_dir) / "verified-absent.json", receipt)
+            startup_retirement.publish_readback(archive_dir, receipt)
             return receipt
 
     def finalize_partial_preparation(self, registry, selector, store, lease_id):
