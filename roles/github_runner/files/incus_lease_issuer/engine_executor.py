@@ -876,14 +876,37 @@ def _stable_process(pid, manifest, pidfd):
 
 
 def _cid(path, *, awaiting_write=False):
-    if not os.path.lexists(path):
-        return None
+    parts = installation._absolute(path)
+    require(len(parts) >= 3 and parts[-1] == "container.cid", "engine-cidfile")
+    # Podman 4.9 creates its CID file as Root 0644 even when launched with
+    # umask 077. Keep the read below the private parent of the lease runroot,
+    # including while Podman temporarily grants traversal on the runroot itself.
+    private_root = engine._directory("/" + "/".join(parts[:-2]), private=True)
     try:
-        _, raw, _ = installation._file(path, 128, private=True, keep=True)
+        runroot = os.open(parts[-2], installation.DIR_FLAGS, dir_fd=private_root)
+        try:
+            info = os.fstat(runroot)
+            installation._directory(info)
+            require(stat.S_IMODE(info.st_mode) in {0o700, 0o711}, "engine-cidfile")
+            try:
+                fd = os.open(parts[-1], installation.FILE_FLAGS, dir_fd=runroot)
+            except FileNotFoundError:
+                return None
+            try:
+                _, raw, stamp = installation._hash_file(fd, path, 128, keep=True)
+                require(stat.S_IMODE(stamp[2]) in {0o600, 0o644}, "engine-cidfile")
+                require(installation._stamp(os.stat(parts[-1], dir_fd=runroot, follow_symlinks=False)) == stamp,
+                        "installation-file-changed")
+            finally:
+                os.close(fd)
+        finally:
+            os.close(runroot)
     except Denied as error:
         if awaiting_write and error.args == ("installation-file-changed",):
             return None
         raise
+    finally:
+        os.close(private_root)
     # Podman creates the private file before writing its ID. Only the original
     # owner's bounded startup poll can wait for that write to complete.
     if awaiting_write and not raw:
