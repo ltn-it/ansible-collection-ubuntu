@@ -794,6 +794,7 @@ class PostEngineFinalizerTests(unittest.TestCase):
             self.assertEqual(self.finalizer.finalize_post_engine_failure(*self.target), awaiting)
         recheck.assert_called_with(self.permit, observe.return_value, self.store._now.return_value)
         self.assertEqual(release.call_args.args[-1], image)
+        self.assertEqual(release.call_args.kwargs, {"private_archive": Path("/proof/archive")})
         self.store.close.assert_not_called()
 
     def test_verified_cleanup_resume_holds_if_original_project_returned(self):
@@ -830,7 +831,8 @@ class PostEngineFinalizerTests(unittest.TestCase):
             self.cleanup._client.pool_volumes.return_value = []
             proof = self.finalizer._post_engine_absence(mock.sentinel.session, *self.target)
         self.assertEqual(proof["state"], "verified-absence")
-        self.assertEqual([call.kwargs for call in refresh.call_args_list], [{"refresh": True}, {"refresh": True}])
+        self.assertEqual([call.kwargs for call in refresh.call_args_list],
+                         [{"refresh": True, "private_archive": Path("/proof/archive")}] * 2)
         self.store.close.assert_not_called()
 
     def test_private_copy_requires_the_exact_unchanged_default_image(self):

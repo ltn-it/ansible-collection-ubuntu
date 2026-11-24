@@ -839,6 +839,9 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
     project = target["project"]
     private_image = "/1.0/images/" + operating_cells.IMAGE + "?project=" + project
     default_image = private_image.replace("?project=" + project, "?project=default")
+    raw = Path(identity.decode_json(manifest.canonical_bytes)["engine"]["runroot"])
+    archive = raw.with_name(lease + ".post-engine-evidence")
+    opened_quota_paths = []
     server.resources["/1.0/instances?project=" + project] = []
     server.resources["/1.0/operations?project=" + project + "&recursion=1"] = {}
     server.resources["/1.0/storage-pools/" + target["pool"] + "/volumes?recursion=1&all-projects=true"] = []
@@ -893,8 +896,16 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
         journal.record(lease, effect, "verified", evidence_sha256="e" * 64)
 
     @contextmanager
-    def observed_quota(*_args):
-        yield
+    def observed_quota(_policy, _digest, paths, *, engine_inputs=None):
+        assert engine_inputs is None and len(paths) == 1
+        fd = engine_policy._directory(paths[0], private=True)
+        try:
+            opened_quota_paths.append(Path(paths[0]))
+            assert Path(paths[0]) in {archive.parent, archive}
+            yield
+            assert Path(paths[0]).stat().st_ino == os.fstat(fd).st_ino
+        finally:
+            os.close(fd)
 
     @contextmanager
     def namespace_witness(name):
@@ -909,7 +920,7 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
     stack.enter_context(mock.patch.object(network_fence, "_namespace_refs_drained"))
     stack.enter_context(mock.patch.object(cleanup_storage, "_cleanup_limits", return_value=(4096, 20)))
     stack.enter_context(mock.patch.object(cleanup_storage, "_no_consumers"))
-    stack.enter_context(mock.patch.object(storage_quota, "acquire_existing_evidence_quota", side_effect=observed_quota))
+    stack.enter_context(mock.patch.object(storage_quota, "_acquire_paths", side_effect=observed_quota))
 
     runtime, sha = configuration.runtime_config_path, configuration.runtime_config_sha256
     emergency_stop.RootEmergencyStop(runtime, sha).stop(registry, io.selector, store, lease)
@@ -921,8 +932,7 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
     assert original["native_terminal"]["conclusion"] == "failure"
     assert store._now() < original["native_terminal"]["completed_at"] + 14400
     owner = cell_contract.owned_cell_for_cleanup(registry, io.selector, store, lease)
-    raw = Path(identity.decode_json(owner.engine_descriptor_bytes)["engine"]["runroot"])
-    archive = raw.with_name(lease + ".post-engine-evidence")
+    assert startup_retirement._post_engine_archive_path(owner) == archive
     reads = []
     interrupted = []
     reader = finalization.RootFinalizer.readback_post_engine_failure
@@ -935,7 +945,12 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
             interrupted.append(True)
             raise identity.Denied("fixture-independent-readback-unavailable")
         result = reader(finalizer, real_registry, selector, bank, real_lease, permit_sha)
-        assert bank.read(real_lease)["state"] != "closed"
+        retained = bank.read(real_lease)
+        assert retained["state"] != "closed"
+        for effect_id, effect in retained["effects"].items():
+            if effect["operation"] in {"engine-release", "context-delete"}:
+                metadata, _ = bank.read_cleanup_observation(real_lease, effect_id)
+                assert metadata["spool"] == str(archive)
         reads.append(result)
         return result
 
@@ -968,6 +983,7 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
     assert deletions == [private_image]
     assert ("GET", default_image) in [(method, path) for method, path, *_ in server.requests]
     assert archive.is_dir() and not raw.exists()
+    assert not raw.with_name(lease + ".public-evidence").exists() and archive in opened_quota_paths
     permit = startup_retirement._locate_post_engine_permit(store, lease, archive)
     proof = startup_retirement._read_post_engine_readback(store, lease, reads[0]["readback_sha256"])
     assert proof["permit_sha256"] == permit["permit_sha256"] and not proof["native_acceptance"]

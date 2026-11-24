@@ -522,15 +522,16 @@ class RootFinalizer:
             observation = self._observe_failed_engine_without_vm(session, registry, selector, store, lease_id)
             return startup_retirement._publish_post_engine_permit(session, owner, store, observation)
 
-    def _release_owned_resources(self, session, store, owner, config, cleanup, project_deleted, image_target):
+    def _release_owned_resources(self, session, store, owner, config, cleanup, project_deleted, image_target, *,
+                                 private_archive=None):
         from . import cleanup_storage
 
         registry, selector, lease_id = owner.registry, owner.selector, owner.lease_id
         target = owner.incus
         worker = ledger.Worker(**store.read(lease_id)["worker"])
-        cleanup_storage.release_engine(owner, store, config)
+        cleanup_storage.release_engine(owner, store, config, private_archive=private_archive)
         self._fresh(session, registry, selector, store, owner)
-        cleanup_storage.delete_context(owner, store, config)
+        cleanup_storage.delete_context(owner, store, config, private_archive=private_archive)
         if image_target is not None and project_deleted is None:
             self._remote_delete(session, registry, selector, store, owner, cleanup, "image-delete",
                 image_target, "image", cleanup.image_delete)
@@ -616,20 +617,22 @@ class RootFinalizer:
                 project_deleted = _effect(record, "project-delete", "project:" + owner.incus["project"])
                 copies = [effect["target"] for effect in record["effects"].values() if effect["operation"] == "image-copy"]
                 image_target = copies[0] if copies else None
+                archive = startup_retirement._post_engine_archive_path(owner)
                 if project_deleted is None:
                     cleanup.wait_quiet(config.operation_wait_seconds)
                 if progress["cleanup_started"]:
                     self._check_post_engine_resume(owner, record, cleanup, project_deleted, image_target)
                     self._check_post_engine_default_image(record, cleanup, permit)
-                    cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup)
+                    cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup,
+                                                                   private_archive=archive)
                 else:
                     observation = self._observe_failed_engine_without_vm(session, registry, selector, store, lease_id)
                     startup_retirement._require_post_engine_observation(permit, observation, store._now())
-                archive = startup_retirement._post_engine_archive_path(owner)
                 require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256, archive) == permit
                         and store.read(lease_id) == record, "post-engine-authorization-drift")
                 attempted = True
-                self._release_owned_resources(session, store, owner, config, cleanup, project_deleted, image_target)
+                self._release_owned_resources(session, store, owner, config, cleanup, project_deleted, image_target,
+                                              private_archive=archive)
                 return startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"], archive)
         except FinalizationUnknown:
             raise
@@ -647,8 +650,9 @@ class RootFinalizer:
             rows = [effect for effect in record["effects"].values() if effect["operation"] == operation]
             require(len(rows) == 1 and "cleanup_postcheck" in rows[0] and "cleanup_observation" in rows[0],
                     "post-engine-independent-storage-witness-required")
-        cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup, refresh=True)
         archive = startup_retirement._post_engine_archive_path(owner)
+        cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup, refresh=True,
+                                                       private_archive=archive)
         journal = startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"], archive)
         resources = {kind: cleanup.readback(kind) for kind in ("project", "profile", "bridge")}
         require(all(row["state"] == "absent_observed" for row in resources.values())

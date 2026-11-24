@@ -819,7 +819,19 @@ def reconcile_postchecks(session, owner, store, config, cleanup):
     _reconcile_verified_postchecks(session, owner, store, config, cleanup)
 
 
-def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, refresh=False):
+def _evidence_quota_directory(owner, data, private_archive):
+    runroot = data["engine"]["runroot"]
+    if private_archive is not None:
+        from . import startup_retirement
+        require(private_archive == startup_retirement._post_engine_archive_path(owner),
+                "cleanup-storage-private-archive")
+        return str(private_archive)
+    if type(owner) is cell_contract.PartialPreparationOwner:
+        return str(PurePosixPath(runroot).parent)
+    return runroot + ".public-evidence"
+
+
+def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, refresh=False, private_archive=None):
     """Read verified effects for callers that have already checked custody."""
     from . import kernel, root_session
     require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
@@ -850,8 +862,7 @@ def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, re
                     if effect["operation"] == "engine-release" else [data["context_path"], owner.engine_descriptor_path])
         require(metadata["paths"] == expected and len(metadata["parents"]) == len(expected),
                 "cleanup-reconciliation-paths")
-        spool = (str(PurePosixPath(data["engine"]["runroot"]).parent)
-                 if type(owner) is cell_contract.PartialPreparationOwner else data["engine"]["runroot"] + ".public-evidence")
+        spool = _evidence_quota_directory(owner, data, private_archive)
         require(metadata["spool"] == spool, "cleanup-reconciliation-spool")
         identities = set(struct.iter_unpack(">QQ", pairs))
         require(len(identities) * 16 == len(pairs), "cleanup-reconciliation-duplicate-inode")
@@ -934,7 +945,7 @@ def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, re
             for fd in reversed(opened): os.close(fd)
 
 
-def release_engine(owner, store, config):
+def release_engine(owner, store, config, *, private_archive=None):
     """Release only the three directory inodes created by engine-prepare."""
     effect, opened = None, []
     publication_attempted = False
@@ -968,11 +979,8 @@ def release_engine(owner, store, config):
         creator = record["effects"][owner.creators["engine-prepare"]["id"]]
         require(creator["evidence_sha256"] == ledger.digest({"prepared": owner.prepared_sha256,
                     "directories": directories}), "cleanup-storage-original-inodes")
-        # The public sibling stays bounded by the original Root quota even
-        # after the raw graph/runroot/output have all been removed.
-        spool = (str(PurePosixPath(data["engine"]["runroot"]).parent)
-                 if type(owner) is cell_contract.PartialPreparationOwner else
-                 data["engine"]["runroot"] + ".public-evidence")
+        # The retained evidence stays on the original Root quota after raw cleanup.
+        spool = _evidence_quota_directory(owner, data, private_archive)
         require(all(spool != path and not spool.startswith(path + "/") for path in paths),
                 "cleanup-storage-spool-inside-raw")
         with storage_quota.acquire_existing_evidence_quota(
@@ -1045,7 +1053,7 @@ def _partial_context_files(owner, store, config, record, context, binding, bindi
     return files
 
 
-def delete_context(owner, store, config):
+def delete_context(owner, store, config, *, private_archive=None):
     """Authenticate the original TLS context, then unlink that exact inventory."""
     effect, opened = None, []
     publication_attempted = False
@@ -1119,8 +1127,7 @@ def delete_context(owner, store, config):
             descriptor_inventory = ((), {(): _identity(os.fstat(descriptor_fd))}, storage_quota._mount_id(descriptor_fd))
             context_observation = _postcheck_observation(owner,
                 [(context, fd, inventory), (descriptor, descriptor_fd, descriptor_inventory)],
-                (str(PurePosixPath(data["engine"]["runroot"]).parent)
-                 if type(owner) is cell_contract.PartialPreparationOwner else data["engine"]["runroot"] + ".public-evidence"), end)
+                _evidence_quota_directory(owner, data, private_archive), end)
         finally:
             os.close(descriptor_fd)
         publication_attempted = True
