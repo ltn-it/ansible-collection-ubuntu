@@ -529,6 +529,20 @@ class PostEngineFinalizerTests(unittest.TestCase):
         self.assertEqual([call.kwargs for call in refresh.call_args_list], [{"refresh": True}, {"refresh": True}])
         self.store.close.assert_not_called()
 
+    def test_private_copy_requires_the_exact_unchanged_default_image(self):
+        verify = self.finalizer._check_post_engine_default_image
+        self.assertIsNone(verify(self.record, self.cleanup, self.permit))
+        self.cleanup._default_cached_image_identity.assert_not_called()
+        self.record["effects"]["copy"] = {"operation": "image-copy"}
+        with self.assertRaisesRegex(identity.Denied, "post-engine-default-image-drift"):
+            verify(self.record, self.cleanup, self.permit)
+        self.permit["default_image_sha256"] = "a" * 64
+        self.cleanup._default_cached_image_identity.return_value = "a" * 64
+        self.assertEqual(verify(self.record, self.cleanup, self.permit), "a" * 64)
+        self.cleanup._default_cached_image_identity.return_value = "b" * 64
+        with self.assertRaisesRegex(identity.Denied, "post-engine-default-image-drift"):
+            verify(self.record, self.cleanup, self.permit)
+
     def test_readback_and_close_use_separate_sessions_and_recheck_before_close(self):
         self.record = {"state": "prepared"}
         self.store.read.return_value = self.record

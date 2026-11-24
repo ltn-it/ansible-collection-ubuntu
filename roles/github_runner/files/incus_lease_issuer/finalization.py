@@ -509,6 +509,16 @@ class RootFinalizer:
         require(all(type(row.get("project")) is str and row["project"] != target["project"]
                     for row in cleanup._client.pool_volumes()), "post-engine-pool-volume-returned")
 
+    @staticmethod
+    def _check_post_engine_default_image(record, cleanup, permit):
+        expected = permit.get("default_image_sha256")
+        if any(row["operation"] == "image-copy" for row in record["effects"].values()):
+            require(type(expected) is str and ledger.HEX.fullmatch(expected)
+                    and cleanup._default_cached_image_identity() == expected, "post-engine-default-image-drift")
+        else:
+            require(expected is None, "post-engine-default-image-unbound")
+        return expected
+
     def finalize_post_engine_failure(self, registry, selector, store, lease_id, permit_sha256):
         """Remove exact owned resources under the previously sealed POC permit. Keep the lease open."""
         from . import cleanup_storage, root_session, startup_retirement
@@ -529,6 +539,7 @@ class RootFinalizer:
                     cleanup.wait_quiet(config.operation_wait_seconds)
                 if progress["cleanup_started"]:
                     self._check_post_engine_resume(owner, record, cleanup, project_deleted, image_target)
+                    self._check_post_engine_default_image(record, cleanup, permit)
                     cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup)
                 else:
                     observation = self._observe_failed_engine_without_vm(session, registry, selector, store, lease_id)
@@ -565,12 +576,14 @@ class RootFinalizer:
         worker = ledger.Worker(**record["worker"])
         fence = network_fence.verify_disabled(owner, store, worker, config)
         engine_executor._slice_inactive(lease_id)
+        default_image = self._check_post_engine_default_image(record, cleanup, permit)
         self._fresh(session, registry, selector, store, owner)
         require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256) == permit
                 and store.read(lease_id) == record, "post-engine-readback-journal-drift")
         return {**journal, "state": "verified-absence", "permit_sha256": permit_sha256,
                 "resources_sha256": ledger.digest({"incus": resources, "certificate_scope_absent": True,
-                    "project_volumes": [], "fence": fence, "slice": "absent", "local_consumer_census": "verified"})}
+                    "project_volumes": [], "fence": fence, "slice": "absent", "local_consumer_census": "verified",
+                    "default_image_sha256": default_image})}
 
     def readback_post_engine_failure(self, registry, selector, store, lease_id, permit_sha256):
         """Acquire fresh Root-only provider and consumer evidence without changing the lease."""
