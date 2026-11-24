@@ -1,3 +1,4 @@
+---
 bugfixes:
   - >-
     Give protected Incus business tests a bounded private shared-memory mount
