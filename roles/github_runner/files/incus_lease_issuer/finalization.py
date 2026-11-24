@@ -469,7 +469,7 @@ class RootFinalizer:
                 cleanup = incus_mutation.RootIncusCleanup(client, owner, store)
                 project_deleted = _effect(record, "project-delete", "project:"+target["project"])
                 copies = [row for row in record["effects"].values() if row["operation"] == "image-copy"]
-                if copies or descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
+                if copies or operating_cells.uses_cached_vm_image(descriptor["environment"]):
                     require(len(copies) == 1 and copies[0]["state"] == "verified"
                             and copies[0]["target"] == "image:" + target["project"] + ":" + operating_cells.IMAGE,
                             "finalization-image-copy-held")

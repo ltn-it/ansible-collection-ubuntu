@@ -248,10 +248,14 @@ def _validate_incus_template(value, env):
     limits = engine._keys(data["project_limits"], {"cpu", "memory_bytes", "disk_bytes", "instances", "virtual_machines", "containers"})
     for key in limits:
         engine._integer(limits[key], 0 if key == "containers" else 1, 2 ** 63 - 1)
+    from . import operating_cells
+    disk = _bytes(env["QUALITY_INPUT_DISK_LIMIT"], disk=True)
+    if env["QUALITY_INPUT_PROFILE"] != "operating" and operating_cells.uses_cached_vm_image(env):
+        disk += operating_cells.IMAGE_RESERVATION
     require(limits["containers"] == 0 and limits["instances"] == limits["virtual_machines"]
             and limits["cpu"] >= int(env["QUALITY_INPUT_CPU_LIMIT"])
             and limits["memory_bytes"] >= _bytes(env["QUALITY_INPUT_MEMORY_LIMIT"])
-            and limits["disk_bytes"] >= _bytes(env["QUALITY_INPUT_DISK_LIMIT"], disk=True), "cell-project-quota")
+            and limits["disk_bytes"] >= disk, "cell-project-quota")
     return data
 
 
@@ -532,6 +536,9 @@ def _owned_cell(registry, selector, store, lease_id, *, live):
         "context-publish": "context:" + selected.cell_sha256,
         "fence-create": "fence:" + lease_id,
         "engine-start": "engine:lit-lease-" + lease_id}
+    from . import operating_cells
+    if env.get("QUALITY_INPUT_PROFILE") != "operating" and operating_cells.uses_cached_vm_image(env):
+        expected["image-copy"] = "image:" + incus["project"] + ":" + operating_cells.IMAGE
     creators = {}
     for operation in (*expected, "certificate-create"):
         matches = [(identifier, effect) for identifier, effect in record["effects"].items()
@@ -689,8 +696,8 @@ def _partial_preparation_owner(registry, selector, store, lease_id, *, allow_cer
         "slice-create": "slice:" + lease_id,
         "fence-create": "fence:" + lease_id}
     order = ("network-create", "project-create", "profile-configure")
-    if env.get("QUALITY_INPUT_PROFILE") == "operating":
-        from . import operating_cells
+    from . import operating_cells
+    if operating_cells.uses_cached_vm_image(env):
         expected["image-copy"] = "image:" + incus["project"] + ":" + operating_cells.IMAGE
         order += ("image-copy",)
     order += ("context-create", "certificate-create", "engine-prepare", "context-publish")
