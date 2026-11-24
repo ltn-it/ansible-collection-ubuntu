@@ -30,6 +30,20 @@ def fixture(case="failure"):
 
 
 class OperatingCellTests(unittest.TestCase):
+    def test_private_cached_image_is_only_requested_for_the_two_bound_business_vm_cases(self):
+        for profile, scenario in (("heavy", "keycloak-heavy"),
+                                  ("application_acceptance", "keycloak-application-acceptance")):
+            env = {"QUALITY_INPUT_PROFILE": profile, "QUALITY_INPUT_SCENARIO": scenario,
+                   "QUALITY_INPUT_TARGET": "ubuntu-24.04", "QUALITY_INPUT_INSTANCE_TYPE": "vm",
+                   "QUALITY_INPUT_IMAGE": cells.IMAGE}
+            self.assertTrue(cells.uses_cached_vm_image(env))
+            for key, bad in (("PROFILE", "tiny"), ("SCENARIO", "keycloak-tiny"), ("TARGET", "rhel-9"),
+                             ("INSTANCE_TYPE", "container"), ("IMAGE", "images:ubuntu/24.04"),
+                             ("IMAGE", "0" * 64)):
+                with self.subTest(profile=profile, key=key, bad=bad):
+                    self.assertFalse(cells.uses_cached_vm_image(env | {"QUALITY_INPUT_" + key: bad}))
+        self.assertTrue(cells.uses_cached_vm_image({"QUALITY_INPUT_PROFILE": "operating"}))
+
     def test_all_three_closed_cases_exact_environment_and_sizes(self):
         for case in cells.CASES:
             value, native, who = fixture(case)

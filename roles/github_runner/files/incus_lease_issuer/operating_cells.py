@@ -25,6 +25,22 @@ IMAGE_RESERVATION = 4 * 1024**3
 PROJECT_RESERVATION = 10 * 1024**3
 ENV_KEYS = engine_policy.ENV_KEYS | {"QUALITY_OPERATING_CASE", "QUALITY_OPERATING_SPEC"}
 
+BUSINESS_VM_PROFILES = {
+    ("heavy", "keycloak-heavy"),
+    ("application_acceptance", "keycloak-application-acceptance"),
+}
+
+
+def uses_cached_vm_image(environment):
+    """Apply the Root-only local copy to the sealed image and approved VM cases."""
+    profile = environment.get("QUALITY_INPUT_PROFILE")
+    if profile == "operating":
+        return True
+    return ((profile, environment.get("QUALITY_INPUT_SCENARIO")) in BUSINESS_VM_PROFILES
+            and environment.get("QUALITY_INPUT_TARGET") == TARGET
+            and environment.get("QUALITY_INPUT_INSTANCE_TYPE") == "vm"
+            and environment.get("QUALITY_INPUT_IMAGE") == IMAGE)
+
 
 @dataclass(frozen=True)
 class OperatingCell:
@@ -102,6 +118,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 19:
+        return _validate_nineteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 18:
         return _validate_eighteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 17:
@@ -167,7 +185,8 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     predecessors = {1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN,
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
-                    15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN}
+                    15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
+                    19: NINETEENTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -225,6 +244,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 19:
+        return _validate_nineteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 18:
         return _validate_eighteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 17:
@@ -2214,7 +2235,8 @@ def _validate_seventeenth_qualification(value):
     return catalogue_identities
 
 
-def _validate_oci_retirement(retirement, old_catalogues, lease_id, retain_until, *, bound_exit=False):
+def _validate_oci_retirement(retirement, old_catalogues, lease_id, retain_until, *, bound_exit=False,
+                             verified_start=False):
     retirement = engine_policy._keys(retirement, {
         "original_bootstrap", "original_bank", "original_record", "new_entries", "catalogues",
         "retain_until", "journal", "storage_unique_mount_id", "namespace_cookie",
@@ -2223,27 +2245,42 @@ def _validate_oci_retirement(retirement, old_catalogues, lease_id, retain_until,
             "continuation-seventeenth-retention")
     for key in ("storage_unique_mount_id", "namespace_cookie"):
         engine_policy._integer(retirement[key], 1, 2**64 - 1)
-    origin_fields = {"lease_id", "sha256", "unknown_effect_id"}
-    if bound_exit:
+    effect_field = "start_effect_id" if verified_start else "unknown_effect_id"
+    origin_fields = {"lease_id", "sha256", effect_field}
+    if bound_exit or verified_start:
         origin_fields.add("engine_exit_sha256")
     origin = engine_policy._keys(retirement["original_record"], origin_fields)
-    require(origin["lease_id"] == lease_id and type(origin["unknown_effect_id"]) is str
-            and ledger.ID.fullmatch(origin["unknown_effect_id"]), "continuation-seventeenth-record")
+    require(origin["lease_id"] == lease_id and type(origin[effect_field]) is str
+            and ledger.ID.fullmatch(origin[effect_field]), "continuation-seventeenth-record")
     engine_policy._hash(origin["sha256"])
-    if bound_exit:
+    if bound_exit or verified_start:
         engine_policy._hash(origin["engine_exit_sha256"])
     for name, digest_key in (("original_bootstrap", "sha256"), ("original_bank", "state_file_sha256")):
-        pin = engine_policy._keys(retirement[name], {"path", "device", "inode", digest_key})
+        fields = {"path", "device", "inode", digest_key}
+        if verified_start and name == "original_bank":
+            fields.add("state_file_identity")
+        pin = engine_policy._keys(retirement[name], fields)
+        if "state_file_identity" in pin:
+            physical = engine_policy._keys(pin["state_file_identity"], {"device", "inode", "stamp"})
+            for key in ("device", "inode"):
+                engine_policy._integer(physical[key], 1, 2**64 - 1)
+            require(type(physical["stamp"]) is list and len(physical["stamp"]) >= 2
+                    and all(type(part) is int for part in physical["stamp"])
+                    and physical["stamp"][:2] == [physical["device"], physical["inode"]],
+                    "continuation-nineteenth-file-identity")
         engine_policy._path(pin["path"])
         engine_policy._hash(pin[digest_key])
         engine_policy._integer(pin["device"], 1, 2**63 - 1)
         engine_policy._integer(pin["inode"], 1, 2**63 - 1)
     journal = engine_policy._keys(retirement["journal"], {"path", "members"})
     engine_policy._path(journal["path"])
+    steps = NINETEENTH_RETIREMENT_STEPS if verified_start else SEVENTEENTH_RETIREMENT_STEPS
     names = {"complete-receipt.json", "storage-identities.json"} | {
-        f"{step}-{phase}.json" for step in SEVENTEENTH_RETIREMENT_STEPS for phase in ("intent", "receipt")}
-    if bound_exit:
+        f"{step}-{phase}.json" for step in steps for phase in ("intent", "receipt")}
+    if bound_exit or verified_start:
         names.add("podman-container-absence.json")
+    if verified_start:
+        names.add("diagnostic-archive.json")
     for digest in engine_policy._keys(journal["members"], names).values():
         engine_policy._hash(digest)
     additions = engine_policy._keys(retirement["new_entries"], set(old_catalogues))
@@ -2308,4 +2345,56 @@ def _validate_eighteenth_qualification(value):
     catalogue_identities = _validate_seventeenth_qualification(previous)
     _validate_oci_retirement(value["retirement"], previous["retirement"]["catalogues"],
                              EIGHTEENTH_LEASE, EIGHTEENTH_RETAIN_UNTIL, bound_exit=True)
+    return catalogue_identities
+
+
+NINETEENTH_MAIN = "8cf199eedd68e653f97a4739a5d0b2e7235f91f5"
+NINETEENTH_RUN = 45339727893
+NINETEENTH_CHECKS = (138263805064, 138269327657)
+NINETEENTH_GRAPH = "18971d57d2954e278d8afb8824c30d8a4cb6d119e90dbfd67475cc2fe518020c"
+NINETEENTH_LEASE = "b9f09d76a80d25092db1e6da05e8c3d1"
+NINETEENTH_RETAIN_UNTIL = 1795516989
+NINETEENTH_REASON = "terminal-original-push-after-verified-workload-retirement"
+NINETEENTH_RETIREMENT_STEPS = ("fence-baseline-normalize", *SEVENTEENTH_RETIREMENT_STEPS[2:])
+NINETEENTH_QUALIFICATION = "6bd9ec82331372ca561655bef4f106aa416520d49f7a01a54b9a177d86b90603"
+NINETEENTH_SUCCESSOR_WORKFLOW = "78cc4dc6ad628796d0c55a5ba76310790f8b99f516fdf8adbb880d77ee1ae1a6"
+NINETEENTH_SUCCESSOR_REUSABLE = "69b7f805734e4d3b08d102e7d7a25108f78da247"
+
+
+def nineteenth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, EIGHTEENTH_SUCCESSOR_REUSABLE,
+                                       NINETEENTH_GRAPH, NINETEENTH_CHECKS, NINETEENTH_MAIN)
+
+
+def _validate_nineteenth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == NINETEENTH_REASON and engine_policy._hash(ref["sha256"]) == NINETEENTH_QUALIFICATION,
+            "continuation-nineteenth-qualification")
+    engine_policy._hash(NINETEENTH_SUCCESSOR_WORKFLOW)
+    cell_contract._commit(NINETEENTH_SUCCESSOR_REUSABLE)
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=NINETEENTH_MAIN, expected_workflow=NINETEENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=NINETEENTH_SUCCESSOR_REUSABLE, reason="continuation-nineteenth-successor")
+    require(successor["source_sha"] not in {
+                ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN, FIFTEENTH_MAIN,
+                SIXTEENTH_MAIN, SEVENTEENTH_MAIN, EIGHTEENTH_MAIN, NINETEENTH_MAIN}
+            and successor["run_id"] not in {
+                ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN, FIFTEENTH_RUN,
+                SIXTEENTH_RUN, SEVENTEENTH_RUN, EIGHTEENTH_RUN, NINETEENTH_RUN},
+            "continuation-nineteenth-replay")
+    return value
+
+
+def _validate_nineteenth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_nineteenth", "previous_qualification", "retirement"})
+    require(value["purpose"] == NINETEENTH_REASON and ledger.digest(value) == NINETEENTH_QUALIFICATION
+            and ledger.digest(value["native_nineteenth"]) == NINETEENTH_GRAPH,
+            "continuation-nineteenth-history")
+    previous = value["previous_qualification"]
+    catalogue_identities = _validate_eighteenth_qualification(previous)
+    _validate_oci_retirement(value["retirement"], previous["retirement"]["catalogues"],
+                             NINETEENTH_LEASE, NINETEENTH_RETAIN_UNTIL, verified_start=True)
     return catalogue_identities

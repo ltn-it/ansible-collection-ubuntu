@@ -450,6 +450,53 @@ class EighteenthRetirementJournalTests(OCIRetirementFixture):
         self.assertEqual(self.record["effects"][self.effect]["state"], "unknown")
 
 
+@unittest.skipUnless(os.geteuid() == 0 and sys.platform == "linux", "private Root Linux EE only")
+class NineteenthRetirementJournalTests(OCIRetirementFixture):
+    run_id = cells.NINETEENTH_RUN
+    job_id = cells.NINETEENTH_CHECKS[0]
+    lease = cells.NINETEENTH_LEASE
+    floor = cells.NINETEENTH_RETAIN_UNTIL
+    source_revision = cells.NINETEENTH_MAIN
+    controller_revision = cells.EIGHTEENTH_SUCCESSOR_REUSABLE
+    previous_schema = 18
+    scope = "exact-nineteenth-original-retirement"
+    read_journal = staticmethod(run_factory._nineteenth_journal)
+
+    def setUp(self):
+        super().setUp()
+        for name in tuple(self.retirement["journal"]["members"]):
+            if name.endswith(("-intent.json", "-receipt.json")) and name != "complete-receipt.json":
+                (self.root / name).unlink()
+                del self.retirement["journal"]["members"][name]
+        original = self.retirement["original_record"]
+        original["start_effect_id"] = original.pop("unknown_effect_id")
+        original["engine_exit_sha256"] = "b" * 64
+        identity = {"run": self.run_id, "original_lease": self.lease, "original_record_sha256": original["sha256"]}
+        self.write("diagnostic-archive.json", identity | {"at": self.floor})
+        self.write("podman-container-absence.json", identity | {"at": self.floor + 1})
+        for index, step in enumerate(cells.NINETEENTH_RETIREMENT_STEPS):
+            actual = identity | {"step": step, "metadata": {"reference": step}, "at": self.floor + 2 + index * 2}
+            self.write(step + "-intent.json", actual)
+            self.write(step + "-receipt.json", actual | {"at": actual["at"] + 1, "state": "separate-effect-verified"})
+        complete = json.loads((self.root / "complete-receipt.json").read_bytes())
+        complete["original_failure_preserved"] = True
+        self.write("complete-receipt.json", complete)
+
+    def test_retirement_has_original_diagnostics_and_separate_idle_baseline_normalization(self):
+        proof = self.read()
+        self.assertIn("diagnostic-archive.json", proof)
+        self.assertNotIn("certificate-revoke-receipt.json", proof)
+        self.assertIn("fence-baseline-normalize-receipt.json", proof)
+        self.assertFalse(proof["complete-receipt.json"]["native_case_acceptance"])
+
+    def test_late_diagnostic_archive_is_denied(self):
+        name = "diagnostic-archive.json"
+        record = json.loads((self.root / name).read_bytes())
+        self.write(name, record | {"at": self.floor + 3})
+        with self.assertRaisesRegex(identity.Denied, "continuation-nineteenth-journal-binding"):
+            self.read()
+
+
 class SixteenthContinuationTests(unittest.TestCase):
     def test_pinned_successor_admits_first_attempt_and_rejects_replay(self):
         workflow = cells.SIXTEENTH_SUCCESSOR_WORKFLOW
