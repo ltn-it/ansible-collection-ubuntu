@@ -296,15 +296,19 @@ class StartupRetirementTests(unittest.TestCase):
                      "isolated Linux Root archive fixture")
 class PostEngineArchiveTests(unittest.TestCase):
     def setUp(self):
-        from incus_lease_issuer import cell_contract, generation_publisher, root_session
+        from contextlib import nullcontext
+        from incus_lease_issuer import cell_contract, generation_publisher, root_session, storage_quota
 
         self.root = Path(self.enterContext(TemporaryDirectory(dir="/run/proof")))
-        bank, self.runroot = self.root / "ledger", self.root / "runroot"
+        self.lease, manifest_sha = "a" * 32, "1" * 64
+        bank = self.root / "ledger"
+        storage = self.root / "shared-quota"
+        self.runroot = storage / self.lease
         generation_publisher._mkdir(bank)
+        generation_publisher._mkdir(storage)
         generation_publisher._mkdir(self.runroot)
         ledger.Ledger.initialize(str(bank))
         self.store = self.enterContext(ledger.Ledger(str(bank), clock=lambda: 500))
-        self.lease, manifest_sha = "a" * 32, "1" * 64
         binding = StartupRetirementTests()
         binding.setUp()
         self.record = binding.record
@@ -327,17 +331,24 @@ class PostEngineArchiveTests(unittest.TestCase):
         self.owner = cell_contract.OwnedCellForCleanup(registry, "heavy:keycloak", self.lease, "1" * 64, 700,
             "3" * 64, str(self.root / "descriptor"), ledger.canonical({"engine": {"runroot": str(self.runroot)}}),
             "4" * 64, manifest_sha, b"{}", b"{}", "5" * 64, b"{}", "6" * 64)
-        self.folder = startup_retirement._post_engine_archive_path(self.store, self.lease)
+        self.folder = startup_retirement._post_engine_archive_path(self.owner)
+        self.config = SimpleNamespace(registry_path=registry.path, registry_sha256=registry.sha256,
+            storage_quota_policy_path=str(self.root / "quota.json"), storage_quota_policy_sha256="d" * 64)
+        self.quota = self.enterContext(mock.patch.object(storage_quota, "acquire_existing_evidence_quota",
+            side_effect=lambda *_: nullcontext()))
         self.enterContext(mock.patch.object(self.store, "read", side_effect=lambda _: deepcopy(self.record)))
         self.enterContext(mock.patch.object(cell_contract, "owned_cell_for_cleanup", side_effect=lambda *_: self.owner))
         self.enterContext(mock.patch.object(root_session, "_require_session",
-            return_value=SimpleNamespace(registry_path=registry.path, registry_sha256=registry.sha256)))
+            return_value=self.config))
 
     def publish(self):
         return startup_retirement._publish_post_engine_archive(None, self.owner, self.store)
 
     def readback(self, binding):
-        return startup_retirement._read_post_engine_archive(self.store, self.lease, binding)
+        return startup_retirement._read_post_engine_archive(self.store, self.lease, binding, self.folder)
+
+    def locate_permit(self):
+        return startup_retirement._locate_post_engine_permit(self.store, self.lease, self.folder)
 
     def permit_observation(self):
         from dataclasses import replace
@@ -357,17 +368,17 @@ class PostEngineArchiveTests(unittest.TestCase):
 
     def test_permit_reopens_archived_original_after_verified_cleanup_journal_changes(self):
         observation = self.permit_observation()
-        self.assertIsNone(startup_retirement._locate_post_engine_permit(self.store, self.lease))
+        self.assertIsNone(self.locate_permit())
         permit = startup_retirement._publish_post_engine_permit(None, self.owner, self.store, observation)
         path = startup_retirement._post_engine_permit_path(self.store, self.lease)
-        body = startup_retirement._read_post_engine_permit(self.store, self.lease, permit["permit_sha256"])
+        body = startup_retirement._read_post_engine_permit(self.store, self.lease, permit["permit_sha256"], self.folder)
         self.assertEqual(path.read_bytes(), ledger.canonical(body))
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(startup_retirement._locate_post_engine_permit(self.store, self.lease), permit)
+        self.assertEqual(self.locate_permit(), permit)
         self.record["effects"]["deleted"] = {"operation": "engine-release", "state": "verified"}
         for name in self.logs:
             (self.runroot / name).unlink()
-        self.assertEqual(startup_retirement._locate_post_engine_permit(self.store, self.lease), permit)
+        self.assertEqual(self.locate_permit(), permit)
         with self.assertRaisesRegex(identity.Denied, "post-engine-permit-observation-drift"):
             startup_retirement._require_post_engine_observation(
                 permit, observation | {"original_sha256": ledger.digest(self.record)}, 500)
@@ -379,19 +390,20 @@ class PostEngineArchiveTests(unittest.TestCase):
         observation = self.permit_observation()
         self.publish()
         path = startup_retirement._post_engine_permit_path(self.store, self.lease)
-        self.assertIsNone(startup_retirement._locate_post_engine_permit(self.store, self.lease))
+        path.parent.mkdir(mode=0o700)
+        self.assertIsNone(self.locate_permit())
         staged = path.with_name("." + path.name + ".interrupted")
         staged.write_text("{")
         with self.assertRaisesRegex(identity.Denied, "post-engine-permit-staging-held"):
-            startup_retirement._locate_post_engine_permit(self.store, self.lease)
+            self.locate_permit()
         staged.unlink()
         permit = startup_retirement._publish_post_engine_permit(None, self.owner, self.store, observation)
         capture = self.folder / "stdout.log"
         capture.write_bytes(b"x" * len(capture.read_bytes()))
         with self.assertRaisesRegex(identity.Denied, "post-engine-archive-member-drift"):
-            startup_retirement._read_post_engine_permit(self.store, self.lease, permit["permit_sha256"])
+            startup_retirement._read_post_engine_permit(self.store, self.lease, permit["permit_sha256"], self.folder)
         with self.assertRaisesRegex(identity.Denied, "post-engine-archive-member-drift"):
-            startup_retirement._locate_post_engine_permit(self.store, self.lease)
+            self.locate_permit()
 
     def test_producer_leaves_only_proved_existing_vm_to_ordinary_custody(self):
         from contextlib import nullcontext
@@ -407,6 +419,7 @@ class PostEngineArchiveTests(unittest.TestCase):
         session, config, proof = object(), object(), object()
         with (mock.patch.object(root_session, "_session", side_effect=lambda *_: nullcontext(session)),
               mock.patch.object(finalizer, "_fresh", return_value=config),
+              mock.patch.object(startup_retirement, "_post_engine_evidence_quota", return_value=nullcontext()),
               mock.patch.object(finalizer, "_post_engine_transport", return_value=(admin, cleanup)),
               mock.patch.object(operating_custody, "observe_owned_instance", return_value=proof) as observe,
               mock.patch.object(operating_custody, "require_instance_proof") as verify,
@@ -479,7 +492,7 @@ class PostEngineArchiveTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.publish()
         self.assertFalse(self.folder.exists())
-        self.assertEqual(list(self.folder.parent.iterdir()), [])
+        self.assertEqual(set(self.folder.parent.iterdir()), {self.runroot})
         receipt = self.publish()
         self.assertEqual(self.readback(receipt[1]), receipt)
         for name, raw in self.logs.items():
@@ -506,15 +519,17 @@ class PostEngineArchiveTests(unittest.TestCase):
         self.assertEqual({path.name: path.stat().st_ino for path in self.folder.iterdir()}, inodes)
 
     def test_orphan_stage_holds_without_creating_another_copy(self):
-        self.folder.parent.mkdir(mode=0o700)
-        orphan = self.folder.with_name("." + self.lease + ".interrupted")
+        orphan = self.folder.with_name("." + self.folder.name + ".interrupted")
         orphan.mkdir(mode=0o700)
         with self.assertRaisesRegex(identity.Denied, "post-engine-archive-staging-held"):
             self.publish()
-        self.assertEqual(list(self.folder.parent.iterdir()), [orphan])
+        self.assertEqual(set(self.folder.parent.iterdir()), {self.runroot, orphan})
 
-    def test_retry_syncs_the_parent_directory_after_an_interrupted_mkdir(self):
+    def test_permit_retry_syncs_the_parent_directory_after_an_interrupted_mkdir(self):
         from incus_lease_issuer import generation_publisher
+
+        observation = self.permit_observation()
+        permit = startup_retirement._post_engine_permit_path(self.store, self.lease)
 
         def make_then_interrupt(path):
             path.mkdir(mode=0o700)
@@ -522,9 +537,10 @@ class PostEngineArchiveTests(unittest.TestCase):
 
         with mock.patch.object(generation_publisher, "_mkdir", side_effect=make_then_interrupt):
             with self.assertRaises(OSError):
-                self.publish()
-        self.assertTrue(self.folder.parent.is_dir())
-        self.assertFalse(self.folder.exists())
+                startup_retirement._publish_post_engine_permit(None, self.owner, self.store, observation)
+        self.assertTrue(permit.parent.is_dir())
+        self.assertFalse(permit.exists())
+        self.assertTrue(self.folder.exists())
         synced, original_fsync = [], os.fsync
 
         def observe_fsync(fd):
@@ -532,9 +548,40 @@ class PostEngineArchiveTests(unittest.TestCase):
             return original_fsync(fd)
 
         with mock.patch.object(os, "fsync", side_effect=observe_fsync):
-            receipt = self.publish()
-        self.assertEqual(synced[0], self.root.stat().st_ino)
-        self.assertEqual(self.readback(receipt[1]), receipt)
+            receipt = startup_retirement._publish_post_engine_permit(None, self.owner, self.store, observation)
+        self.assertIn(self.root.stat().st_ino, synced)
+        self.assertEqual(self.locate_permit(), receipt)
+
+    def test_archive_refuses_an_unverified_quota_before_capture_or_staging(self):
+        from incus_lease_issuer import engine_executor
+
+        self.quota.side_effect = identity.Denied("storage-quota-acquisition-denied")
+        with mock.patch.object(engine_executor, "_bound_capture_file") as copy:
+            with self.assertRaisesRegex(identity.Denied, "storage-quota-acquisition-denied"):
+                self.publish()
+            copy.assert_not_called()
+        self.quota.assert_called_once_with(self.config.storage_quota_policy_path,
+            self.config.storage_quota_policy_sha256, str(self.folder.parent))
+        self.assertEqual(set(self.folder.parent.iterdir()), {self.runroot})
+
+    def test_shared_quota_accounts_for_other_generations_and_staging(self):
+        from incus_lease_issuer import engine_executor
+
+        older = self.folder.with_name("b" * 32 + ".post-engine-evidence")
+        staged = self.folder.with_name("." + "c" * 32 + ".post-engine-evidence.interrupted")
+        for folder in (older, staged):
+            folder.mkdir(mode=0o700)
+            (folder / "stdout.log").write_bytes(b"previous")
+        for available_blocks, available_inodes in ((0, 100), (100, 0)):
+            available = SimpleNamespace(f_frsize=4096, f_bavail=available_blocks, f_favail=available_inodes)
+            with self.subTest(blocks=available_blocks, inodes=available_inodes), \
+                 mock.patch.object(os, "fstatvfs", return_value=available), \
+                 mock.patch.object(engine_executor, "_bound_capture_file") as copy:
+                with self.assertRaisesRegex(identity.Denied, "post-engine-archive-capacity"):
+                    self.publish()
+                copy.assert_not_called()
+        self.assertEqual(set(self.folder.parent.iterdir()), {self.runroot, older, staged})
+        self.assertEqual([(entry / "stdout.log").read_bytes() for entry in (older, staged)], [b"previous"] * 2)
 
     def test_source_and_archive_hash_drift_deny_without_adoption_or_overwrite(self):
         source = self.runroot / "stdout.log"
@@ -600,7 +647,7 @@ class PostEngineArchiveTests(unittest.TestCase):
         return original, binding
 
     def read_cleanup_journal(self, binding):
-        return startup_retirement._read_post_engine_cleanup_journal(self.store, self.lease, binding)
+        return startup_retirement._read_post_engine_cleanup_journal(self.store, self.lease, binding, self.folder)
 
     def test_verified_cleanup_reopens_original_archive_and_runner_stays_held(self):
         original, binding = self.completed_cleanup()
@@ -637,7 +684,8 @@ class PostEngineArchiveTests(unittest.TestCase):
         with mock.patch.object(self.store, "require_cleanup_complete") as require_complete:
             with self.assertRaisesRegex(identity.Denied, "post-engine-cleanup-journal-held"):
                 self.read_cleanup_journal(binding)
-            progress = startup_retirement._read_post_engine_cleanup_journal(self.store, self.lease, binding, complete=False)
+            progress = startup_retirement._read_post_engine_cleanup_journal(
+                self.store, self.lease, binding, self.folder, complete=False)
             self.assertTrue(progress["cleanup_started"])
             require_complete.assert_not_called()
             self.record["effects"]["image-delete"] = removed
@@ -695,9 +743,10 @@ class PostEngineArchiveTests(unittest.TestCase):
 
     def test_incomplete_capture_holds_before_archive_creation(self):
         self.record["effects"]["c" * 32]["engine_exit"]["stderr_state"] = "incomplete"
+        entries = set(self.folder.parent.iterdir())
         with self.assertRaisesRegex(identity.Denied, "post-engine-archive-complete-exit"):
             self.publish()
-        self.assertFalse(self.folder.parent.exists())
+        self.assertEqual(set(self.folder.parent.iterdir()), entries)
 
 
 class PostEngineFinalizerTests(unittest.TestCase):
@@ -720,6 +769,8 @@ class PostEngineFinalizerTests(unittest.TestCase):
         self.cleanup = mock.Mock()
         self.cleanup.certificates_absent.return_value = True
         self.owner = SimpleNamespace(incus={"project": "proof-project", "network": "proof-network"})
+        self.enterContext(mock.patch.object(startup_retirement, "_post_engine_archive_path",
+            return_value=Path("/proof/archive")))
         self.config = SimpleNamespace(operation_wait_seconds=1)
         self.progress = {"cleanup_started": False}
         self.enterContext(mock.patch.object(self.finalizer, "_post_engine_scope",

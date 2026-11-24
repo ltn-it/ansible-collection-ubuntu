@@ -495,15 +495,19 @@ class RootFinalizer:
                 "post-engine-permit-root")
         with root_session._session(self._runtime.preparation_config_path,
                                    self._runtime.preparation_config_sha256) as session:
-            existing = startup_retirement._locate_post_engine_permit(store, lease_id)
             owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
             record = store.read(lease_id)
             startup_retirement._post_engine_opt_in(store, record, selector)
-            if existing is not None:
-                require(existing["policy_sha256"] == record["policy_sha256"]
-                        and existing["scope_sha256"] == ledger.digest(owner.incus), "post-engine-permit-resume-scope")
-                return startup_retirement._confirm_durable_post_engine_permit(store, lease_id, existing)
+            archive = startup_retirement._post_engine_archive_path(owner)
+            quota_directory = archive if os.path.lexists(archive) else archive.parent
+            with startup_retirement._post_engine_evidence_quota(config, quota_directory):
+                existing = startup_retirement._locate_post_engine_permit(store, lease_id, archive)
+                if existing is not None:
+                    require(existing["policy_sha256"] == record["policy_sha256"]
+                            and existing["scope_sha256"] == ledger.digest(owner.incus), "post-engine-permit-resume-scope")
+                    require(quota_directory == archive, "post-engine-permit-archive-missing")
+                    return startup_retirement._confirm_durable_post_engine_permit(store, lease_id, existing, archive)
             if {"owned_instance", "custody"} & record.keys():
                 return None
             admin, cleanup = self._post_engine_transport(config, owner, store)
@@ -549,12 +553,14 @@ class RootFinalizer:
     def _post_engine_scope(self, session, registry, selector, store, lease_id, permit_sha256):
         from . import startup_retirement
 
-        permit = startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256)
-        progress = startup_retirement._read_post_engine_cleanup_journal(
-            store, lease_id, permit["archive_sha256"], complete=False)
-        require(progress["original_sha256"] == permit["original_sha256"], "post-engine-permit-original-drift")
         owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
         config = self._fresh(session, registry, selector, store, owner)
+        archive = startup_retirement._post_engine_archive_path(owner)
+        with startup_retirement._post_engine_evidence_quota(config, archive):
+            permit = startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256, archive)
+            progress = startup_retirement._read_post_engine_cleanup_journal(
+                store, lease_id, permit["archive_sha256"], archive, complete=False)
+        require(progress["original_sha256"] == permit["original_sha256"], "post-engine-permit-original-drift")
         record = store.read(lease_id)
         require(ledger.digest(record) == progress["journal_sha256"], "post-engine-cleanup-journal-drift")
         target = owner.incus
@@ -619,11 +625,12 @@ class RootFinalizer:
                 else:
                     observation = self._observe_failed_engine_without_vm(session, registry, selector, store, lease_id)
                     startup_retirement._require_post_engine_observation(permit, observation, store._now())
-                require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256) == permit
+                archive = startup_retirement._post_engine_archive_path(owner)
+                require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256, archive) == permit
                         and store.read(lease_id) == record, "post-engine-authorization-drift")
                 attempted = True
                 self._release_owned_resources(session, store, owner, config, cleanup, project_deleted, image_target)
-                return startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"])
+                return startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"], archive)
         except FinalizationUnknown:
             raise
         except Exception:
@@ -641,7 +648,8 @@ class RootFinalizer:
             require(len(rows) == 1 and "cleanup_postcheck" in rows[0] and "cleanup_observation" in rows[0],
                     "post-engine-independent-storage-witness-required")
         cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup, refresh=True)
-        journal = startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"])
+        archive = startup_retirement._post_engine_archive_path(owner)
+        journal = startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"], archive)
         resources = {kind: cleanup.readback(kind) for kind in ("project", "profile", "bridge")}
         require(all(row["state"] == "absent_observed" for row in resources.values())
                 and cleanup.certificates_absent() is True, "post-engine-incus-scope-returned")
@@ -653,7 +661,7 @@ class RootFinalizer:
         engine_executor._slice_inactive(lease_id)
         default_image = self._check_post_engine_default_image(record, cleanup, permit)
         self._fresh(session, registry, selector, store, owner)
-        require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256) == permit
+        require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256, archive) == permit
                 and store.read(lease_id) == record, "post-engine-readback-journal-drift")
         return {**journal, "state": "verified-absence", "permit_sha256": permit_sha256,
                 "resources_sha256": ledger.digest({"incus": resources, "certificate_scope_absent": True,

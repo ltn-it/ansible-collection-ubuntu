@@ -324,10 +324,36 @@ def publish_original_archive(store, lease_id, record, failure, inventory):
     return str(folder), binding
 
 
-def _post_engine_archive_path(store, lease_id):
+def _post_engine_control_path(store, lease_id):
     require(os.geteuid() == 0 and type(store) is ledger.Ledger and store.owner_uid == 0
             and type(lease_id) is str and ledger.ID.fullmatch(lease_id), "post-engine-archive-root")
     return Path(store.path).parent / "post-engine-failures" / lease_id
+
+
+def _post_engine_archive_path(owner):
+    from . import cell_contract, engine_policy
+
+    require(type(owner) is cell_contract.OwnedCellForCleanup, "post-engine-archive-owner")
+    runroot = Path(engine_policy._path(identity.decode_json(owner.engine_descriptor_bytes)["engine"]["runroot"]))
+    require(runroot.name == owner.lease_id, "post-engine-archive-runroot")
+    return runroot.with_name(runroot.name + ".post-engine-evidence")
+
+
+def _post_engine_evidence_quota(config, path):
+    from . import storage_quota
+
+    return storage_quota.acquire_existing_evidence_quota(
+        config.storage_quota_policy_path, config.storage_quota_policy_sha256, str(path))
+
+
+def _require_post_engine_archive_space(parent, manifest, capture_limit):
+    observed = os.fstatvfs(parent)
+    require(observed.f_frsize > 0, "post-engine-archive-capacity")
+    sizes = [len(ledger.canonical(manifest)), *(row["size"] for row in manifest["members"].values())]
+    blocks = 1 + sum((size + observed.f_frsize - 1) // observed.f_frsize for size in sizes)
+    reserve_blocks = 1 + (capture_limit + observed.f_frsize - 1) // observed.f_frsize
+    require(observed.f_bavail >= blocks + reserve_blocks and observed.f_favail >= 2 * (len(sizes) + 1),
+            "post-engine-archive-capacity")
 
 
 def _post_engine_archive_inputs(lease_id, record):
@@ -383,23 +409,21 @@ def _verify_post_engine_archive(folder, manifest, expected_sha256):
     return str(folder), expected_sha256
 
 
-def _read_post_engine_archive(store, lease_id, expected_sha256):
+def _read_post_engine_archive(store, lease_id, expected_sha256, archive):
     """Read a sealed archive against the same original lease snapshot."""
-    folder = _post_engine_archive_path(store, lease_id)
     record = store.read(lease_id)
     _, _, manifest = _post_engine_archive_inputs(lease_id, record)
-    receipt = _verify_post_engine_archive(folder, manifest, expected_sha256)
+    receipt = _verify_post_engine_archive(archive, manifest, expected_sha256)
     require(store.read(lease_id) == record, "post-engine-archive-record-drift")
     return receipt
 
 
-def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256, *, complete=True):
+def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256, archive, *, complete=True):
     """Accept only verified cleanup entries for the exact archived creators."""
-    folder = _post_engine_archive_path(store, lease_id)
-    _, raw, _ = installation._file(str(folder / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
+    _, raw, _ = installation._file(str(archive / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
     original = identity.decode_json(raw)
     _, _, manifest = _post_engine_archive_inputs(lease_id, original)
-    _verify_post_engine_archive(folder, manifest, archive_sha256)
+    _verify_post_engine_archive(archive, manifest, archive_sha256)
 
     record = store.read(lease_id)
     creators = {"engine-prepare", "context-create", "project-create", "network-create", "fence-create", "slice-create"}
@@ -447,7 +471,7 @@ def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256, *, comple
 
 
 def _post_engine_readback_path(store, lease_id):
-    return _post_engine_archive_path(store, lease_id).parent.parent / "post-engine-readbacks" / (lease_id + ".json")
+    return _post_engine_control_path(store, lease_id).parent.parent / "post-engine-readbacks" / (lease_id + ".json")
 
 
 def _read_post_engine_readback(store, lease_id, readback_sha256):
@@ -490,7 +514,7 @@ def _publish_post_engine_archive(session, owner, store):
     require(type(owner) is cell_contract.OwnedCellForCleanup and owner.registry.path == config.registry_path
             and owner.registry.sha256 == config.registry_sha256, "post-engine-archive-owner")
     lease_id = owner.lease_id
-    folder = _post_engine_archive_path(store, lease_id)
+    folder = _post_engine_archive_path(owner)
     record = store.read(lease_id)
     require(cell_contract.owned_cell_for_cleanup(owner.registry, owner.selector, store, lease_id) == owner,
             "post-engine-archive-owner-drift")
@@ -498,44 +522,38 @@ def _publish_post_engine_archive(session, owner, store):
     require(start["engine_exit"]["manifest_sha256"] == owner.engine_policy_sha256
             and record["native_terminal"]["observed_at"] <= store._now(), "post-engine-archive-exit-binding")
     binding = ledger.digest(manifest)
-    if os.path.lexists(folder.parent):
-        bank_parent = installation._open_directory(str(folder.parent.parent))
+    with _post_engine_evidence_quota(config, folder.parent):
+        parent = engine_policy._directory(str(folder.parent), private=True)
         try:
-            os.fsync(bank_parent)  # The original mkdir may have succeeded before its parent fsync.
+            if os.path.lexists(folder):
+                os.fsync(parent)
+            else:
+                prefix = "." + folder.name + "."
+                require(not any(name.startswith(prefix) for name in os.listdir(parent)),
+                        "post-engine-archive-staging-held")
+                _require_post_engine_archive_space(parent, manifest, start["engine_capture"]["total_limit"])
+                runroot = identity.decode_json(owner.engine_descriptor_bytes)["engine"]["runroot"]
+                with TemporaryDirectory(prefix=prefix, dir=folder.parent) as temporary:
+                    staged = Path(temporary)
+                    for name, raw in documents.items():
+                        generation_publisher._write(staged / name, raw)
+                    sources = {}
+                    for stream in ("stdout", "stderr"):
+                        proof, raw, stamp = engine_executor._bound_capture_file(runroot, start, stream, keep=True)
+                        generation_publisher._write(staged / (stream + ".log"), raw)
+                        sources[stream] = proof, None, stamp
+                        del raw
+                    generation_publisher._json(staged / "manifest.json", manifest)
+                    _verify_post_engine_archive(staged, manifest, binding)
+                    require(all(engine_executor._bound_capture_file(runroot, start, name) == proof
+                                for name, proof in sources.items()) and store.read(lease_id) == record
+                            and root_session._require_session(session) == config, "post-engine-archive-source-drift")
+                    _publish_staged(staged, folder)
+            receipt = _verify_post_engine_archive(folder, manifest, binding)
+            require(store.read(lease_id) == record, "post-engine-archive-record-drift")
+            return receipt
         finally:
-            os.close(bank_parent)
-    else:
-        generation_publisher._mkdir(folder.parent)
-    parent = engine_policy._directory(str(folder.parent), private=True)
-    try:
-        if os.path.lexists(folder):
-            _verify_post_engine_archive(folder, manifest, binding)
-            os.fsync(parent)
-        else:
-            prefix = "." + lease_id + "."
-            require(not any(name.startswith(prefix) for name in os.listdir(parent)), "post-engine-archive-staging-held")
-            runroot = identity.decode_json(owner.engine_descriptor_bytes)["engine"]["runroot"]
-            with TemporaryDirectory(prefix=prefix, dir=folder.parent) as temporary:
-                staged = Path(temporary)
-                for name, raw in documents.items():
-                    generation_publisher._write(staged / name, raw)
-                sources = {}
-                for stream in ("stdout", "stderr"):
-                    proof, raw, stamp = engine_executor._bound_capture_file(runroot, start, stream, keep=True)
-                    generation_publisher._write(staged / (stream + ".log"), raw)
-                    sources[stream] = proof, None, stamp
-                    del raw
-                generation_publisher._json(staged / "manifest.json", manifest)
-                _verify_post_engine_archive(staged, manifest, binding)
-                require(all(engine_executor._bound_capture_file(runroot, start, name) == proof
-                            for name, proof in sources.items()) and store.read(lease_id) == record
-                        and root_session._require_session(session) == config, "post-engine-archive-source-drift")
-                _publish_staged(staged, folder)
-        receipt = _verify_post_engine_archive(folder, manifest, binding)
-        require(store.read(lease_id) == record, "post-engine-archive-record-drift")
-        return receipt
-    finally:
-        os.close(parent)
+            os.close(parent)
 
 
 _POST_ENGINE_OBSERVATION_FIELDS = frozenset({
@@ -545,7 +563,7 @@ _POST_ENGINE_OBSERVATION_FIELDS = frozenset({
 
 
 def _post_engine_permit_path(store, lease_id):
-    archive = _post_engine_archive_path(store, lease_id)
+    archive = _post_engine_control_path(store, lease_id)
     return archive.with_name(lease_id + ".permit.json")
 
 
@@ -557,7 +575,7 @@ def _post_engine_opt_in(store, record, selector):
             "post-engine-permit-policy")
 
 
-def _decode_post_engine_permit(store, lease_id, raw, permit_sha256):
+def _decode_post_engine_permit(store, lease_id, raw, permit_sha256, archive):
     permit = identity.decode_json(raw)
     image_digests = {"image_effect_sha256", "default_image_sha256"}
     require(type(permit) is dict and permit.keys() == _POST_ENGINE_OBSERVATION_FIELDS | {"schema", "archive_sha256"}
@@ -569,11 +587,10 @@ def _decode_post_engine_permit(store, lease_id, raw, permit_sha256):
                  or all(type(permit[key]) is str and ledger.HEX.fullmatch(permit[key]) for key in image_digests))
             and raw == ledger.canonical(permit) and ledger.digest(permit) == permit_sha256,
             "post-engine-permit-content")
-    folder = _post_engine_archive_path(store, lease_id)
-    proof, original_raw, _ = installation._file(str(folder / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
+    proof, original_raw, _ = installation._file(str(archive / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
     original = identity.decode_json(original_raw)
     _, _, manifest = _post_engine_archive_inputs(lease_id, original)
-    _verify_post_engine_archive(folder, manifest, permit["archive_sha256"])
+    _verify_post_engine_archive(archive, manifest, permit["archive_sha256"])
     policy = store.read_policy(original["policy_sha256"])
     marker = policy.get("post_engine_failure_retirement")
     require(type(marker) is dict, "post-engine-permit-policy")
@@ -587,18 +604,18 @@ def _decode_post_engine_permit(store, lease_id, raw, permit_sha256):
     return permit
 
 
-def _read_post_engine_permit(store, lease_id, permit_sha256):
+def _read_post_engine_permit(store, lease_id, permit_sha256, archive):
     """Validate immutable evidence against its original snapshot, even after cleanup progress."""
     path = _post_engine_permit_path(store, lease_id)
     proof, raw, stamp = installation._file(str(path), 65536, private=True, keep=True)
     require(proof.sha256 == permit_sha256, "post-engine-permit-digest")
-    result = _decode_post_engine_permit(store, lease_id, raw, permit_sha256)
+    result = _decode_post_engine_permit(store, lease_id, raw, permit_sha256, archive)
     require(installation._file(str(path), 65536, private=True, keep=True) == (proof, raw, stamp),
             "post-engine-permit-replaced")
     return result
 
 
-def _locate_post_engine_permit(store, lease_id):
+def _locate_post_engine_permit(store, lease_id, archive):
     """Read only the canonical locator; invalid committed or incomplete publishes hold."""
     path = _post_engine_permit_path(store, lease_id)
     try:
@@ -609,36 +626,33 @@ def _locate_post_engine_permit(store, lease_id):
 
     parent = engine_policy._directory(str(path.parent), private=True)
     try:
-        prefixes = ("." + path.name + ".", "." + lease_id + ".")
-        require(not any(name.startswith(prefixes) for name in os.listdir(parent)), "post-engine-permit-staging-held")
+        prefix = "." + path.name + "."
+        require(not any(name.startswith(prefix) for name in os.listdir(parent)), "post-engine-permit-staging-held")
         try:
             os.stat(path.name, dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
             # The process might have stopped between committing the archive
             # and issuing the permit. Adopt only its exact immutable original.
-            try:
-                os.stat(lease_id, dir_fd=parent, follow_symlinks=False)
-            except FileNotFoundError:
+            if not os.path.lexists(archive):
                 return None
-            archive = path.parent / lease_id
             manifest, _, _ = installation._file(str(archive / "manifest.json"), 65536, private=True)
-            _read_post_engine_archive(store, lease_id, manifest.sha256)
+            _read_post_engine_archive(store, lease_id, manifest.sha256, archive)
             return None
         proof, _, _ = installation._file(str(path), 65536, private=True)
-        result = _read_post_engine_permit(store, lease_id, proof.sha256)
+        result = _read_post_engine_permit(store, lease_id, proof.sha256, archive)
         return result | {"permit_sha256": proof.sha256}
     finally:
         os.close(parent)
 
 
-def _confirm_durable_post_engine_permit(store, lease_id, expected):
+def _confirm_durable_post_engine_permit(store, lease_id, expected, archive):
     from . import engine_policy
 
     path = _post_engine_permit_path(store, lease_id)
     parent = engine_policy._directory(str(path.parent), private=True)
     try:
         os.fsync(parent)  # The preceding publication may have completed its rename only.
-        require(_locate_post_engine_permit(store, lease_id) == expected, "post-engine-permit-recovery-drift")
+        require(_locate_post_engine_permit(store, lease_id, archive) == expected, "post-engine-permit-recovery-drift")
     finally:
         os.close(parent)
     return expected
@@ -656,18 +670,29 @@ def _require_post_engine_observation(permit, observation, now):
 
 def _publish_post_engine_permit(session, owner, store, observation):
     """Archive first within the original Root session, then seal the bound permit."""
+    from . import generation_publisher
+
     record = store.read(owner.lease_id)
     _post_engine_opt_in(store, record, owner.selector)
     require(observation["original_sha256"] == ledger.digest(record)
             and observation["scope_sha256"] == ledger.digest(owner.incus), "post-engine-permit-original-drift")
-    _, archive_sha256 = _publish_post_engine_archive(session, owner, store)
+    archive, archive_sha256 = _publish_post_engine_archive(session, owner, store)
+    archive = Path(archive)
     permit = observation | {"schema": 1, "archive_sha256": archive_sha256}
     _require_post_engine_observation(permit, observation, store._now())
     permit_sha256 = ledger.digest(permit)
-    _decode_post_engine_permit(store, owner.lease_id, ledger.canonical(permit), permit_sha256)
+    _decode_post_engine_permit(store, owner.lease_id, ledger.canonical(permit), permit_sha256, archive)
     require(store.read(owner.lease_id) == record, "post-engine-permit-original-drift")
-    _publish_record(_post_engine_permit_path(store, owner.lease_id), permit)
-    require(_read_post_engine_permit(store, owner.lease_id, permit_sha256) == permit,
+    path = _post_engine_permit_path(store, owner.lease_id)
+    if not os.path.lexists(path.parent):
+        generation_publisher._mkdir(path.parent)
+    parent = installation._open_directory(str(path.parent.parent))
+    try:
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+    _publish_record(path, permit)
+    require(_read_post_engine_permit(store, owner.lease_id, permit_sha256, archive) == permit,
             "post-engine-permit-publish-drift")
     return permit | {"permit_sha256": permit_sha256}
 

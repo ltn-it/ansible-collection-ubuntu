@@ -920,6 +920,9 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
     assert "owned_instance" not in original and "custody" not in original
     assert original["native_terminal"]["conclusion"] == "failure"
     assert store._now() < original["native_terminal"]["completed_at"] + 14400
+    owner = cell_contract.owned_cell_for_cleanup(registry, io.selector, store, lease)
+    raw = Path(identity.decode_json(owner.engine_descriptor_bytes)["engine"]["runroot"])
+    archive = raw.with_name(lease + ".post-engine-evidence")
     reads = []
     interrupted = []
     reader = finalization.RootFinalizer.readback_post_engine_failure
@@ -964,7 +967,8 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
     deletions = [path for method, path, *_ in server.requests if method == "DELETE" and path.startswith("/1.0/images/")]
     assert deletions == [private_image]
     assert ("GET", default_image) in [(method, path) for method, path, *_ in server.requests]
-    permit = startup_retirement._locate_post_engine_permit(store, lease)
+    assert archive.is_dir() and not raw.exists()
+    permit = startup_retirement._locate_post_engine_permit(store, lease, archive)
     proof = startup_retirement._read_post_engine_readback(store, lease, reads[0]["readback_sha256"])
     assert proof["permit_sha256"] == permit["permit_sha256"] and not proof["native_acceptance"]
     return closed
