@@ -227,6 +227,23 @@ class RootEngineCompilerTests(unittest.TestCase):
                 str(self.descriptor), current.descriptor_sha256, hashlib.sha256(changed).hexdigest()
             )
 
+    def test_retained_business_manifest_without_private_shm_stays_byte_identical(self):
+        current, path = self.retain()
+        manifest = json.loads(current.canonical_bytes)
+        manifest["argv"].remove(engine.BUSINESS_SHM_TMPFS)
+        legacy = engine._canonical(manifest)
+        path.write_bytes(legacy)
+        retained = engine.validate_retained_policy(str(self.descriptor), current.descriptor_sha256, digest(legacy))
+        self.assertEqual(retained.canonical_bytes, legacy)
+        self.assertEqual(retained.argv, tuple(manifest["argv"]))
+
+        manifest["argv"].insert(manifest["argv"].index(engine.WUNDER_TMPFS) + 1,
+                                "--tmpfs=/dev/shm:rw,exec,nosuid,nodev,size=128m,mode=1777")
+        altered = engine._canonical(manifest)
+        path.write_bytes(altered)
+        with self.assertRaisesRegex(Denied, "engine-retained-immutable-drift"):
+            engine.validate_retained_policy(str(self.descriptor), current.descriptor_sha256, digest(altered))
+
     def test_running_output_directory_identity_cannot_be_replaced(self):
         original, _ = self.retain()
         self.output.rename(self.output.with_name("old-output"))
@@ -285,7 +302,8 @@ class RootEngineCompilerTests(unittest.TestCase):
         self.assertEqual(
             tuple(arg for arg in result.argv if arg.startswith("--tmpfs=")),
             ("--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
-             "--tmpfs=/tmp/wunder:rw,exec,nosuid,nodev,size=1g,mode=1777"),
+             "--tmpfs=/tmp/wunder:rw,exec,nosuid,nodev,size=1g,mode=1777",
+             "--tmpfs=/dev/shm:rw,noexec,nosuid,nodev,size=64m,mode=1777"),
         )
         self.assertEqual((result.environment["HOME"], result.environment["TMPDIR"]), ("/tmp/wunder", "/tmp/wunder"))
         mounts = [result.argv[i + 1] for i, value in enumerate(result.argv[:-1]) if value == "--mount"]

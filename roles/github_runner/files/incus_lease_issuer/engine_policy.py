@@ -31,6 +31,7 @@ IMAGE = "quay.io/l-it/ee-wunder-devtools-ubi9:v1.18.2@sha256:" + IMAGE_INDEX
 PODMAN_IMAGE = "quay.io/l-it/ee-wunder-devtools-ubi9@sha256:" + IMAGE_INDEX
 ENGINE = "/usr/bin/podman"
 WUNDER_TMPFS = "--tmpfs=/tmp/wunder:rw,exec,nosuid,nodev,size=1g,mode=1777"
+BUSINESS_SHM_TMPFS = "--tmpfs=/dev/shm:rw,noexec,nosuid,nodev,size=64m,mode=1777"
 MAX_DESCRIPTOR = 4 * 1024 * 1024
 MAX_FILES = 20000
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
@@ -309,7 +310,7 @@ def _podman_prefix(storage_root, runroot, *, legacy=False):
     return argv
 
 
-def _compile(data, descriptor_sha256, *, retained_output=None, legacy_storage=False):
+def _compile(data, descriptor_sha256, *, retained_output=None, legacy_storage=False, legacy_shm=False):
     _keys(data, {"schema", "image", "runner_uid", "runner_gid", "cell_uid", "cell_gid", "uid_map", "gid_map", "limits",
                  "network_namespace_path", "cgroup_parent", "engine", "archives", "trees", "context_path", "output_path", "environment", "capture"})
     require(type(data["schema"]) is int and data["schema"] == 1, "engine-schema")
@@ -383,6 +384,9 @@ def _compile(data, descriptor_sha256, *, retained_output=None, legacy_storage=Fa
             "--memory=" + str(memory), "--timeout=" + str(timeout), "--workdir=/workspace",
             "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
             WUNDER_TMPFS]
+    if env["QUALITY_INPUT_PROFILE"] != "operating" and not legacy_shm:
+        # Ansible uses POSIX semaphores even when the root filesystem is read-only.
+        argv.append(BUSINESS_SHM_TMPFS)
     idmap = ",idmap=uids=0-" + str(maps[0][2]) + "-1;gids=0-" + str(maps[1][2]) + "-1"
     for key, target in (("workspace", "/workspace"), ("candidate", "/candidate"), ("controller", "/controller")):
         argv += ["--mount", "type=bind,source=" + checked_trees[key]["path"] + ",destination=" + target + ",readonly" + idmap]
@@ -442,8 +446,10 @@ def validate_retained_policy(path, descriptor_sha256, expected_manifest_sha256):
         require(_canonical(original) == canonical, "engine-retained-canonical")
         legacy_prefix = _podman_prefix(data["engine"]["storage_root"], data["engine"]["runroot"], legacy=True)
         legacy_storage = original["argv"][:len(legacy_prefix) + 1] == [*legacy_prefix, "run"]
+        # The signed historical argv is still checked byte for byte below.
+        legacy_shm = BUSINESS_SHM_TMPFS not in original["argv"]
         argv, environment, details = _compile(data, descriptor_sha256, retained_output=original["output"],
-                                              legacy_storage=legacy_storage)
+                                              legacy_storage=legacy_storage, legacy_shm=legacy_shm)
         details["descriptor"] = {"path": path, "sha256": descriptor_sha256}
         if original["argv"] != details["argv"]:
             # Earlier signed manifests also encoded the mapped owner in this

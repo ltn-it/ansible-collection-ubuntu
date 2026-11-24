@@ -580,6 +580,36 @@ class NineteenthRetirementJournalTests(OCIRetirementFixture):
             self.revalidate()
 
 
+class TwentyFirstPrivateImageRetirementTests(unittest.TestCase):
+    def setUp(self):
+        self.image = "image:g06-r78-" + cells.TWENTY_FIRST_LEASE + ":" + cells.IMAGE
+        self.effect = {"operation": "image-copy", "target": self.image, "state": "verified"}
+        self.effects = {"e" * 32: self.effect}
+        self.metadata = {"target": self.image, "copy_effect_sha256": ledger.digest(self.effect),
+                         "private_metadata_sha256": "a" * 64, "source_cache_metadata_sha256": "b" * 64,
+                         "project_without_image_sha256": "c" * 64, "project_image_link": True}
+        self.result = {"operation": "image-delete", "target": self.image,
+                       "response": "sync_received", "operation_id": None}
+
+    def validate(self):
+        rows = {"image-delete-receipt.json": {"metadata": self.metadata, "result": self.result}}
+        run_factory._twenty_first_image_retirement(rows, self.effects, cells.TWENTY_FIRST_LEASE)
+
+    def test_private_image_deletion_is_bound_to_original_copy(self):
+        self.validate()
+        self.effect["at"] = 100
+        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-first-image-effect"):
+            self.validate()
+
+    def test_default_image_or_missing_native_receipt_is_denied(self):
+        self.result["target"] = "image:default:" + cells.IMAGE
+        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-first-image-effect"):
+            self.validate()
+        self.result.update(target=self.image, response="operation_pending")
+        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-first-image-response"):
+            self.validate()
+
+
 class SixteenthContinuationTests(unittest.TestCase):
     def test_pinned_successor_admits_first_attempt_and_rejects_replay(self):
         workflow = cells.SIXTEENTH_SUCCESSOR_WORKFLOW
