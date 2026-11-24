@@ -2483,8 +2483,9 @@ TWENTY_FIRST_LEASE = "79500cdfe5ff0bdfbbe7f5eab75e6579"
 TWENTY_FIRST_RETAIN_UNTIL = 1795569267
 TWENTY_FIRST_REASON = "terminal-original-push-after-private-image-retirement"
 TWENTY_FIRST_RETIREMENT_STEPS = (*NINETEENTH_RETIREMENT_STEPS[:-2], "image-delete", *NINETEENTH_RETIREMENT_STEPS[-2:])
-# Fixed only after independent post-retention readback of the original lease.
-TWENTY_FIRST_QUALIFICATION = None
+# This digest covers the original failure, sealed inputs, bank and journal path.
+# The protected successor anchor binds the journal member digests after readback.
+TWENTY_FIRST_SCOPE_SHA256 = "e95c1fb2e374bd46ad9e1a8d3aaf6640775068286eca623de35eabe56760cb93"
 
 
 def twenty_first_native_projection(run, inventory, checks):
@@ -2496,9 +2497,8 @@ def _validate_twenty_first_descriptor(value, workflow_sha256, reusable_sha):
     engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
     ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
     engine_policy._path(ref["path"])
-    require(value["reason"] == TWENTY_FIRST_REASON
-            and engine_policy._hash(ref["sha256"]) == TWENTY_FIRST_QUALIFICATION,
-            "continuation-twenty-first-qualification")
+    require(value["reason"] == TWENTY_FIRST_REASON, "continuation-twenty-first-qualification")
+    engine_policy._hash(ref["sha256"])
     successor = value["successor"]
     _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
         first_parent=TWENTY_FIRST_MAIN, expected_workflow=NINETEENTH_SUCCESSOR_WORKFLOW,
@@ -2514,13 +2514,18 @@ def _validate_twenty_first_descriptor(value, workflow_sha256, reusable_sha):
     return value
 
 
+def twenty_first_scope_sha256(value):
+    retirement = value["retirement"]
+    return ledger.digest(value | {"retirement": retirement | {"journal": {"path": retirement["journal"]["path"]}}})
+
+
 def _validate_twenty_first_qualification(value):
     engine_policy._keys(value, {"schema", "purpose", "native_twenty_first", "previous_qualification", "retirement"})
-    require(value["purpose"] == TWENTY_FIRST_REASON and ledger.digest(value) == TWENTY_FIRST_QUALIFICATION
-            and ledger.digest(value["native_twenty_first"]) == TWENTY_FIRST_GRAPH,
+    require(value["purpose"] == TWENTY_FIRST_REASON and ledger.digest(value["native_twenty_first"]) == TWENTY_FIRST_GRAPH,
             "continuation-twenty-first-history")
     previous = value["previous_qualification"]
     catalogue_identities = _validate_twentieth_qualification(previous)
     _validate_oci_retirement(value["retirement"], previous["catalogues"], TWENTY_FIRST_LEASE,
                              TWENTY_FIRST_RETAIN_UNTIL, verified_start=True, image_copy=True)
+    require(twenty_first_scope_sha256(value) == TWENTY_FIRST_SCOPE_SHA256, "continuation-twenty-first-original-scope")
     return catalogue_identities

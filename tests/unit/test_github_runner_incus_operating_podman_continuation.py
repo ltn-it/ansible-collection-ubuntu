@@ -609,6 +609,22 @@ class TwentyFirstPrivateImageRetirementTests(unittest.TestCase):
         with self.assertRaisesRegex(identity.Denied, "continuation-twenty-first-image-response"):
             self.validate()
 
+    def test_original_scope_and_successor_anchor_bind_different_parts_of_the_receipt(self):
+        qualification = {"schema": 21, "native_twenty_first": {"run_id": cells.TWENTY_FIRST_RUN},
+                         "retirement": {"original_record": {"sha256": "a" * 64},
+                                        "journal": {"path": "/native/original",
+                                                    "members": {"complete-receipt.json": "b" * 64}}}}
+        scope = cells.twenty_first_scope_sha256(qualification)
+        after = deepcopy(qualification)
+        after["retirement"]["journal"]["members"]["complete-receipt.json"] = "c" * 64
+        self.assertEqual(cells.twenty_first_scope_sha256(after), scope)
+        self.assertNotEqual(ledger.digest(qualification), ledger.digest(after))
+        after["retirement"]["journal"]["path"] = "/native/other"
+        self.assertNotEqual(cells.twenty_first_scope_sha256(after), scope)
+        after = deepcopy(qualification)
+        after["retirement"]["original_record"]["sha256"] = "d" * 64
+        self.assertNotEqual(cells.twenty_first_scope_sha256(after), scope)
+
 
 class SixteenthContinuationTests(unittest.TestCase):
     def test_pinned_successor_admits_first_attempt_and_rejects_replay(self):
