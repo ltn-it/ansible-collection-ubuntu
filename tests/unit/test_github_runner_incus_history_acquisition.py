@@ -222,22 +222,29 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             f._continuation_native_histories(self.get, self.descriptor, broken)
 
-    def test_seventeenth_route_requires_the_new_terminal_family_and_all_earlier_families(self):
+    def test_nineteenth_route_requires_every_native_family_and_rejects_projection_drift(self):
         receipt = self.receipt
         phases = ("eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
-                  "fifteenth", "sixteenth", "seventeenth")
+                  "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth")
         with ExitStack() as stack:
+            legacy = self.wrapped(stack)
             checks = {}
             for phase in phases:
                 graph = {"fixture": phase}
                 receipt = {"previous_qualification": receipt, f"native_{phase}": graph}
                 checks[phase] = stack.enter_context(patch.object(f, f"_continuation_{phase}_native", return_value=graph))
-            f._continuation_native_histories(self.get, {"schema": 17}, receipt)
+            f._continuation_native_histories(self.get, {"schema": 19}, receipt)
+            self.assertCountEqual(legacy["finished"], NAMES)
             for check in checks.values():
                 check.assert_called_once_with(self.get)
-            with self.assertRaisesRegex(Denied, "continuation-seventeenth-native-drift"):
-                f._continuation_native_histories(
-                    self.get, {"schema": 17}, receipt | {"native_seventeenth": {"fixture": "different"}})
+            for depth, phase in enumerate(reversed(phases[-3:])):
+                broken = copy.deepcopy(receipt)
+                family = broken
+                for _ in range(depth):
+                    family = family["previous_qualification"]
+                family[f"native_{phase}"] = {"fixture": "different"}
+                with self.subTest(phase=phase), self.assertRaisesRegex(Denied, f"continuation-{phase}-native-drift"):
+                    f._continuation_native_histories(self.get, {"schema": 19}, broken)
 
     def test_data_missing_pagination_and_second_readback_still_deny(self):
         origin = '/actions/runs/' + str(self.args[0][0]['id']) + '/attempts/1/jobs?per_page=100&page='

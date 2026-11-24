@@ -3,7 +3,9 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
@@ -30,6 +32,54 @@ def fixture(case="failure"):
 
 
 class OperatingCellTests(unittest.TestCase):
+    def test_private_cached_image_is_only_requested_for_the_two_bound_business_vm_cases(self):
+        for profile, scenario in (("heavy", "keycloak-heavy"),
+                                  ("application_acceptance", "keycloak-application-acceptance")):
+            env = {"QUALITY_INPUT_PROFILE": profile, "QUALITY_INPUT_SCENARIO": scenario,
+                   "QUALITY_INPUT_TARGET": "ubuntu-24.04", "QUALITY_INPUT_INSTANCE_TYPE": "vm",
+                   "QUALITY_INPUT_IMAGE": cells.IMAGE}
+            self.assertTrue(cells.uses_cached_vm_image(env))
+            for key, bad in (("PROFILE", "tiny"), ("SCENARIO", "keycloak-tiny"), ("TARGET", "rhel-9"),
+                             ("INSTANCE_TYPE", "container"), ("IMAGE", "images:ubuntu/24.04"),
+                             ("IMAGE", "0" * 64)):
+                with self.subTest(profile=profile, key=key, bad=bad):
+                    self.assertFalse(cells.uses_cached_vm_image(env | {"QUALITY_INPUT_" + key: bad}))
+        self.assertTrue(cells.uses_cached_vm_image({"QUALITY_INPUT_PROFILE": "operating"}))
+
+    def test_private_cache_adds_disk_quota_only_for_the_two_business_profiles(self):
+        certificate = "a" * 64
+        template = {
+            "server": "https://192.0.2.11:8443",
+            "server_certificate": {"path": "/unit/server.pem", "sha256": certificate},
+            "pool": "test-pool", "project_prefix": "test-", "ipv4_address": "10.0.0.1/24",
+            "dns_domain": "unit.test",
+            "project_limits": {"cpu": 1, "memory_bytes": 2 * 1024**3, "disk_bytes": 0,
+                               "instances": 1, "virtual_machines": 1, "containers": 0},
+        }
+        env = {"QUALITY_INPUT_TARGET": cells.TARGET, "QUALITY_INPUT_INSTANCE_TYPE": "vm",
+               "QUALITY_INPUT_IMAGE": cells.IMAGE, "QUALITY_INPUT_DISK_LIMIT": "24GiB",
+               "QUALITY_INPUT_CPU_LIMIT": "1", "QUALITY_INPUT_MEMORY_LIMIT": "2GiB"}
+        guest = 24 * 1024**3
+        with patch.object(cell_contract.installation, "_file",
+                          return_value=(SimpleNamespace(sha256=certificate), b"", ())):
+            for profile, scenario in sorted(cells.BUSINESS_VM_PROFILES):
+                env.update(QUALITY_INPUT_PROFILE=profile, QUALITY_INPUT_SCENARIO=scenario)
+                with self.subTest(profile=profile):
+                    template["project_limits"]["disk_bytes"] = guest
+                    with self.assertRaisesRegex(Denied, "cell-project-quota"):
+                        cell_contract._validate_incus_template(template, env)
+                    template["project_limits"]["disk_bytes"] = guest + cells.IMAGE_RESERVATION
+                    self.assertEqual(cell_contract._validate_incus_template(template, env), template)
+            template["project_limits"]["disk_bytes"] = guest
+            self.assertEqual(cell_contract._validate_incus_template(template, env | {
+                "QUALITY_INPUT_PROFILE": "heavy", "QUALITY_INPUT_SCENARIO": "other-heavy",
+            }), template)
+            value, native, who = fixture()
+            operating = cells.environment(value, native, who)
+            template["project_limits"] = value["incus"]["project_limits"]
+            self.assertEqual(cell_contract._validate_incus_template(template, operating), template)
+            self.assertEqual(template["project_limits"]["disk_bytes"], cells.PROJECT_RESERVATION)
+
     def test_all_three_closed_cases_exact_environment_and_sizes(self):
         for case in cells.CASES:
             value, native, who = fixture(case)

@@ -383,8 +383,8 @@ def _prepare_locked(session, registry, selector, store, lease_id):
         pre_authority_stage = "bridge-readback"
         _fresh(config, prepared, store)
         descriptor = identity.decode_json(prepared.engine_descriptor_bytes)
-        if descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
-            from . import operating_cells
+        from . import operating_cells
+        if operating_cells.uses_cached_vm_image(descriptor["environment"]):
             _remote(config, prepared, store, transport, "image-copy", "image:" + target["project"] + ":" + operating_cells.IMAGE,
                     "image", transport.image_copy)
         _bridge_facts_readback(config, prepared, store, transport)

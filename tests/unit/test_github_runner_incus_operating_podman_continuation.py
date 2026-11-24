@@ -450,6 +450,136 @@ class EighteenthRetirementJournalTests(OCIRetirementFixture):
         self.assertEqual(self.record["effects"][self.effect]["state"], "unknown")
 
 
+@unittest.skipUnless(os.geteuid() == 0 and sys.platform == "linux", "private Root Linux EE only")
+class NineteenthRetirementJournalTests(OCIRetirementFixture):
+    run_id = cells.NINETEENTH_RUN
+    job_id = cells.NINETEENTH_CHECKS[0]
+    lease = cells.NINETEENTH_LEASE
+    floor = cells.NINETEENTH_RETAIN_UNTIL
+    source_revision = cells.NINETEENTH_MAIN
+    controller_revision = cells.EIGHTEENTH_SUCCESSOR_REUSABLE
+    previous_schema = 18
+    scope = "exact-nineteenth-original-retirement"
+    read_journal = staticmethod(run_factory._nineteenth_journal)
+
+    @staticmethod
+    def read_retirement(retirement, prior, successor_bank, successor):
+        return run_factory._revalidate_oci_retirement(
+            retirement, prior, successor_bank, successor, bound_exit=True, verified_start=True)
+
+    def setUp(self):
+        super().setUp()
+        for name in tuple(self.retirement["journal"]["members"]):
+            if name.endswith(("-intent.json", "-receipt.json")) and name != "complete-receipt.json":
+                (self.root / name).unlink()
+                del self.retirement["journal"]["members"][name]
+        original = self.retirement["original_record"]
+        original["start_effect_id"] = original.pop("unknown_effect_id")
+        proof, _, stamp = run_factory.installation._file(str(self.bank_file), 1024, private=True)
+        self.retirement["original_bank"]["state_file_identity"] = {
+            "device": proof.device, "inode": proof.inode, "stamp": list(stamp),
+        }
+        identity = {"run": self.run_id, "original_lease": self.lease, "original_record_sha256": original["sha256"]}
+        for index, step in enumerate(cells.NINETEENTH_RETIREMENT_STEPS):
+            actual = identity | {"step": step, "metadata": {"reference": step}, "at": self.floor + 2 + index * 2}
+            self.write(step + "-intent.json", actual)
+            self.write(step + "-receipt.json", actual | {"at": actual["at"] + 1, "state": "separate-effect-verified"})
+        complete = json.loads((self.root / "complete-receipt.json").read_bytes())
+        complete["original_failure_preserved"] = True
+        self.write("complete-receipt.json", complete)
+
+        self.archive = self.parent / f"runner01-original-diagnostics-{self.run_id}"
+        self.archive.mkdir(mode=0o700)
+        self.capture = {"stdout.log": b"", "stderr.log": b"", "engine-manifest.json": b"fixture engine manifest\n"}
+        for name, content in self.capture.items():
+            path = self.archive / name
+            path.write_bytes(content)
+            path.chmod(0o600)
+        self.manifest_digest = hashlib.sha256(self.capture["engine-manifest.json"]).hexdigest()
+        effect, self.absence = podman_exit_fixture()
+        effect["state"] = "verified"
+        effect["engine_capture"]["manifest_sha256"] = self.manifest_digest
+        effect["engine_exit"].update(exit_code=1, manifest_sha256=self.manifest_digest)
+        self.record["effects"][self.effect] = effect
+        self.withdrawals = {}
+        for index, operation in enumerate(("engine-stop", "fence-disable", "certificate-revoke"), start=2):
+            withdrawal = {"operation": operation, "state": "verified", "at": self.floor - index}
+            self.record["effects"][str(index) * 32] = withdrawal
+            self.withdrawals[operation] = ledger.digest(withdrawal)
+        self.seal_diagnostics()
+
+    def seal_diagnostics(self):
+        self.reseal_record()
+        original = self.retirement["original_record"]
+        original["engine_exit_sha256"] = ledger.digest(self.record["effects"][self.effect]["engine_exit"])
+        scope = {"run": self.run_id, "original_lease": self.lease, "original_record_sha256": original["sha256"]}
+        members = {name: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                   for name, raw in self.capture.items()}
+        raw = ledger.canonical({"identity": scope, "files": members}) + b"\n"
+        manifest = self.archive / "manifest.json"
+        manifest.write_bytes(raw)
+        manifest.chmod(0o600)
+        self.write("diagnostic-archive.json", scope | {"at": self.floor,
+            "original_withdrawal_effects_sha256": self.withdrawals,
+            "archive": {"name": self.archive.name, "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+                        "files": members}})
+        self.write("podman-container-absence.json", scope | {"at": self.floor + 1, "proof": self.absence | {
+            "name": "lit-lease-" + self.lease, "manifest_sha256": self.manifest_digest,
+            "engine_exit_sha256": original["engine_exit_sha256"],
+        }})
+
+    def test_retirement_has_original_diagnostics_and_separate_idle_baseline_normalization(self):
+        proof = self.read()
+        self.assertIn("diagnostic-archive.json", proof)
+        self.assertNotIn("certificate-revoke-receipt.json", proof)
+        self.assertIn("fence-baseline-normalize-receipt.json", proof)
+        self.assertFalse(proof["complete-receipt.json"]["native_case_acceptance"])
+
+    def test_late_diagnostic_archive_is_denied(self):
+        name = "diagnostic-archive.json"
+        record = json.loads((self.root / name).read_bytes())
+        self.write(name, record | {"at": self.floor + 3})
+        with self.assertRaisesRegex(identity.Denied, "continuation-nineteenth-journal-binding"):
+            self.read()
+
+    def test_revalidates_sealed_archive_bank_and_withdrawal_before_scoped_absence(self):
+        with patch.object(run_factory, "_twelfth_resources_absent") as absence:
+            self.revalidate()
+        absence.assert_called_once_with(self.config, self.selected, self.record, self.lease, self.read(),
+                                        None, None, expected_cookie=456, original_withdrawal=True)
+
+    def test_changed_bank_file_identity_denies_before_resource_readback(self):
+        self.retirement["original_bank"]["state_file_identity"]["inode"] += 1
+        with (patch.object(run_factory, "_twelfth_resources_absent") as absence,
+              self.assertRaisesRegex(identity.Denied, "continuation-nineteenth-bank-file-identity")):
+            self.revalidate()
+        absence.assert_not_called()
+
+    def test_mismatched_original_withdrawal_is_rejected_even_in_resealed_journal(self):
+        self.withdrawals["fence-disable"] = "0" * 64
+        self.seal_diagnostics()
+        with self.assertRaisesRegex(identity.Denied, "continuation-nineteenth-withdrawal-drift"):
+            self.revalidate()
+
+    def test_archive_rejects_tampered_bytes_and_nonprivate_member(self):
+        name = "engine-manifest.json"
+        path = self.archive / name
+        raw = self.capture[name]
+        path.write_bytes(raw[::-1])
+        with self.assertRaisesRegex(identity.Denied, "continuation-nineteenth-archive-member"):
+            self.revalidate()
+        path.write_bytes(raw)
+        path.chmod(0o644)
+        with self.assertRaisesRegex(identity.Denied, "installation-private"):
+            self.revalidate()
+
+    def test_unexpected_status_is_rejected_even_when_exit_and_archive_match(self):
+        self.record["effects"][self.effect]["engine_exit"]["exit_code"] = 126
+        self.seal_diagnostics()
+        with self.assertRaisesRegex(identity.Denied, "continuation-eighteenth-original-exit"):
+            self.revalidate()
+
+
 class SixteenthContinuationTests(unittest.TestCase):
     def test_pinned_successor_admits_first_attempt_and_rejects_replay(self):
         workflow = cells.SIXTEENTH_SUCCESSOR_WORKFLOW
