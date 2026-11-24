@@ -337,7 +337,7 @@ class PostEngineArchiveTests(unittest.TestCase):
             self.publish()
         self.assertEqual(archive.read_bytes(), changed)
 
-    def completed_cleanup(self):
+    def completed_cleanup(self, with_image=False):
         target_by_operation = {
             "project-create": "project:proof-project",
             "network-create": "network:default:proof-bridge",
@@ -354,6 +354,10 @@ class PostEngineArchiveTests(unittest.TestCase):
             "engine-stop": "engine:lit-lease-" + self.lease,
             "fence-disable": target_by_operation["fence-create"],
         }
+        if with_image:
+            target_by_operation["image-copy"] = "image:proof-project:" + operating_cells.IMAGE
+            prepare["image-copy"] = {"operation": "image-copy", "target": target_by_operation["image-copy"],
+                                     "state": "verified", "at": 300}
         self.record["effects"].pop("scope")
         self.record["effects"].update(prepare)
         for operation, target in withdrawals.items():
@@ -402,6 +406,29 @@ class PostEngineArchiveTests(unittest.TestCase):
                 operation.update(original)
             require_complete.assert_not_called()
 
+    def test_private_image_requires_its_own_verified_delete_before_complete_readback(self):
+        _, binding = self.completed_cleanup(with_image=True)
+        removed = self.record["effects"].pop("image-delete")
+        with mock.patch.object(self.store, "require_cleanup_complete") as require_complete:
+            with self.assertRaisesRegex(identity.Denied, "post-engine-cleanup-journal-held"):
+                self.read_cleanup_journal(binding)
+            progress = startup_retirement._read_post_engine_cleanup_journal(self.store, self.lease, binding, complete=False)
+            self.assertTrue(progress["cleanup_started"])
+            require_complete.assert_not_called()
+            self.record["effects"]["image-delete"] = removed
+            self.assertEqual(self.read_cleanup_journal(binding)["state"], "awaiting-independent-absence")
+
+    def test_independent_readback_is_private_immutable_and_does_not_touch_the_archive(self):
+        _, binding = self.completed_cleanup()
+        value = {"schema": 1, "archive_sha256": binding}
+        signature = startup_retirement._publish_post_engine_readback(self.store, self.lease, value)
+        self.assertEqual(signature, startup_retirement._publish_post_engine_readback(self.store, self.lease, value))
+        self.assertEqual(startup_retirement._read_post_engine_readback(self.store, self.lease, signature), value)
+        with self.assertRaisesRegex(identity.Denied, "post-engine-readback-drift"):
+            startup_retirement._publish_post_engine_readback(self.store, self.lease, value | {"schema": 2})
+        self.assertEqual(set(member.name for member in self.folder.iterdir()),
+                         {"original.json", "terminal.json", "stdout.log", "stderr.log", "manifest.json"})
+
     def test_original_record_drift_and_pending_cleanup_postcheck_hold(self):
         _, binding = self.completed_cleanup()
         with mock.patch.object(self.store, "require_cleanup_complete",
@@ -418,6 +445,116 @@ class PostEngineArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(identity.Denied, "post-engine-archive-complete-exit"):
             self.publish()
         self.assertFalse(self.folder.parent.exists())
+
+
+class PostEngineFinalizerTests(unittest.TestCase):
+    def setUp(self):
+        from incus_lease_issuer import finalization, root_session
+
+        self.lease_id = "a" * 32
+        self.permit_sha = "1" * 64
+        self.readback_sha = "2" * 64
+        self.finalizer = object.__new__(finalization.RootFinalizer)
+        self.finalizer._runtime = SimpleNamespace(preparation_config_path="/root/preparation.json",
+                                                  preparation_config_sha256="b" * 64)
+        self.sessions = self.enterContext(mock.patch.object(root_session, "_session"))
+        self.store = mock.Mock()
+        self.record = {"state": "prepared", "worker": {}, "effects": {}}
+        self.store.read.return_value = self.record
+        self.enterContext(mock.patch.object(ledger, "Worker"))
+        self.target = (mock.sentinel.registry, "heavy-keycloak-heavy-ubuntu-24.04", self.store, self.lease_id, self.permit_sha)
+        self.permit = {"archive_sha256": "3" * 64, "original_sha256": "4" * 64}
+        self.cleanup = mock.Mock()
+        self.cleanup.certificates_absent.return_value = True
+        self.owner = SimpleNamespace(incus={"project": "proof-project", "network": "proof-network"})
+        self.config = SimpleNamespace(operation_wait_seconds=1)
+        self.progress = {"cleanup_started": False}
+        self.enterContext(mock.patch.object(self.finalizer, "_post_engine_scope",
+            return_value=(self.permit, self.progress, self.record, self.owner, self.config, self.cleanup)))
+        self.enterContext(mock.patch.object(finalization.network_fence, "verify_disabled"))
+
+    def test_first_mutation_requires_fresh_permit_and_respects_the_private_copy(self):
+        image = "image:proof-project:" + operating_cells.IMAGE
+        self.record["effects"]["copy"] = {"operation": "image-copy", "target": image}
+        awaiting = {"state": "awaiting-independent-absence", "native_acceptance": False}
+        with (mock.patch.object(self.finalizer, "_observe_failed_engine_without_vm") as observe,
+              mock.patch.object(startup_retirement, "_require_post_engine_observation", create=True) as recheck,
+              mock.patch.object(startup_retirement, "_read_post_engine_permit", create=True) as permit,
+              mock.patch.object(self.finalizer, "_release_owned_resources") as release,
+              mock.patch.object(startup_retirement, "_read_post_engine_cleanup_journal", return_value=awaiting)):
+            with self.assertRaisesRegex(identity.Denied, "post-engine-cleanup-denied"):
+                self.finalizer.finalize_post_engine_failure(*self.target)
+            release.assert_not_called()
+
+            permit.return_value = self.permit
+            self.assertEqual(self.finalizer.finalize_post_engine_failure(*self.target), awaiting)
+        recheck.assert_called_with(self.permit, observe.return_value, self.store._now.return_value)
+        self.assertEqual(release.call_args.args[-1], image)
+        self.store.close.assert_not_called()
+
+    def test_verified_cleanup_resume_holds_if_original_project_returned(self):
+        self.progress["cleanup_started"] = True
+        self.record["effects"]["delete"] = {"operation": "project-delete", "target": "project:proof-project"}
+        self.cleanup.readback.return_value = {"state": "required_fields_match"}
+        with (mock.patch.object(self.finalizer, "_release_owned_resources") as release,
+              self.assertRaisesRegex(identity.Denied, "post-engine-cleanup-denied")):
+            self.finalizer.finalize_post_engine_failure(*self.target)
+        release.assert_not_called()
+        self.store.close.assert_not_called()
+
+    def test_independent_absence_reacquires_storage_witnesses_and_holds_on_returned_volume(self):
+        from incus_lease_issuer import cleanup_storage, finalization
+
+        storage = {"cleanup_postcheck": "nonce", "cleanup_observation": {"name": "sidecar"}}
+        self.cleanup.readback.return_value = {"state": "absent_observed"}
+        with (
+            mock.patch.object(cleanup_storage, "_reconcile_verified_postchecks") as refresh,
+            mock.patch.object(self.finalizer, "_fresh"),
+            mock.patch.object(finalization.engine_executor, "_slice_inactive"),
+            mock.patch.object(finalization.network_fence, "verify_disabled", return_value={"admitted": 0}),
+            mock.patch.object(startup_retirement, "_read_post_engine_permit", return_value=self.permit, create=True),
+            mock.patch.object(startup_retirement, "_read_post_engine_cleanup_journal", return_value={}),
+        ):
+            with self.assertRaisesRegex(identity.Denied, "post-engine-independent-storage-witness-required"):
+                self.finalizer._post_engine_absence(mock.sentinel.session, *self.target)
+            refresh.assert_not_called()
+            self.record["effects"].update({operation: storage | {"operation": operation}
+                                           for operation in ("engine-release", "context-delete")})
+            self.cleanup._client.pool_volumes.return_value = [{"project": self.owner.incus["project"]}]
+            with self.assertRaisesRegex(identity.Denied, "post-engine-pool-volume-returned"):
+                self.finalizer._post_engine_absence(mock.sentinel.session, *self.target)
+            self.cleanup._client.pool_volumes.return_value = []
+            proof = self.finalizer._post_engine_absence(mock.sentinel.session, *self.target)
+        self.assertEqual(proof["state"], "verified-absence")
+        self.assertEqual([call.kwargs for call in refresh.call_args_list], [{"refresh": True}, {"refresh": True}])
+        self.store.close.assert_not_called()
+
+    def test_readback_and_close_use_separate_sessions_and_recheck_before_close(self):
+        self.record = {"state": "prepared"}
+        self.store.read.return_value = self.record
+        proof = {"state": "verified-absence", "journal_sha256": ledger.digest(self.record), "native_acceptance": False}
+        with (mock.patch.object(self.finalizer, "_post_engine_absence", return_value=proof) as observe,
+              mock.patch.object(startup_retirement, "_publish_post_engine_readback", return_value=self.readback_sha),
+              mock.patch.object(startup_retirement, "_read_post_engine_readback", side_effect=FileNotFoundError) as read):
+            self.assertEqual(self.finalizer.readback_post_engine_failure(*self.target)["readback_sha256"], self.readback_sha)
+            self.store.close.assert_not_called()
+            with self.assertRaises(FileNotFoundError):
+                self.finalizer.close_post_engine_failure(*self.target, self.readback_sha)
+            self.store.close.assert_not_called()
+            read.side_effect = None
+            read.return_value = proof | {"journal_sha256": "f" * 64}
+            with self.assertRaisesRegex(identity.Denied, "post-engine-closure-held"):
+                self.finalizer.close_post_engine_failure(*self.target, self.readback_sha)
+            self.store.close.assert_not_called()
+            read.return_value = proof
+            self.store.close.side_effect = lambda _: self.store.read.configure_mock(
+                return_value={"state": "closed", "closed_at": 501})
+            receipt = self.finalizer.close_post_engine_failure(*self.target, self.readback_sha)
+        self.assertEqual(receipt["state"], "FAILED_POST_ENGINE_CLOSED")
+        self.assertFalse(receipt["native_acceptance"])
+        self.store.close.assert_called_once_with(self.lease_id)
+        self.assertEqual(observe.call_count, 3)
+        self.assertEqual(self.sessions.call_count, 4)
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Linux Root test")

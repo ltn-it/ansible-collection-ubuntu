@@ -393,8 +393,8 @@ def _read_post_engine_archive(store, lease_id, expected_sha256):
     return receipt
 
 
-def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256):
-    """Reopen the original archive after cleanup without granting closure."""
+def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256, *, complete=True):
+    """Accept only verified cleanup entries for the exact archived creators."""
     folder = _post_engine_archive_path(store, lease_id)
     _, raw, _ = installation._file(str(folder / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
     original = identity.decode_json(raw)
@@ -407,6 +407,15 @@ def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256):
     preparation = {"profile-configure", "context-publish", "context-refresh", "fence-renew"}
     original_effects = original["effects"]
     operations = {effect["operation"] for effect in original_effects.values()}
+    if "image-copy" in operations:
+        from . import operating_cells
+
+        projects = [effect["target"] for effect in original_effects.values() if effect["operation"] == "project-create"]
+        copies = [effect["target"] for effect in original_effects.values() if effect["operation"] == "image-copy"]
+        require(len(projects) == 1 and copies == [
+            "image:" + projects[0].removeprefix("project:") + ":" + operating_cells.IMAGE],
+            "post-engine-cleanup-image-scope")
+        creators.add("image-copy")
     require(original["state"] in {"prepared", "cancelled"}
             and not {"owned_instance", "custody", "partial_preparation_custody", "uploaded_evidence"} & original.keys()
             and original.get("upload_verification", {}).get("state") != "intent"
@@ -420,16 +429,47 @@ def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256):
     expected = {(ledger.CREATES[effect["operation"]], effect["target"])
                 for effect in original_effects.values() if effect["operation"] in creators}
     completed = [effect for identifier, effect in effects.items() if identifier not in original_effects]
-    require(len(expected) == len(creators) == len(completed)
-            and {(effect["operation"], effect["target"]) for effect in completed} == expected
+    observed = {(effect["operation"], effect["target"]) for effect in completed}
+    require(len(expected) == len(creators) and len(observed) == len(completed)
+            and observed <= expected and (not complete or observed == expected)
             and all(effect["state"] == "verified" and effect["at"] >= original["native_terminal"]["completed_at"]
                     for effect in completed), "post-engine-cleanup-journal-held")
-    store.require_cleanup_complete(lease_id)
+    if complete:
+        store.require_cleanup_complete(lease_id)
     require(store.read(lease_id) == record, "post-engine-cleanup-journal-drift")
 
-    return {"schema": 1, "state": "awaiting-independent-absence", "lease_id": lease_id,
+    receipt = {"schema": 1, "state": "awaiting-independent-absence", "lease_id": lease_id,
             "archive_sha256": archive_sha256, "original_sha256": ledger.digest(original),
             "journal_sha256": ledger.digest(record), "native_acceptance": False}
+    if not complete:
+        receipt.update(state="verified-cleanup-progress", cleanup_started=bool(completed))
+    return receipt
+
+
+def _post_engine_readback_path(store, lease_id):
+    return _post_engine_archive_path(store, lease_id).parent.parent / "post-engine-readbacks" / (lease_id + ".json")
+
+
+def _read_post_engine_readback(store, lease_id, readback_sha256):
+    path = _post_engine_readback_path(store, lease_id)
+    _, raw, _ = installation._file(str(path), 65536, private=True, keep=True)
+    value = identity.decode_json(raw)
+    require(ledger.canonical(value) == raw and ledger.digest(value) == readback_sha256,
+            "post-engine-readback-drift")
+    return value
+
+
+def _publish_post_engine_readback(store, lease_id, value):
+    from . import generation_publisher
+
+    path = _post_engine_readback_path(store, lease_id)
+    if not os.path.lexists(path.parent):
+        generation_publisher._mkdir(path.parent)
+    digest = ledger.digest(value)
+    if not os.path.lexists(path):
+        _publish_record(path, value)
+    require(_read_post_engine_readback(store, lease_id, digest) == value, "post-engine-readback-drift")
+    return digest
 
 
 def _publish_post_engine_archive(session, owner, store):

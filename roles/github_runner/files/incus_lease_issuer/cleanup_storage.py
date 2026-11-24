@@ -724,22 +724,30 @@ def _consume_reconciliation(proof, store, identifier, effect_id):
 
 def reconcile_postchecks(session, owner, store, config, cleanup):
     """GET-only original-scope resolution, never a repeated delete or timing PASS."""
+    from . import operating_custody, root_session
+    require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
+    _fresh(owner, store, config)
+    if type(owner) is not cell_contract.PartialPreparationOwner:
+        operating_custody.require_cleanup_allowed(store, owner.lease_id)
+    _reconcile_verified_postchecks(session, owner, store, config, cleanup)
+
+
+def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, refresh=False):
+    """Read verified effects for callers that have already checked custody."""
     from . import kernel, root_session
     require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
     record = _fresh(owner, store, config)
-    from . import operating_custody
-    if type(owner) is not cell_contract.PartialPreparationOwner:
-        operating_custody.require_cleanup_allowed(store, owner.lease_id)
     require(not any(e["state"] in {"intent", "unknown"} for e in record["effects"].values()),
             "cleanup-reconciliation-uncertain")
     for effect_id, effect in record["effects"].items():
         if "cleanup_postcheck" not in effect:
             continue
-        try:
-            store.require_cleanup_postchecks(owner.lease_id)
-            return  # The original process already has the complete live witnesses.
-        except Denied:
-            pass
+        if not refresh:
+            try:
+                store.require_cleanup_postchecks(owner.lease_id)
+                return  # The original process already has the complete live witnesses.
+            except Denied:
+                pass
         end = time.monotonic() + config.operation_wait_seconds
         require(effect["state"] == "verified", "cleanup-reconciliation-uncertain")
         value = store.read_cleanup_observation(owner.lease_id, effect_id, deadline=end)

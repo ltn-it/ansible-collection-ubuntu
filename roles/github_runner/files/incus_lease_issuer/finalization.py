@@ -443,6 +443,161 @@ class RootFinalizer:
                 "terminal_sha256": ledger.digest(terminal), "engine_exit_sha256": ledger.digest(actual),
                 "capture_sha256": capture, "project": target["project"], "inventory": inventories[0]}
 
+    def _release_owned_resources(self, session, store, owner, config, cleanup, project_deleted, image_target):
+        from . import cleanup_storage
+
+        registry, selector, lease_id = owner.registry, owner.selector, owner.lease_id
+        target = owner.incus
+        worker = ledger.Worker(**store.read(lease_id)["worker"])
+        cleanup_storage.release_engine(owner, store, config)
+        self._fresh(session, registry, selector, store, owner)
+        cleanup_storage.delete_context(owner, store, config)
+        if image_target is not None and project_deleted is None:
+            self._remote_delete(session, registry, selector, store, owner, cleanup, "image-delete",
+                image_target, "image", cleanup.image_delete)
+            # A terminal own task can still appear in Incus's task listing.
+            cleanup.wait_quiet(config.operation_wait_seconds)
+        self._remote_delete(session, registry, selector, store, owner, cleanup, "project-delete",
+            "project:" + target["project"], "project", cleanup.project_delete)
+        require(cleanup.readback("profile")["state"] == "absent_observed", "finalization-default-profile-returned")
+        self._remote_delete(session, registry, selector, store, owner, cleanup, "network-delete",
+            "network:default:" + target["network"], "bridge", cleanup.bridge_delete)
+        self._fresh(session, registry, selector, store, owner)
+        network_fence.remove(config.network_fence_policy_path, config.network_fence_policy_sha256,
+                             owner, store, worker, config)
+        engine_executor._remove_slice(session, owner, store)
+        self._fresh(session, registry, selector, store, owner)
+        require(cleanup.certificates_absent() is True, "finalization-certificate-returned")
+        require(cleanup.readback("project")["state"] == "absent_observed"
+                and cleanup.readback("bridge")["state"] == "absent_observed", "finalization-resource-returned")
+
+    def _post_engine_scope(self, session, registry, selector, store, lease_id, permit_sha256):
+        from . import startup_retirement
+
+        permit = startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256)
+        progress = startup_retirement._read_post_engine_cleanup_journal(
+            store, lease_id, permit["archive_sha256"], complete=False)
+        require(progress["original_sha256"] == permit["original_sha256"], "post-engine-permit-original-drift")
+        owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
+        config = self._fresh(session, registry, selector, store, owner)
+        record = store.read(lease_id)
+        require(ledger.digest(record) == progress["journal_sha256"], "post-engine-cleanup-journal-drift")
+        target = owner.incus
+        fingerprint = owner.creator_targets["certificate-create"].removeprefix("certificate:")
+        admin = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
+            target["project"], target["network"], "default", target["pool"], (fingerprint,), target["instance"]))
+        return permit, progress, record, owner, config, incus_mutation.RootIncusCleanup(admin, owner, store)
+
+    def _check_post_engine_resume(self, owner, record, cleanup, project_deleted, image_target):
+        target = owner.incus
+        image_deleted = None if image_target is None else _effect(record, "image-delete", image_target)
+        if project_deleted is None:
+            staged_image = image_target is not None and image_deleted is None
+            cleanup._verify_delete_scope("project", staged_image=staged_image)
+            require(cleanup.readback("profile")["state"] == "required_fields_match", "post-engine-profile-drift")
+            if image_target is not None:
+                expected = "required_fields_match" if staged_image else "absent_observed"
+                require(cleanup.readback("image")["state"] == expected, "post-engine-image-drift")
+        else:
+            require((image_target is None or image_deleted is not None)
+                    and all(cleanup.readback(kind)["state"] == "absent_observed" for kind in ("project", "profile")),
+                    "post-engine-deleted-project-returned")
+        if _effect(record, "network-delete", "network:default:" + target["network"]) is None:
+            cleanup._verify_delete_scope("bridge")
+        else:
+            require(cleanup.readback("bridge")["state"] == "absent_observed", "post-engine-deleted-bridge-returned")
+        require(all(type(row.get("project")) is str and row["project"] != target["project"]
+                    for row in cleanup._client.pool_volumes()), "post-engine-pool-volume-returned")
+
+    def finalize_post_engine_failure(self, registry, selector, store, lease_id, permit_sha256):
+        """Remove exact owned resources under the previously sealed POC permit. Keep the lease open."""
+        from . import cleanup_storage, root_session, startup_retirement
+
+        attempted = False
+        try:
+            with root_session._session(self._runtime.preparation_config_path,
+                                       self._runtime.preparation_config_sha256) as session:
+                permit, progress, record, owner, config, cleanup = self._post_engine_scope(
+                    session, registry, selector, store, lease_id, permit_sha256)
+                worker = ledger.Worker(**record["worker"])
+                require(cleanup.certificates_absent() is True, "post-engine-certificate-returned")
+                network_fence.verify_disabled(owner, store, worker, config)
+                project_deleted = _effect(record, "project-delete", "project:" + owner.incus["project"])
+                copies = [effect["target"] for effect in record["effects"].values() if effect["operation"] == "image-copy"]
+                image_target = copies[0] if copies else None
+                if project_deleted is None:
+                    cleanup.wait_quiet(config.operation_wait_seconds)
+                if progress["cleanup_started"]:
+                    self._check_post_engine_resume(owner, record, cleanup, project_deleted, image_target)
+                    cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup)
+                else:
+                    observation = self._observe_failed_engine_without_vm(session, registry, selector, store, lease_id)
+                    startup_retirement._require_post_engine_observation(permit, observation, store._now())
+                require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256) == permit
+                        and store.read(lease_id) == record, "post-engine-authorization-drift")
+                attempted = True
+                self._release_owned_resources(session, store, owner, config, cleanup, project_deleted, image_target)
+                return startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"])
+        except FinalizationUnknown:
+            raise
+        except Exception:
+            if attempted:
+                raise FinalizationUnknown("post-engine-cleanup-held") from None
+            raise FinalizationDenied("post-engine-cleanup-denied") from None
+
+    def _post_engine_absence(self, session, registry, selector, store, lease_id, permit_sha256):
+        from . import cleanup_storage, startup_retirement
+
+        permit, _, record, owner, config, cleanup = self._post_engine_scope(
+            session, registry, selector, store, lease_id, permit_sha256)
+        for operation in ("engine-release", "context-delete"):
+            rows = [effect for effect in record["effects"].values() if effect["operation"] == operation]
+            require(len(rows) == 1 and "cleanup_postcheck" in rows[0] and "cleanup_observation" in rows[0],
+                    "post-engine-independent-storage-witness-required")
+        cleanup_storage._reconcile_verified_postchecks(session, owner, store, config, cleanup, refresh=True)
+        journal = startup_retirement._read_post_engine_cleanup_journal(store, lease_id, permit["archive_sha256"])
+        resources = {kind: cleanup.readback(kind) for kind in ("project", "profile", "bridge")}
+        require(all(row["state"] == "absent_observed" for row in resources.values())
+                and cleanup.certificates_absent() is True, "post-engine-incus-scope-returned")
+        volumes = cleanup._client.pool_volumes()
+        require(all(type(row.get("project")) is str and row["project"] != owner.incus["project"] for row in volumes),
+                "post-engine-pool-volume-returned")
+        worker = ledger.Worker(**record["worker"])
+        fence = network_fence.verify_disabled(owner, store, worker, config)
+        engine_executor._slice_inactive(lease_id)
+        self._fresh(session, registry, selector, store, owner)
+        require(startup_retirement._read_post_engine_permit(store, lease_id, permit_sha256) == permit
+                and store.read(lease_id) == record, "post-engine-readback-journal-drift")
+        return {**journal, "state": "verified-absence", "permit_sha256": permit_sha256,
+                "resources_sha256": ledger.digest({"incus": resources, "certificate_scope_absent": True,
+                    "project_volumes": [], "fence": fence, "slice": "absent", "local_consumer_census": "verified"})}
+
+    def readback_post_engine_failure(self, registry, selector, store, lease_id, permit_sha256):
+        """Acquire fresh Root-only provider and consumer evidence without changing the lease."""
+        from . import root_session, startup_retirement
+
+        with root_session._session(self._runtime.preparation_config_path,
+                                   self._runtime.preparation_config_sha256) as session:
+            receipt = self._post_engine_absence(session, registry, selector, store, lease_id, permit_sha256)
+            digest = startup_retirement._publish_post_engine_readback(store, lease_id, receipt)
+            return {**receipt, "readback_sha256": digest}
+
+    def close_post_engine_failure(self, registry, selector, store, lease_id, permit_sha256, readback_sha256):
+        """Close only after the separately persisted absence agrees with a fresh repeat."""
+        from . import root_session, startup_retirement
+
+        with root_session._session(self._runtime.preparation_config_path,
+                                   self._runtime.preparation_config_sha256) as session:
+            receipt = startup_retirement._read_post_engine_readback(store, lease_id, readback_sha256)
+            observed = self._post_engine_absence(session, registry, selector, store, lease_id, permit_sha256)
+            require(observed == receipt == startup_retirement._read_post_engine_readback(store, lease_id, readback_sha256)
+                    and ledger.digest(store.read(lease_id)) == receipt["journal_sha256"], "post-engine-closure-held")
+            store.close(lease_id)
+            record = store.read(lease_id)
+            require(record["state"] == "closed", "post-engine-close-not-observed")
+            return {"schema": 1, "state": "FAILED_POST_ENGINE_CLOSED", "lease_id": lease_id,
+                    "closed_at": record["closed_at"], "readback_sha256": readback_sha256, "native_acceptance": False}
+
     def finalize(self, registry, selector, store, lease_id):
         """Explicit Root call, serialized; no effect retry or job acceptance.
 
@@ -563,30 +718,8 @@ class RootFinalizer:
                 if project_deleted is None:
                     cleanup.wait_quiet(config.operation_wait_seconds)
                 cleanup_storage.reconcile_postchecks(session, owner, store, config, cleanup)
-                cleanup_storage.release_engine(owner, store, config)
-                self._fresh(session, registry, selector, store, owner)
-                cleanup_storage.delete_context(owner, store, config)
-                if copies and project_deleted is None:
-                    self._remote_delete(session, registry, selector, store, owner, cleanup, "image-delete",
-                        copies[0]["target"], "image", cleanup.image_delete)
-                    if project_deleted is None:
-                        # A successful native task may remain listed briefly.
-                        # Prove whole-project quiet BEFORE a new delete intent;
-                        # a foreign/failed task or timeout never authorizes it.
-                        cleanup.wait_quiet(config.operation_wait_seconds)
-                self._remote_delete(session, registry, selector, store, owner, cleanup, "project-delete",
-                    "project:"+target["project"], "project", cleanup.project_delete)
-                require(cleanup.readback("profile")["state"] == "absent_observed", "finalization-default-profile-returned")
-                self._remote_delete(session, registry, selector, store, owner, cleanup, "network-delete",
-                    "network:default:"+target["network"], "bridge", cleanup.bridge_delete)
-                self._fresh(session, registry, selector, store, owner)
-                network_fence.remove(config.network_fence_policy_path, config.network_fence_policy_sha256,
-                                     owner, store, worker, config)
-                engine_executor._remove_slice(session, owner, store)
-                self._fresh(session, registry, selector, store, owner)
-                require(cleanup.certificates_absent() is True, "finalization-certificate-returned")
-                require(cleanup.readback("project")["state"] == "absent_observed"
-                        and cleanup.readback("bridge")["state"] == "absent_observed", "finalization-resource-returned")
+                image_target = copies[0]["target"] if copies else None
+                self._release_owned_resources(session, store, owner, config, cleanup, project_deleted, image_target)
                 store.close(lease_id)
                 closed = store.read(lease_id)
                 require(closed["state"] == "closed", "finalization-close-not-observed")
