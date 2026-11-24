@@ -16,6 +16,53 @@ sys.path.insert(
 from incus_lease_issuer import identity, ledger, operating_cells as cells, run_factory
 
 
+class SealedPreleaseContinuationTests(unittest.TestCase):
+    def test_sealed_intake_requires_its_original_inode_before_readback(self):
+        digest = "a" * 64
+        previous = {"schema": 19}
+        original = SimpleNamespace(path="/unit/old/bootstrap.json", sha256=digest, file_stamp=(10, 20),
+                                   value={"ledger_path": "/unit/old/ledger"})
+        descriptor = {"schema": 19, "successor": {"run_id": cells.TWENTIETH_RUN,
+                                                 "source_sha": cells.TWENTIETH_MAIN}}
+        proof = {
+            "previous_bootstrap": {"path": original.path, "sha256": digest, "device": 10, "inode": 20},
+            "previous_bank": {"path": original.value["ledger_path"], "device": 10, "inode": 30,
+                              "state_file_sha256": digest},
+            "previous_qualification": previous,
+            "sealed_intake": {"name": "b" * 64, "device": 10, "inode": 40,
+                              "seal_sha256": digest, "intent_sha256": digest},
+        }
+        intent = {
+            "original_job": {"run_id": cells.TWENTIETH_RUN, "job_id": cells.TWENTIETH_CHECKS[0],
+                             "check_run_id": cells.TWENTIETH_CHECKS[0]},
+            "binding": {"source": {"commit_sha": cells.TWENTIETH_MAIN},
+                        "controller": {"commit_sha": cells.NINETEENTH_SUCCESSOR_REUSABLE}},
+        }
+        with (
+            patch.object(run_factory, "load_bootstrap", return_value=original),
+            patch.object(run_factory, "_continuation_receipt", return_value=(descriptor, previous)),
+            patch.object(run_factory, "_check_empty_previous_bank"),
+            patch.object(ledger, "_observe_historical_bank"),
+            patch.object(ledger, "Ledger") as bank,
+            patch.object(run_factory.installation, "_file", return_value=(SimpleNamespace(sha256=digest), b"", None)),
+            patch.object(run_factory.installation, "_open_directory", return_value=42),
+            patch.object(run_factory.run_intake, "_directory_identity", return_value=(10, 40, 0, 0, 0o40700)),
+            patch.object(run_factory.run_intake, "_read_at", return_value=(intent, digest, None)),
+            patch.object(run_factory.run_intake, "_sealed_state_unchanged") as check_seal,
+            patch.object(run_factory.os, "close") as close,
+        ):
+            transaction = bank.return_value.__enter__.return_value._transaction
+            transaction.return_value.__enter__.return_value = {"leases": {}, "tokens": {}}
+            run_factory._revalidate_twentieth_prelease(proof, "/unit/new/ledger")
+            check_seal.assert_called_once_with(42, digest)
+            close.assert_called_once_with(42)
+            check_seal.reset_mock()
+            proof["sealed_intake"]["inode"] = 41
+            with self.assertRaisesRegex(identity.Denied, "continuation-twentieth-intake-identity"):
+                run_factory._revalidate_twentieth_prelease(proof, "/unit/new/ledger")
+            check_seal.assert_not_called()
+
+
 class TenthPreleaseTests(unittest.TestCase):
     def setUp(self):
         self.route = {

@@ -273,7 +273,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 19 or receipt.get("schema") == 19:
+    if descriptor["schema"] == 20 or receipt.get("schema") == 20:
+        require(descriptor["schema"] == receipt.get("schema") == 20, "continuation-twentieth-receipt-kind")
+    elif descriptor["schema"] == 19 or receipt.get("schema") == 19:
         require(descriptor["schema"] == receipt.get("schema") == 19, "continuation-nineteenth-receipt-kind")
     elif descriptor["schema"] == 18 or receipt.get("schema") == 18:
         require(descriptor["schema"] == receipt.get("schema") == 18, "continuation-eighteenth-receipt-kind")
@@ -782,6 +784,7 @@ def _continuation_origin_absent(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    twentieth_catalogues = None
     nineteenth_catalogues = None
     eighteenth_catalogues = None
     seventeenth_catalogues = None
@@ -789,6 +792,11 @@ def _continuation_origin_absent(bootstrap, qualified):
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 20:
+        _revalidate_twentieth_prelease(receipt, bootstrap.value["ledger_path"])
+        twentieth_catalogues = receipt["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 19
     if schema == 19:
         _revalidate_oci_retirement(receipt["retirement"], receipt["previous_qualification"],
                                   bootstrap.value["ledger_path"], descriptor["successor"],
@@ -852,7 +860,8 @@ def _continuation_origin_absent(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = (nineteenth_catalogues or eighteenth_catalogues or seventeenth_catalogues or fifteenth_catalogues or fourteenth_catalogues
+        retired = (twentieth_catalogues or nineteenth_catalogues or eighteenth_catalogues or seventeenth_catalogues
+                   or fifteenth_catalogues or fourteenth_catalogues
                    or thirteenth_catalogues or twelfth_catalogues
                    or (retirement or receipt["retirement"])["catalogues"])
     elif schema == 8:
@@ -1908,10 +1917,53 @@ def _revalidate_sixteenth_prelease(retirement, successor_bank):
     require(load_bootstrap(original.path, original.sha256) == original, "continuation-sixteenth-original-drift")
 
 
+def _revalidate_twentieth_prelease(receipt, successor_bank):
+    """Verify the failed job's only completed effect and its empty lease bank."""
+    ref, bank = receipt["previous_bootstrap"], receipt["previous_bank"]
+    original = load_bootstrap(ref["path"], ref["sha256"])
+    qualified = _continuation_receipt(original.value)
+    require(original.file_stamp[:2] == (ref["device"], ref["inode"])
+            and qualified is not None and qualified[0]["schema"] == 19
+            and qualified[1] == receipt["previous_qualification"]
+            and qualified[0]["successor"]["run_id"] == operating_cells.TWENTIETH_RUN
+            and qualified[0]["successor"]["source_sha"] == operating_cells.TWENTIETH_MAIN
+            and original.value["ledger_path"] == bank["path"], "continuation-twentieth-original-bootstrap")
+    _check_empty_previous_bank(bank, successor_bank)
+    with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
+        with ledger.Ledger(bank["path"]) as store, store._transaction(read_only=True) as state:
+            proof, _, _ = installation._file(str(Path(bank["path"]) / "state.json"), MAX_POLICY, private=True)
+            require(proof.sha256 == bank["state_file_sha256"] and not state["leases"] and not state["tokens"],
+                    "continuation-twentieth-original-prelease-state")
+    archive = receipt["sealed_intake"]
+    directory = Path(run_intake.ROOT) / archive["name"]
+    fd = installation._open_directory(str(directory))
+    try:
+        require(run_intake._directory_identity(fd)[:2] == (archive["device"], archive["inode"]),
+                "continuation-twentieth-intake-identity")
+        intent, intent_sha, _ = run_intake._read_at(fd, "intent.json")
+        who = intent["original_job"]
+        binding = intent["binding"]
+        require(intent_sha == archive["intent_sha256"]
+                and (who["run_id"], who["job_id"], who["check_run_id"]) == (
+                    operating_cells.TWENTIETH_RUN, operating_cells.TWENTIETH_CHECKS[0],
+                    operating_cells.TWENTIETH_CHECKS[0])
+                and binding["source"]["commit_sha"] == operating_cells.TWENTIETH_MAIN
+                and binding["controller"]["commit_sha"] == operating_cells.NINETEENTH_SUCCESSOR_REUSABLE,
+                "continuation-twentieth-intake-binding")
+        run_intake._sealed_state_unchanged(fd, archive["seal_sha256"])
+    finally:
+        os.close(fd)
+    require(load_bootstrap(original.path, original.sha256) == original, "continuation-twentieth-original-drift")
+
+
 @identity._diagnostic_step("native-histories")
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
     generation = descriptor["schema"]
+    twentieth = receipt if generation == 20 else None
+    if twentieth is not None:
+        receipt = twentieth["previous_qualification"]
+        generation = 19
     nineteenth = receipt if generation == 19 else None
     if nineteenth is not None:
         receipt = nineteenth["previous_qualification"]
@@ -2013,6 +2065,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if nineteenth is not None:
         families.append((_continuation_nineteenth_native, {}, nineteenth["native_nineteenth"],
                          "continuation-nineteenth-native-drift"))
+    if twentieth is not None:
+        families.append((_continuation_twentieth_native, {}, twentieth["native_twentieth"],
+                         "continuation-twentieth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -2024,7 +2079,7 @@ def _continuation_native_histories(get, descriptor, receipt):
 
 
 @identity._diagnostic_step("native-current")
-def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
+def _native(connected, selected, nonce, token, api_token, *, check_origin=True, check_host_resources=True):
     admission._secret(token); admission._secret(api_token)
     controls = _controls(selected.bootstrap)
     admission._socket(connected)
@@ -2063,14 +2118,14 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True):
             require((who.caller_sha, who.run_id, who.reusable_sha) ==
                     (successor["source_sha"], successor["run_id"], successor["reusable_sha"]),
                     "continuation-exact-current-native-tuple")
-            # Historical terminal qualification is minted once into this existing
-            # opaque native proof. Current authorization and original absence are
-            # still freshly checked on every revalidation; no shared cache exists.
+            # Historical terminal qualification is minted once into this
+            # request's opaque proof. There is no shared cache.
             if check_origin:
                 _continuation_native_histories(get, descriptor, receipt)
             # Origin validation may read a network namespace cookie. Its observer
             # needs the process to be single-threaded after the history reads.
-            _continuation_origin_absent(selected.bootstrap, qualified)
+            if check_host_resources:
+                _continuation_origin_absent(selected.bootstrap, qualified)
             needs_commit = descriptor["schema"] >= 3 or identity.decode_json(selected.template_bytes)["kind"] == "operating"
             if needs_commit:
                 commit = get("/git/commits/" + who.caller_sha)
@@ -2117,8 +2172,20 @@ def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_to
         raise Denied("bootstrap-native-denied") from None
 
 
-@identity._diagnostic_step("bootstrap-final-native")
 def require_bootstrap_native(proof, connected, selected, token, api_token):
+    """Require current native authority and verify the earlier host resources."""
+    return _require_bootstrap_native(proof, connected, selected, token, api_token, check_host_resources=True)
+
+
+def require_bootstrap_intake_reader(proof, connected, selected, token, api_token):
+    """Revalidate the current job while reading or validating private intake bytes."""
+    require(type(proof) is BootstrapNativeProof and proof.policy.purpose == "execution",
+            "bootstrap-native-proof")
+    return _require_bootstrap_native(proof, connected, selected, token, api_token, check_host_resources=False)
+
+
+@identity._diagnostic_step("bootstrap-final-native")
+def _require_bootstrap_native(proof, connected, selected, token, api_token, *, check_host_resources):
     _root()
     try:
         require(type(proof) is BootstrapNativeProof, "bootstrap-native-proof")
@@ -2130,7 +2197,8 @@ def require_bootstrap_native(proof, connected, selected, token, api_token):
         require(ledger.digest(_challenge(selected, proof.nonce, proof.worker, proof.snapshot_receipt_sha256))
                 == proof.challenge_sha256,
                 "bootstrap-challenge-drift")
-        worker, who, controls, started = _native(connected, selected, proof.nonce, token, api_token, check_origin=False)
+        worker, who, controls, started = _native(connected, selected, proof.nonce, token, api_token,
+            check_origin=False, check_host_resources=check_host_resources)
         require((worker, who, controls, started) == (proof.worker, proof.identity, proof.controls_sha256, proof.job_started_at),
                 "bootstrap-native-drift")
         remaining = min(600, int(proof.expires_monotonic - time.monotonic()), who.valid_until - int(time.time()) - 31)
@@ -2282,7 +2350,7 @@ def create_run_configuration(proof, connected, bootstrap, selector, token, api_t
     try:
         require(type(proof) is BootstrapNativeProof and proof.policy.purpose == "execution", "run-config-proof")
         selected = derive_selection(bootstrap, selector, proof.identity.caller_sha)
-        worker, who, _ = require_bootstrap_native(proof, connected, selected, token, api_token)
+        worker, who, _ = require_bootstrap_intake_reader(proof, connected, selected, token, api_token)
         if proof.snapshot_receipt_sha256 is None:
             observed = run_intake.stage_run_snapshot(proof, connected, selected, token, api_token)
         else:
@@ -2350,6 +2418,8 @@ def _current_configuration_catalogue(bootstrap, root):
         descriptor, receipt, _, _ = qualified
         if descriptor["schema"] in {7, 8}:
             retired = receipt["failed_prefix"]["catalogues"]["native_run_configuration_catalogue"]
+        elif descriptor["schema"] == 20:
+            retired = receipt["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19}:
@@ -3318,3 +3388,8 @@ def collect_ninth_retired_partial_history(successor_ledger_path, original_bootst
 def _continuation_nineteenth_native(get):
     return _terminal_family(get, operating_cells.NINETEENTH_RUN, operating_cells.NINETEENTH_CHECKS,
                             operating_cells.nineteenth_native_projection)
+
+
+def _continuation_twentieth_native(get):
+    return _terminal_family(get, operating_cells.TWENTIETH_RUN, operating_cells.TWENTIETH_CHECKS,
+                            operating_cells.twentieth_native_projection)
