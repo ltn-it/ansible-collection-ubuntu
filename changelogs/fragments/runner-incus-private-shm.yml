@@ -1,0 +1,5 @@
+bugfixes:
+  - >-
+    Give protected Incus business tests a bounded private shared-memory mount
+    so Ansible can start multiprocessing with a read-only container root.
+    Preserve the original byte representation of retained execution manifests.
