@@ -118,6 +118,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 20:
+        return _validate_twentieth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 19:
         return _validate_nineteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 18:
@@ -186,7 +188,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
                     15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
-                    19: NINETEENTH_MAIN}
+                    19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -244,6 +246,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 20:
+        return _validate_twentieth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 19:
         return _validate_nineteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 18:
@@ -2397,4 +2401,68 @@ def _validate_nineteenth_qualification(value):
     catalogue_identities = _validate_eighteenth_qualification(previous)
     _validate_oci_retirement(value["retirement"], previous["retirement"]["catalogues"],
                              NINETEENTH_LEASE, NINETEENTH_RETAIN_UNTIL, verified_start=True)
+    return catalogue_identities
+
+
+TWENTIETH_MAIN = "c688be79d061d797ddbb9b2ced680b4465788eea"
+TWENTIETH_RUN = 45462116592
+TWENTIETH_CHECKS = (138693753733, 138698308759)
+TWENTIETH_GRAPH = "c5f74bc8f39e8f7b619b71dd4204b11abc0df5c787fc17c78e464b503f7d1574"
+TWENTIETH_QUALIFICATION = "68c260b7e9588a76e1be02251f09394391d8487c2bbbfbd7da90d4acc743a522"
+TWENTIETH_REASON = "terminal-original-push-after-sealed-intake-without-lease"
+
+
+def twentieth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, NINETEENTH_SUCCESSOR_REUSABLE,
+                                       TWENTIETH_GRAPH, TWENTIETH_CHECKS, TWENTIETH_MAIN)
+
+
+def _validate_twentieth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == TWENTIETH_REASON and engine_policy._hash(ref["sha256"]) == TWENTIETH_QUALIFICATION,
+            "continuation-twentieth-qualification")
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=TWENTIETH_MAIN, expected_workflow=NINETEENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=NINETEENTH_SUCCESSOR_REUSABLE, reason="continuation-twentieth-successor")
+    require(successor["source_sha"] not in {
+                ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN, FIFTEENTH_MAIN,
+                SIXTEENTH_MAIN, SEVENTEENTH_MAIN, EIGHTEENTH_MAIN, NINETEENTH_MAIN, TWENTIETH_MAIN}
+            and successor["run_id"] not in {
+                ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN, FIFTEENTH_RUN,
+                SIXTEENTH_RUN, SEVENTEENTH_RUN, EIGHTEENTH_RUN, NINETEENTH_RUN, TWENTIETH_RUN},
+            "continuation-twentieth-replay")
+    return value
+
+
+def _validate_twentieth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_twentieth", "previous_qualification",
+                                "previous_bootstrap", "previous_bank", "sealed_intake", "catalogues"})
+    require(value["purpose"] == TWENTIETH_REASON and ledger.digest(value) == TWENTIETH_QUALIFICATION
+            and ledger.digest(value["native_twentieth"]) == TWENTIETH_GRAPH,
+            "continuation-twentieth-history")
+    previous = value["previous_qualification"]
+    catalogue_identities = _validate_nineteenth_qualification(previous)
+    for field, digest in (("previous_bootstrap", "sha256"), ("previous_bank", "state_file_sha256")):
+        pin = engine_policy._keys(value[field], {"path", "device", "inode", digest})
+        engine_policy._path(pin["path"])
+        engine_policy._hash(pin[digest])
+        for coordinate in ("device", "inode"):
+            engine_policy._integer(pin[coordinate], 1, 2**63 - 1)
+    intake = engine_policy._keys(value["sealed_intake"],
+        {"name", "device", "inode", "seal_sha256", "intent_sha256", "catalogue_sha256"})
+    engine_policy._hash(intake["name"])
+    for coordinate in ("device", "inode"):
+        engine_policy._integer(intake[coordinate], 1, 2**63 - 1)
+    for key in ("seal_sha256", "intent_sha256", "catalogue_sha256"):
+        engine_policy._hash(intake[key])
+    old = previous["retirement"]["catalogues"]
+    catalogues = engine_policy._keys(value["catalogues"], set(old))
+    require(intake["name"] not in old["native_intake_catalogue"]
+            and catalogues["native_intake_catalogue"] ==
+                old["native_intake_catalogue"] | {intake["name"]: intake["catalogue_sha256"]}
+            and catalogues["native_run_configuration_catalogue"] == old["native_run_configuration_catalogue"],
+            "continuation-twentieth-catalogue-extension")
     return catalogue_identities

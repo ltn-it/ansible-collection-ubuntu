@@ -201,4 +201,20 @@ class RootFourHistoryTests(unittest.TestCase):
         self.helper.native.job['status']='in_progress';(self.old.intakes/('c'*64)).mkdir(mode=0o700)
         with self.assertRaises(Denied):factory.require_bootstrap_native(proof,self.helper.server,proof.policy,token,'synthetic-job-token')
 
+    def test_intake_reader_keeps_current_job_checks_and_full_gate_keeps_host_checks(self):
+        proof, token = self.old.mint()
+        args = (proof, self.helper.server, proof.policy, token, 'synthetic-job-token')
+        with mock.patch.object(factory, '_continuation_origin_absent',
+                               wraps=factory._continuation_origin_absent) as host_check:
+            self.assertEqual(factory.require_bootstrap_intake_reader(*args)[1], proof.identity)
+            host_check.assert_not_called()
+            self.helper.native.job['status'] = 'completed'
+            with self.assertRaises(Denied):
+                factory.require_bootstrap_intake_reader(*args)
+            self.helper.native.job['status'] = 'in_progress'
+            (self.old.intakes / ('c' * 64)).mkdir(mode=0o700)
+            with self.assertRaises(Denied):
+                factory.require_bootstrap_native(*args)
+            host_check.assert_called_once()
+
 if __name__=='__main__':unittest.main()
