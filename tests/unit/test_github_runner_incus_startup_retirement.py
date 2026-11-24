@@ -135,7 +135,7 @@ class StartupRetirementTests(unittest.TestCase):
         process = {"pid": 10, "start_ticks": 11, "boot_id": "22ee1b5a-fee8-4294-bf0b-4a151df0876d"}
         actual = process | {"observed_at": 401, "signal": None, "exit_code": 1, "manifest_sha256": manifest,
                             "container_id": "e" * 64}
-        capture = {"manifest_sha256": manifest, "total_limit": 10}
+        capture = {"manifest_sha256": manifest, "total_limit": 10, "cgroup_device": 5, "cgroup_inode": 6}
         for stream in ("stdout", "stderr"):
             actual.update({stream + "_state": "complete", stream + "_sha256": hashlib.sha256(b"").hexdigest(),
                            stream + "_bytes": 0})
@@ -146,7 +146,10 @@ class StartupRetirementTests(unittest.TestCase):
         self.record["worker"] = {"uid": 1, "runner_id": 78, "pid": 2, "start_ticks": 3,
                                  "boot_id": "11111111-1111-1111-1111-111111111111"}
         self.record["authorizations"] = [{"token_id_sha256": "6" * 64}]
+        slice_binding = {"boot_id": self.record["worker"]["boot_id"], "cgroup_device": 5, "cgroup_inode": 6}
         self.record["effects"].update(start=start, image=image_effect,
+            slice={"operation": "slice-create", "state": "verified", "target": "slice:" + lease,
+                   "engine_slice": slice_binding, "evidence_sha256": ledger.digest(slice_binding)},
             revoke={"operation": "certificate-revoke", "state": "verified", "target": cert},
             engine_stop={"operation": "engine-stop", "state": "verified"},
             fence_stop={"operation": "fence-disable", "state": "verified"})
@@ -188,6 +191,10 @@ class StartupRetirementTests(unittest.TestCase):
             self.assertFalse(any(call[0] not in {"read", "_now", "read_policy"} for call in store.mock_calls))
             with self.assertRaisesRegex(identity.Denied, "custody-retention-not-elapsed"):
                 operating_custody.cleanup_allowed_record(self.record, self.policy, self.now)
+            self.record["effects"]["slice"]["target"] = "slice:" + "0" * 32
+            with self.assertRaisesRegex(identity.Denied, "failure-observation-slice"):
+                finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
+            self.record["effects"]["slice"]["target"] = "slice:" + lease
 
             for row in ({"project": project}, {"name": "ambiguous"}):
                 admin.pool_volumes.side_effect = [[], [row]]

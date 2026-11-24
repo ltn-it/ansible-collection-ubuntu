@@ -405,8 +405,16 @@ class RootFinalizer:
         observed_at = store._now()
         terminal = record.get("native_terminal")
         expected_start, _, _ = startup_retirement._post_engine_archive_inputs(lease_id, record)
+        slice_creator = engine_executor._slice_creator(record)
+        require(slice_creator is not None and slice_creator["state"] == "verified"
+                and slice_creator["target"] == "slice:" + lease_id, "failure-observation-slice")
+        slice_binding = slice_creator.get("engine_slice")
+        ledger._validate_slice(slice_binding, record["worker"]["boot_id"])
+        require(slice_creator["evidence_sha256"] == ledger.digest(slice_binding)
+                and all(slice_binding[key] == expected_start["engine_capture"][key]
+                        for key in ("cgroup_device", "cgroup_inode")), "failure-observation-slice")
         scope = set(owner.creators)
-        required = scope | {"certificate-revoke", "engine-stop", "fence-disable"}
+        required = scope | {"certificate-revoke", "engine-stop", "fence-disable", "slice-create"}
         operations = {row["operation"] for row in record["effects"].values()}
         renewal_prefixes = {"context-refresh": "context:" + record["cell_sha256"] + ":",
                             "fence-renew": "fence:" + lease_id + ":"}
