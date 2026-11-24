@@ -481,7 +481,7 @@ def configurations(path, digest, group, public_pin=None, retired_reference=None,
     if bootstrap:
         require(set(runtime) == {"schema", "source_identity", "source_workflow_sha256", "collector", "ledger_path",
                 "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"}
-                | ({"operating_continuation"} if "operating_continuation" in runtime else set()))
+                | ({"operating_continuation", "business_startup_policy_sha256"} & runtime.keys()))
         prep, collector, store = runtime["preparation"], runtime["collector"], runtime["ledger_path"]
         require(type(public_pin) is str and SHA.fullmatch(public_pin)
                 and public_pin == prep["signing_public_key_hex"])
@@ -528,6 +528,17 @@ def configurations(path, digest, group, public_pin=None, retired_reference=None,
             and type(state["leases"]) is dict)
     original = {key:value for key,value in state.items() if key != "checksum"}
     require(state["checksum"] == hashlib.sha256(json.dumps(original,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest())
+    if bootstrap and "business_startup_policy_sha256" in runtime:
+        base, business = (runtime[key] for key in ("custody_policy_sha256", "business_startup_policy_sha256"))
+        require(all(type(digest) is str and SHA.fullmatch(digest) for digest in (base, business))
+                and base != business and type(state.get("policies")) is dict)
+        original_policy, business_policy = (state["policies"].get(digest) for digest in (base, business))
+        require(type(original_policy) is dict and set(original_policy) == {
+                    "custodian_ref", "storage_ref", "approval_ref", "retention_seconds", "max_lease_seconds"}
+                and type(original_policy["retention_seconds"]) is int and original_policy["retention_seconds"] == 14400
+                and business_policy == original_policy | {"startup_retirement": "protected-pre-vm-journal-v1"}
+                and hashlib.sha256(canonical(original_policy)).hexdigest() == base
+                and hashlib.sha256(canonical(business_policy)).hexdigest() == business)
     require(all(value is None or type(value) is dict for value in (retired_reference, pending_reference))
             and not (retired_reference and pending_reference))
     if retired_reference:

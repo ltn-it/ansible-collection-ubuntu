@@ -64,8 +64,8 @@ class PartialPreparationTests(unittest.TestCase):
         self.io.server.resources['/1.0/operations?project='+project+'&recursion=1']={}
         return owner
 
-    def terminal(self):
-        who=self.store.read(self.lease)['identity'];policy=self.registry.select('approved').identity
+    def terminal(self, selector="approved"):
+        who=self.store.read(self.lease)['identity'];policy=self.registry.select(selector).identity
         prefix=identity.API+'/repos/'+policy.repository
         actor={'id':next(iter(policy.actor_ids)),'type':'User','login':'fixture'}
         run={'id':who['run_id'],'run_attempt':1,'event':'push','head_branch':'main','head_sha':who['caller_sha'],
@@ -80,7 +80,7 @@ class PartialPreparationTests(unittest.TestCase):
         routes={prefix+'/actions/runs/'+str(who['run_id']):run,prefix+'/actions/jobs/'+str(who['job_id']):job,
                 prefix+'/check-runs/'+str(who['check_run_id']):check}
         with mock.patch.object(identity,'HTTPSReader',return_value=SimpleNamespace(read=lambda url:ledger.canonical(routes[url]))):
-            proof=operating_custody.observe_native_terminal(self.registry,'approved',self.store,self.lease)
+            proof=operating_custody.observe_native_terminal(self.registry,selector,self.store,self.lease)
         return self.store.bind_native_terminal(self.lease,proof)
 
     def test_six_verified_constructor_failure_withdraw_retain_four_hours_exact_cleanup_and_close(self):
