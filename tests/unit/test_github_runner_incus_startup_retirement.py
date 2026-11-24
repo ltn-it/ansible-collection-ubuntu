@@ -117,25 +117,50 @@ class StartupRetirementTests(unittest.TestCase):
 
         lease, project, cert = "a" * 32, "proof-project", "certificate:" + "b" * 64
         selector = policy_registry.profile_selector("heavy", "keycloak-heavy", "ubuntu-24.04")
+        self.policy["post_engine_failure_retirement"] = {"schema": 1, "selector": selector}
+        self.record["policy_sha256"] = ledger.digest(self.policy)
+        manifest = "8" * 64
+        image_effect = {"operation": "image-copy", "target": "image:" + project + ":" + operating_cells.IMAGE,
+                        "state": "verified"}
+        image = {"fingerprint": operating_cells.IMAGE, "type": "virtual-machine",
+                 "architecture": "x86_64", "public": False}
         owner = SimpleNamespace(incus={"project": project, "network": "proof-bridge", "pool": "proof-pool",
                                       "instance": "keycloak-heavy"}, creator_targets={"certificate-create": cert},
+            creators={"engine-start": {}, "image-copy": {"target": image_effect["target"],
+                                                         "sha256": ledger.digest(image_effect)}},
+            engine_policy_sha256=manifest,
             engine_descriptor_bytes=ledger.canonical({"environment": {"QUALITY_INPUT_PROFILE": "heavy",
-                "QUALITY_INPUT_SCENARIO": "keycloak-heavy", "QUALITY_INPUT_TARGET": "ubuntu-24.04"}}))
-        actual = {"observed_at": 401, "signal": None, "exit_code": 1,
-                  "stdout_state": "complete", "stderr_state": "complete"}
-        start = {"operation": "engine-start", "state": "verified", "engine_exit": actual}
+                "QUALITY_INPUT_SCENARIO": "keycloak-heavy", "QUALITY_INPUT_TARGET": "ubuntu-24.04",
+                "QUALITY_INPUT_INSTANCE_TYPE": "vm", "QUALITY_INPUT_IMAGE": operating_cells.IMAGE}}))
+        process = {"pid": 10, "start_ticks": 11, "boot_id": "22ee1b5a-fee8-4294-bf0b-4a151df0876d"}
+        actual = process | {"observed_at": 401, "signal": None, "exit_code": 1, "manifest_sha256": manifest,
+                            "container_id": "e" * 64}
+        capture = {"manifest_sha256": manifest, "total_limit": 10}
+        for stream in ("stdout", "stderr"):
+            actual.update({stream + "_state": "complete", stream + "_sha256": hashlib.sha256(b"").hexdigest(),
+                           stream + "_bytes": 0})
+            capture[stream + "_limit"] = 5
+        start = {"operation": "engine-start", "target": "engine:lit-lease-" + lease, "at": 400, "state": "verified",
+                 "engine_exit": actual, "engine_process": process, "engine_capture": capture,
+                 "engine_container_id": actual["container_id"]}
         self.record["worker"] = {"uid": 1, "runner_id": 78, "pid": 2, "start_ticks": 3,
                                  "boot_id": "11111111-1111-1111-1111-111111111111"}
-        self.record["effects"].update(start=start,
-            revoke={"operation": "certificate-revoke", "state": "verified", "target": cert})
+        self.record["authorizations"] = [{"token_id_sha256": "6" * 64}]
+        self.record["effects"].update(start=start, image=image_effect,
+            revoke={"operation": "certificate-revoke", "state": "verified", "target": cert},
+            engine_stop={"operation": "engine-stop", "state": "verified"},
+            fence_stop={"operation": "fence-disable", "state": "verified"})
+        owner.creators["project-create"] = {}
         store = mock.Mock()
         store.read.return_value = self.record
         store._now.return_value = self.now
+        store.read_policy.return_value = self.policy
         admin = mock.Mock()
         cleanup = mock.Mock()
         cleanup.certificates_absent.return_value = True
-        cleanup.readback.return_value = {"state": "required_fields_match"}
-        cleanup._verify_delete_scope.side_effect = lambda kind: {"kind": kind, "used_by": []}
+        cleanup.readback.return_value = {"state": "required_fields_match", "metadata_sha256": "f" * 64}
+        cleanup._default_cached_image_identity.return_value = ledger.digest(image)
+        cleanup._verify_delete_scope.side_effect = lambda kind, **_: {"kind": kind, "used_by": []}
         cleanup.quiet_project.return_value = {"state": "quiet_observed"}
         finalizer = object.__new__(finalization.RootFinalizer)
         config = SimpleNamespace(incus_socket_path="/run/proof/incus.sock")
@@ -143,6 +168,7 @@ class StartupRetirementTests(unittest.TestCase):
             for subject, name, value in (
                 (cell_contract, "owned_cell_for_cleanup", owner), (finalizer, "_fresh", config),
                 (cleanup_storage, "_drain_engine", (None, start)), (engine_graph_prune, "_diagnostics", "d" * 64),
+                (cleanup_storage, "observe_post_engine_consumers", "e" * 64),
                 (network_fence, "verify_disabled", None), (incus_admin, "RootIncusAdmin", admin),
                 (incus_mutation, "RootIncusCleanup", cleanup),
             ):
@@ -151,10 +177,15 @@ class StartupRetirementTests(unittest.TestCase):
             original = deepcopy(self.record)
             proof = finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
             self.assertEqual(proof["original_sha256"], ledger.digest(original))
-            self.assertEqual(proof["engine_exit_sha256"], ledger.digest(actual))
+            self.assertEqual(proof["image_effect_sha256"], ledger.digest(image_effect))
+            self.assertEqual(proof["default_image_sha256"], ledger.digest(image))
+            self.assertEqual(proof["scope_sha256"], ledger.digest(owner.incus))
+            self.assertEqual(proof["terminal_sha256"], ledger.digest(self.record["native_terminal"]))
+            cleanup._verify_delete_scope.assert_any_call("project", staged_image=True)
+            self.assertEqual(cleanup._default_cached_image_identity.call_count, 2)
             self.assertEqual(cleanup.quiet_project.call_count, 2)
             self.assertEqual(self.record, original)
-            self.assertFalse(any(call[0] not in {"read", "_now"} for call in store.mock_calls))
+            self.assertFalse(any(call[0] not in {"read", "_now", "read_policy"} for call in store.mock_calls))
             with self.assertRaisesRegex(identity.Denied, "custody-retention-not-elapsed"):
                 operating_custody.cleanup_allowed_record(self.record, self.policy, self.now)
 
@@ -168,6 +199,15 @@ class StartupRetirementTests(unittest.TestCase):
                 finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
             admin.pool_volumes.side_effect = [[], []]
             cleanup.quiet_project.side_effect = None
+            with mock.patch.object(cleanup, "_default_cached_image_identity",
+                                   side_effect=identity.Denied("mutation-default-cached-image")), \
+                    self.assertRaisesRegex(identity.Denied, "mutation-default-cached-image"):
+                finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
+            with mock.patch.object(cleanup_storage, "observe_post_engine_consumers",
+                                   side_effect=identity.Denied("cleanup-consumers-open-reference")), \
+                    self.assertRaisesRegex(identity.Denied, "cleanup-consumers-open-reference"):
+                finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
+            admin.pool_volumes.side_effect = [[], []]
             cleanup._verify_delete_scope.side_effect = [
                 {"used_by": []}, {"used_by": []}, {"used_by": ["/1.0/profiles/default"]}, {"used_by": []},
             ]
@@ -177,8 +217,13 @@ class StartupRetirementTests(unittest.TestCase):
             with self.assertRaisesRegex(identity.Denied, "failure-observation-unresolved"):
                 finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
             del self.record["owned_instance"]
+            self.record["effects"]["renewal"] = {"operation": "fence-renew", "state": "verified",
+                                                   "target": "fence:" + "0" * 32 + ":" + "6" * 64}
+            with self.assertRaisesRegex(identity.Denied, "failure-observation-foreign-renewal"):
+                finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
+            del self.record["effects"]["renewal"]
             actual["stderr_state"] = "incomplete"
-            with self.assertRaisesRegex(identity.Denied, "failure-observation-original-exit"):
+            with self.assertRaisesRegex(identity.Denied, "post-engine-archive-complete-exit"):
                 finalizer._observe_failed_engine_without_vm(None, None, selector, store, lease)
 
     @unittest.skipUnless(os.geteuid() == 0 and Path("/run/proof").is_dir(), "isolated Root archive fixture")
@@ -200,6 +245,44 @@ class StartupRetirementTests(unittest.TestCase):
             evidence_path.write_bytes(b"replacement")
             with self.assertRaises(identity.Denied):
                 startup_retirement.archived_original(str(archive), binding, self.record)
+
+    def test_project_attachments_allow_only_the_verified_private_image_and_default_profile(self):
+        from incus_lease_issuer import incus_mutation
+
+        mutation = object.__new__(incus_mutation.RootIncusMutator)
+        mutation._project = SimpleNamespace(project="proof-project")
+        profile = "/1.0/profiles/default?project=proof-project"
+        image = "/1.0/images/" + operating_cells.IMAGE + "?project=proof-project"
+        project = {"config": {}, "used_by": [image, profile]}
+        with (mock.patch.object(incus_mutation, "_project", return_value={"config": {}}),
+              mock.patch.object(mutation, "_observe", return_value=project),
+              mock.patch.object(mutation, "_matches", return_value=True)):
+            self.assertIs(mutation._verify_delete_scope("project", staged_image=True), project)
+            with self.assertRaisesRegex(identity.Denied, "mutation-delete-in-use"):
+                mutation._verify_delete_scope("project")
+            for attached in ("/1.0/storage-pools/pool/buckets/extra", "/1.0/images/other", image,
+                             "/1.0/storage-pools/pool/volumes/custom/extra"):
+                project["used_by"] = [image, profile, attached]
+                with self.subTest(attached=attached), self.assertRaisesRegex(identity.Denied, "mutation-delete-in-use"):
+                    mutation._verify_delete_scope("project", staged_image=True)
+            project["used_by"] = [profile]
+            with self.assertRaisesRegex(identity.Denied, "mutation-delete-in-use"):
+                mutation._verify_delete_scope("project", staged_image=True)
+            self.assertIs(mutation._verify_delete_scope("project"), project)
+
+    def test_default_image_identity_is_private_stable_and_read_twice(self):
+        from incus_lease_issuer import incus_mutation
+
+        mutation = object.__new__(incus_mutation.RootIncusMutator)
+        pinned = {"fingerprint": operating_cells.IMAGE, "type": "virtual-machine",
+                  "architecture": "x86_64", "public": False}
+        first, second = pinned | {"last_used_at": 12}, pinned | {"last_used_at": 13}
+        with mock.patch.object(mutation, "_image_observe", side_effect=[first, second]) as read:
+            self.assertEqual(mutation._default_cached_image_identity(), ledger.digest(pinned))
+            self.assertEqual(read.call_args_list, [mock.call("default")] * 2)
+        with mock.patch.object(mutation, "_image_observe", side_effect=[pinned, pinned | {"public": True}]), \
+                self.assertRaisesRegex(identity.Denied, "mutation-default-cached-image"):
+            mutation._default_cached_image_identity()
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0 and Path("/run/proof").is_dir(),
@@ -239,7 +322,7 @@ class PostEngineArchiveTests(unittest.TestCase):
             "4" * 64, manifest_sha, b"{}", b"{}", "5" * 64, b"{}", "6" * 64)
         self.folder = startup_retirement._post_engine_archive_path(self.store, self.lease)
         self.enterContext(mock.patch.object(self.store, "read", side_effect=lambda _: deepcopy(self.record)))
-        self.enterContext(mock.patch.object(cell_contract, "owned_cell_for_cleanup", return_value=self.owner))
+        self.enterContext(mock.patch.object(cell_contract, "owned_cell_for_cleanup", side_effect=lambda *_: self.owner))
         self.enterContext(mock.patch.object(root_session, "_require_session",
             return_value=SimpleNamespace(registry_path=registry.path, registry_sha256=registry.sha256)))
 
@@ -248,6 +331,141 @@ class PostEngineArchiveTests(unittest.TestCase):
 
     def readback(self, binding):
         return startup_retirement._read_post_engine_archive(self.store, self.lease, binding)
+
+    def permit_observation(self):
+        from dataclasses import replace
+
+        selector = policy_registry.profile_selector("heavy", "keycloak-heavy", "ubuntu-24.04")
+        self.owner = replace(self.owner, selector=selector)
+        policy = StartupRetirementTests()
+        policy.setUp()
+        value = policy.policy | {"post_engine_failure_retirement": {"schema": 1, "selector": selector}}
+        self.record["policy_sha256"] = ledger.digest(value)
+        self.enterContext(mock.patch.object(self.store, "read_policy", return_value=value))
+        return {"lease_id": self.lease, "original_sha256": ledger.digest(self.record),
+                "terminal_sha256": ledger.digest(self.record["native_terminal"]),
+                "scope_sha256": ledger.digest(self.owner.incus), "census_sha256": "9" * 64,
+                "policy_sha256": self.record["policy_sha256"], "image_effect_sha256": None,
+                "default_image_sha256": None, "observed_at": 490}
+
+    def test_permit_reopens_archived_original_after_verified_cleanup_journal_changes(self):
+        observation = self.permit_observation()
+        self.assertIsNone(startup_retirement._locate_post_engine_permit(self.store, self.lease))
+        permit = startup_retirement._publish_post_engine_permit(None, self.owner, self.store, observation)
+        path = startup_retirement._post_engine_permit_path(self.store, self.lease)
+        body = startup_retirement._read_post_engine_permit(self.store, self.lease, permit["permit_sha256"])
+        self.assertEqual(path.read_bytes(), ledger.canonical(body))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(startup_retirement._locate_post_engine_permit(self.store, self.lease), permit)
+        self.record["effects"]["deleted"] = {"operation": "engine-release", "state": "verified"}
+        for name in self.logs:
+            (self.runroot / name).unlink()
+        self.assertEqual(startup_retirement._locate_post_engine_permit(self.store, self.lease), permit)
+        with self.assertRaisesRegex(identity.Denied, "post-engine-permit-observation-drift"):
+            startup_retirement._require_post_engine_observation(
+                permit, observation | {"original_sha256": ledger.digest(self.record)}, 500)
+        with self.assertRaisesRegex(identity.Denied, "post-engine-permit-observation-drift"):
+            startup_retirement._require_post_engine_observation(permit, observation, 1000)
+        startup_retirement._require_post_engine_observation(permit, observation | {"observed_at": 498}, 500)
+
+    def test_corrupt_or_uncommitted_permit_cannot_be_interpreted_as_an_absent_permit(self):
+        observation = self.permit_observation()
+        self.publish()
+        path = startup_retirement._post_engine_permit_path(self.store, self.lease)
+        self.assertIsNone(startup_retirement._locate_post_engine_permit(self.store, self.lease))
+        staged = path.with_name("." + path.name + ".interrupted")
+        staged.write_text("{")
+        with self.assertRaisesRegex(identity.Denied, "post-engine-permit-staging-held"):
+            startup_retirement._locate_post_engine_permit(self.store, self.lease)
+        staged.unlink()
+        permit = startup_retirement._publish_post_engine_permit(None, self.owner, self.store, observation)
+        capture = self.folder / "stdout.log"
+        capture.write_bytes(b"x" * len(capture.read_bytes()))
+        with self.assertRaisesRegex(identity.Denied, "post-engine-archive-member-drift"):
+            startup_retirement._read_post_engine_permit(self.store, self.lease, permit["permit_sha256"])
+        with self.assertRaisesRegex(identity.Denied, "post-engine-archive-member-drift"):
+            startup_retirement._locate_post_engine_permit(self.store, self.lease)
+
+    def test_producer_leaves_only_proved_existing_vm_to_ordinary_custody(self):
+        from contextlib import nullcontext
+        from incus_lease_issuer import finalization, operating_custody, root_session
+
+        self.permit_observation()
+        finalizer = object.__new__(finalization.RootFinalizer)
+        finalizer._runtime = SimpleNamespace(preparation_config_path="/run/proof/runtime.json",
+                                             preparation_config_sha256="a" * 64)
+        admin, cleanup = mock.Mock(), mock.Mock()
+        admin.instances.return_value = ["/1.0/instances/declared?project=proof-project"]
+        cleanup.readback.return_value = {"state": "required_fields_match", "metadata_sha256": "f" * 64}
+        session, config, proof = object(), object(), object()
+        with (mock.patch.object(root_session, "_session", side_effect=lambda *_: nullcontext(session)),
+              mock.patch.object(finalizer, "_fresh", return_value=config),
+              mock.patch.object(finalizer, "_post_engine_transport", return_value=(admin, cleanup)),
+              mock.patch.object(operating_custody, "observe_owned_instance", return_value=proof) as observe,
+              mock.patch.object(operating_custody, "require_instance_proof") as verify,
+              mock.patch.object(finalizer, "_observe_failed_engine_without_vm") as census,
+              mock.patch.object(startup_retirement, "_publish_post_engine_permit") as publish):
+            args = (self.owner.registry, self.owner.selector, self.store, self.lease)
+            self.assertIsNone(finalizer.prepare_post_engine_permit(*args))
+            observe.assert_called_once_with(config, *args)
+            verify.assert_called_once_with(proof, self.lease, self.record)
+            self.assertEqual(cleanup.readback.call_args_list, [mock.call("project")] * 2)
+            observe.side_effect = identity.Denied("mutation-instance-inventory")
+            with self.assertRaisesRegex(identity.Denied, "mutation-instance-inventory"):
+                finalizer.prepare_post_engine_permit(*args)
+            cleanup.readback.return_value = {"state": "conflict"}
+            with self.assertRaisesRegex(identity.Denied, "post-engine-permit-vm-project"):
+                finalizer.prepare_post_engine_permit(*args)
+            census.assert_not_called()
+            publish.assert_not_called()
+
+    def test_consumer_census_pins_the_created_storage_and_the_exact_disabled_namespace(self):
+        from contextlib import nullcontext
+        from dataclasses import replace
+        from incus_lease_issuer import cleanup_storage, generation_publisher, kernel, network_fence
+
+        graph, output, context = (self.root / name for name in ("storage", "output", "context"))
+        for path in (graph, output, context):
+            generation_publisher._mkdir(path)
+        data = {"engine": {"storage_root": str(graph), "runroot": str(self.runroot)},
+                "output_path": str(output), "context_path": str(context)}
+        descriptor = ledger.canonical(data)
+        generation_publisher._write(Path(self.owner.engine_descriptor_path), descriptor)
+        start = self.record["effects"]["c" * 32]
+        boot = start["engine_process"]["boot_id"]
+        info = SimpleNamespace(st_dev=os.makedev(0, 4), st_ino=150)
+        prepare = [{"path": str(path), "device": path.stat().st_dev, "inode": path.stat().st_ino}
+                   for path in (graph, self.runroot, output)]
+        self.record["effects"]["prepare"] = {"evidence_sha256": ledger.digest({
+            "prepared": self.owner.prepared_sha256, "directories": prepare,
+        })}
+        self.record["effects"]["fence"] = {"fence": {"boot_id": boot,
+                                                   "netns_device": info.st_dev, "netns_inode": info.st_ino}}
+        owner = replace(self.owner, engine_descriptor_bytes=descriptor,
+                        engine_descriptor_sha256=hashlib.sha256(descriptor).hexdigest(),
+                        creator_bytes=ledger.canonical({"engine-start": {"id": "c" * 32},
+                                                        "engine-prepare": {"id": "prepare"},
+                                                        "fence-create": {"id": "fence"}}))
+        with (mock.patch.object(cleanup_storage, "_fresh", return_value=self.record),
+              mock.patch.object(cleanup_storage, "_cleanup_limits", return_value=(100, 10)),
+              mock.patch.object(kernel, "read_boot_id", return_value=boot),
+              mock.patch.object(network_fence, "_host_namespace", return_value=(info.st_dev, 1)),
+              mock.patch.object(network_fence, "_namespace_witness",
+                                side_effect=lambda _: nullcontext((33, info))) as witness,
+              mock.patch.object(network_fence, "_namespace_cookie", return_value=45),
+              mock.patch.object(network_fence, "_namespace_refs_drained") as net,
+              mock.patch.object(cleanup_storage, "_no_consumers") as storage):
+            digest = cleanup_storage.observe_post_engine_consumers(owner, self.store, object(), start)
+            self.assertRegex(digest, ledger.HEX)
+            self.assertEqual(witness.call_args_list, [mock.call("lit-lease-" + self.lease)] * 2)
+            self.assertEqual(net.call_args_list, [mock.call(33, info, 45)] * 2)
+            self.assertEqual(storage.call_count, 2)
+            self.assertEqual(storage.call_args.kwargs, {
+                "forbidden_namespace": (info.st_dev, info.st_ino), "retained_namespace_alias": True,
+            })
+            self.record["effects"]["prepare"]["evidence_sha256"] = "0" * 64
+            with self.assertRaisesRegex(identity.Denied, "cleanup-post-engine-creator-inodes"):
+                cleanup_storage.observe_post_engine_consumers(owner, self.store, object(), start)
 
     def test_interrupted_before_publish_leaves_no_archive_and_retry_seals_binary_and_empty_streams(self):
         with mock.patch.object(startup_retirement, "_publish_staged", side_effect=OSError("fixture interruption")):

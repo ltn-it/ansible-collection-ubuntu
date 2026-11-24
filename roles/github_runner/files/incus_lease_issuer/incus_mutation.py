@@ -464,6 +464,17 @@ class RootIncusMutator:
                 and len(envelope["metadata"]) <= 1, "mutation-image-inventory")
         return envelope["metadata"]
 
+    def _default_cached_image_identity(self):
+        from . import operating_cells
+
+        expected = {"fingerprint": operating_cells.IMAGE, "type": "virtual-machine",
+                    "architecture": "x86_64", "public": False}
+        for _ in range(2):
+            image = self._image_observe("default")
+            require(type(image) is dict and all(image.get(key) == value for key, value in expected.items())
+                    and image["public"] is False, "mutation-default-cached-image")
+        return digest(expected)
+
     def image_copy(self):
         """Only the pinned cached default-project VM image, no network alias."""
         from . import operating_cells
@@ -532,9 +543,10 @@ class RootIncusMutator:
             "required_fields_match" if self._matches(kind, metadata) else "conflict"),
             "metadata_sha256": hashlib.sha256(canonical(metadata)).hexdigest()}
 
-    def _verify_delete_scope(self, kind):
+    def _verify_delete_scope(self, kind, *, staged_image=False):
         metadata = self._observe(kind)
         require(metadata is not None and self._matches(kind, metadata), "mutation-delete-not-owned")
+        require(type(staged_image) is bool and (not staged_image or kind == "project"), "mutation-delete-image-scope")
         if kind != "certificate":
             expected = _project(self._project) if kind == "project" else _bridge(self._bridge)
             # Unknown extra configuration is a semantic recovery hold. Future
@@ -543,7 +555,13 @@ class RootIncusMutator:
             require(set(metadata["config"]) == set(expected["config"]), "mutation-delete-config-drift")
             users = metadata.get("used_by")
             allowed = [] if kind == "bridge" else ["/1.0/profiles/default?" + urlencode({"project": self._project.project})]
-            require(type(users) is list and (not users or users == allowed), "mutation-delete-in-use")
+            require(type(users) is list and all(type(user) is str for user in users), "mutation-delete-in-use")
+            if staged_image:
+                # Incus 7.6 includes both images and storage buckets in project.used_by.
+                # Accept exactly the fixed owned image here, before its own deletion.
+                require(sorted(users) == sorted([*allowed, self._image_path()]), "mutation-delete-in-use")
+            else:
+                require(not users or users == allowed, "mutation-delete-in-use")
         return metadata
 
     def _delete(self, kind, operation, target, path):

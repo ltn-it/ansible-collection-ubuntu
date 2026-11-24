@@ -393,55 +393,122 @@ class RootFinalizer:
 
     def _observe_failed_engine_without_vm(self, session, registry, selector, store, lease_id):
         """Read the post-engine failure boundary. This observation grants no cleanup authority."""
-        from . import cleanup_storage, engine_graph_prune, operating_custody, policy_registry
+        from . import cleanup_storage, engine_graph_prune, operating_cells, policy_registry, startup_retirement
 
         owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
         config = self._fresh(session, registry, selector, store, owner)
         record = store.read(lease_id)
+        startup_retirement._post_engine_opt_in(store, record, selector)
         env = identity.decode_json(owner.engine_descriptor_bytes)["environment"]
         require(env["QUALITY_INPUT_PROFILE"] == "heavy" and selector == policy_registry.profile_selector(
             "heavy", env["QUALITY_INPUT_SCENARIO"], env["QUALITY_INPUT_TARGET"]), "failure-observation-heavy-cell")
+        observed_at = store._now()
         terminal = record.get("native_terminal")
-        operating_custody._terminal_record(terminal, record)
-        require(terminal["conclusion"] == "failure" and terminal["observed_at"] <= store._now()
-                and record["state"] in {"prepared", "cancelled"}
+        expected_start, _, _ = startup_retirement._post_engine_archive_inputs(lease_id, record)
+        scope = set(owner.creators)
+        required = scope | {"certificate-revoke", "engine-stop", "fence-disable"}
+        operations = {row["operation"] for row in record["effects"].values()}
+        renewal_prefixes = {"context-refresh": "context:" + record["cell_sha256"] + ":",
+                            "fence-renew": "fence:" + lease_id + ":"}
+        tokens = {row["token_id_sha256"] for row in record["authorizations"]}
+        for row in record["effects"].values():
+            prefix = renewal_prefixes.get(row["operation"])
+            if prefix is not None:
+                require(row["target"].startswith(prefix) and row["target"].removeprefix(prefix) in tokens,
+                        "failure-observation-foreign-renewal")
+        require(terminal["observed_at"] <= observed_at and record["state"] in {"prepared", "cancelled"}
                 and not {"custody", "partial_preparation_custody", "owned_instance", "uploaded_evidence"} & record.keys()
                 and record.get("upload_verification", {}).get("state") != "intent"
-                and all(row["state"] == "verified" and row["operation"] not in {
-                    "instance-stop", "instance-destroy", "image-copy", "engine-release", "context-delete",
-                    "project-delete", "network-delete", "fence-remove", "slice-remove"
-                } for row in record["effects"].values()), "failure-observation-unresolved")
+                and required <= operations <= required | renewal_prefixes.keys()
+                and all(row["state"] == "verified" for row in record["effects"].values()),
+                "failure-observation-unresolved")
         _, start = cleanup_storage._drain_engine(owner, store, config)
-        actual = start["engine_exit"]
-        require(actual["observed_at"] <= terminal["completed_at"] and actual["signal"] is None
-                and type(actual["exit_code"]) is int and actual["exit_code"] > 0
-                and all(actual[name + "_state"] == "complete" for name in ("stdout", "stderr")),
+        require(start == expected_start and start["engine_exit"]["manifest_sha256"] == owner.engine_policy_sha256,
                 "failure-observation-original-exit")
         capture = engine_graph_prune._diagnostics(owner, start)
         worker = ledger.Worker(**record["worker"])
-        network_fence.verify_disabled(owner, store, worker, config)
+        disabled = network_fence.verify_disabled(owner, store, worker, config)
         target = owner.incus
         cert = owner.creator_targets["certificate-create"]
         require(_effect(record, "certificate-revoke", cert) is not None, "failure-observation-cert-withdrawal")
-        admin = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
-            target["project"], target["network"], "default", target["pool"],
-            (cert.removeprefix("certificate:"),), target["instance"]))
-        cleanup = incus_mutation.RootIncusCleanup(admin, owner, store)
-        inventories = []
-        for _ in range(2):
-            require(cleanup.certificates_absent() and cleanup.readback("profile")["state"] == "required_fields_match",
-                    "failure-observation-scope")
-            scope = {kind: ledger.digest(cleanup._verify_delete_scope(kind)) for kind in ("project", "bridge")}
-            inventories.append(scope | {"quiet": cleanup.quiet_project()})
-            require(all(type(row.get("project")) is str and row["project"] != target["project"]
-                        for row in admin.pool_volumes()), "failure-observation-volumes")
+        staged_image = operating_cells.uses_cached_vm_image(env)
+        image_effect = owner.creators.get("image-copy")
+        require((staged_image and image_effect is not None
+                 and image_effect["target"] == "image:" + target["project"] + ":" + operating_cells.IMAGE)
+                or not staged_image and image_effect is None, "failure-observation-image-scope")
+        admin, cleanup = self._post_engine_transport(config, owner, store)
+        before = self._post_engine_project_census(cleanup, admin, target, staged_image)
+        native_census = cleanup_storage.observe_post_engine_consumers(owner, store, config, start)
+        after = self._post_engine_project_census(cleanup, admin, target, staged_image)
         self._fresh(session, registry, selector, store, owner)
-        require(inventories[0] == inventories[1] and store.read(lease_id) == record
-                and engine_graph_prune._diagnostics(owner, start) == capture,
+        require(before == after and store.read(lease_id) == record
+                and engine_graph_prune._diagnostics(owner, start) == capture
+                and network_fence.verify_disabled(owner, store, worker, config) == disabled
+                and observed_at <= store._now() <= observed_at + startup_retirement.MAX_OBSERVATION_AGE,
                 "failure-observation-drift")
-        return {"lease_id": lease_id, "observed_at": store._now(), "original_sha256": ledger.digest(record),
-                "terminal_sha256": ledger.digest(terminal), "engine_exit_sha256": ledger.digest(actual),
-                "capture_sha256": capture, "project": target["project"], "inventory": inventories[0]}
+        return {"lease_id": lease_id, "observed_at": observed_at, "original_sha256": ledger.digest(record),
+                "terminal_sha256": ledger.digest(terminal), "policy_sha256": record["policy_sha256"],
+                "scope_sha256": ledger.digest(target), "image_effect_sha256": image_effect["sha256"] if staged_image else None,
+                "default_image_sha256": before["default_image_sha256"],
+                "census_sha256": ledger.digest({"incus": before, "native": native_census,
+                                                "capture": capture, "fence": disabled})}
+
+    @staticmethod
+    def _post_engine_transport(config, owner, store):
+        target = owner.incus
+        fingerprint = owner.creator_targets["certificate-create"].removeprefix("certificate:")
+        admin = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
+            target["project"], target["network"], "default", target["pool"], (fingerprint,), target["instance"]))
+        return admin, incus_mutation.RootIncusCleanup(admin, owner, store)
+
+    @staticmethod
+    def _post_engine_project_census(cleanup, admin, target, staged_image):
+        profile = cleanup.readback("profile")
+        require(cleanup.certificates_absent() and profile["state"] == "required_fields_match",
+                "failure-observation-scope")
+        scope = {
+            "project": ledger.digest(cleanup._verify_delete_scope("project", staged_image=staged_image)),
+            "bridge": ledger.digest(cleanup._verify_delete_scope("bridge")),
+            "profile": profile["metadata_sha256"],
+        }
+        image = cleanup.readback("image")
+        require(image["state"] == ("required_fields_match" if staged_image else "absent_observed"),
+                "failure-observation-image-scope")
+        scope["default_image_sha256"] = cleanup._default_cached_image_identity() if staged_image else None
+        require(all(type(row.get("project")) is str and row["project"] != target["project"]
+                    for row in admin.pool_volumes()), "failure-observation-volumes")
+        return scope | {"quiet": cleanup.quiet_project(), "image": image}
+
+    def prepare_post_engine_permit(self, registry, selector, store, lease_id):
+        """Issue or recover the private preflight evidence for an opted-in POC failure."""
+        from . import operating_custody, root_session, startup_retirement
+
+        require(os.geteuid() == 0 and type(store) is ledger.Ledger and store.owner_uid == 0,
+                "post-engine-permit-root")
+        with root_session._session(self._runtime.preparation_config_path,
+                                   self._runtime.preparation_config_sha256) as session:
+            existing = startup_retirement._locate_post_engine_permit(store, lease_id)
+            owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
+            config = self._fresh(session, registry, selector, store, owner)
+            record = store.read(lease_id)
+            startup_retirement._post_engine_opt_in(store, record, selector)
+            if existing is not None:
+                require(existing["policy_sha256"] == record["policy_sha256"]
+                        and existing["scope_sha256"] == ledger.digest(owner.incus), "post-engine-permit-resume-scope")
+                return startup_retirement._confirm_durable_post_engine_permit(store, lease_id, existing)
+            if {"owned_instance", "custody"} & record.keys():
+                return None
+            admin, cleanup = self._post_engine_transport(config, owner, store)
+            if admin.instances():
+                project = cleanup.readback("project")
+                require(project["state"] == "required_fields_match", "post-engine-permit-vm-project")
+                proof = operating_custody.observe_owned_instance(config, registry, selector, store, lease_id)
+                operating_custody.require_instance_proof(proof, lease_id, record)
+                require(cleanup.readback("project") == project and store.read(lease_id) == record,
+                        "post-engine-permit-vm-drift")
+                return None
+            observation = self._observe_failed_engine_without_vm(session, registry, selector, store, lease_id)
+            return startup_retirement._publish_post_engine_permit(session, owner, store, observation)
 
     def _release_owned_resources(self, session, store, owner, config, cleanup, project_deleted, image_target):
         from . import cleanup_storage

@@ -528,6 +528,140 @@ def _publish_post_engine_archive(session, owner, store):
         os.close(parent)
 
 
+_POST_ENGINE_OBSERVATION_FIELDS = frozenset({
+    "lease_id", "original_sha256", "terminal_sha256", "scope_sha256", "census_sha256",
+    "policy_sha256", "image_effect_sha256", "default_image_sha256", "observed_at",
+})
+
+
+def _post_engine_permit_path(store, lease_id):
+    archive = _post_engine_archive_path(store, lease_id)
+    return archive.with_name(lease_id + ".permit.json")
+
+
+def _post_engine_opt_in(store, record, selector):
+    policy = store.read_policy(record["policy_sha256"])
+    ledger.Ledger._validate_policy(policy)
+    require(ledger.digest(policy) == record["policy_sha256"]
+            and policy.get("post_engine_failure_retirement") == {"schema": 1, "selector": selector},
+            "post-engine-permit-policy")
+
+
+def _decode_post_engine_permit(store, lease_id, raw, permit_sha256):
+    permit = identity.decode_json(raw)
+    image_digests = {"image_effect_sha256", "default_image_sha256"}
+    require(type(permit) is dict and permit.keys() == _POST_ENGINE_OBSERVATION_FIELDS | {"schema", "archive_sha256"}
+            and type(permit["schema"]) is int and permit["schema"] == 1 and permit["lease_id"] == lease_id
+            and type(permit["observed_at"]) is int and 0 < permit["observed_at"] <= store._now()
+            and all(type(permit[key]) is str and ledger.HEX.fullmatch(permit[key])
+                    for key in permit if key.endswith("_sha256") and key not in image_digests)
+            and (all(permit[key] is None for key in image_digests)
+                 or all(type(permit[key]) is str and ledger.HEX.fullmatch(permit[key]) for key in image_digests))
+            and raw == ledger.canonical(permit) and ledger.digest(permit) == permit_sha256,
+            "post-engine-permit-content")
+    folder = _post_engine_archive_path(store, lease_id)
+    proof, original_raw, _ = installation._file(str(folder / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
+    original = identity.decode_json(original_raw)
+    _, _, manifest = _post_engine_archive_inputs(lease_id, original)
+    _verify_post_engine_archive(folder, manifest, permit["archive_sha256"])
+    policy = store.read_policy(original["policy_sha256"])
+    marker = policy.get("post_engine_failure_retirement")
+    require(type(marker) is dict, "post-engine-permit-policy")
+    _post_engine_opt_in(store, original, marker.get("selector"))
+    image = [row for row in original["effects"].values() if row["operation"] == "image-copy"]
+    require(proof.sha256 == permit["original_sha256"] and original["policy_sha256"] == permit["policy_sha256"]
+            and permit["terminal_sha256"] == ledger.digest(original["native_terminal"])
+            and original["native_terminal"]["observed_at"] <= permit["observed_at"]
+            and (len(image) == 1 and image[0]["state"] == "verified" and ledger.digest(image[0]) == permit["image_effect_sha256"]
+                 or not image and permit["image_effect_sha256"] is None), "post-engine-permit-original-binding")
+    return permit
+
+
+def _read_post_engine_permit(store, lease_id, permit_sha256):
+    """Validate immutable evidence against its original snapshot, even after cleanup progress."""
+    path = _post_engine_permit_path(store, lease_id)
+    proof, raw, stamp = installation._file(str(path), 65536, private=True, keep=True)
+    require(proof.sha256 == permit_sha256, "post-engine-permit-digest")
+    result = _decode_post_engine_permit(store, lease_id, raw, permit_sha256)
+    require(installation._file(str(path), 65536, private=True, keep=True) == (proof, raw, stamp),
+            "post-engine-permit-replaced")
+    return result
+
+
+def _locate_post_engine_permit(store, lease_id):
+    """Read only the canonical locator; invalid committed or incomplete publishes hold."""
+    path = _post_engine_permit_path(store, lease_id)
+    try:
+        os.lstat(path.parent)
+    except FileNotFoundError:
+        return None
+    from . import engine_policy
+
+    parent = engine_policy._directory(str(path.parent), private=True)
+    try:
+        prefixes = ("." + path.name + ".", "." + lease_id + ".")
+        require(not any(name.startswith(prefixes) for name in os.listdir(parent)), "post-engine-permit-staging-held")
+        try:
+            os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            # The process might have stopped between committing the archive
+            # and issuing the permit. Adopt only its exact immutable original.
+            try:
+                os.stat(lease_id, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            archive = path.parent / lease_id
+            manifest, _, _ = installation._file(str(archive / "manifest.json"), 65536, private=True)
+            _read_post_engine_archive(store, lease_id, manifest.sha256)
+            return None
+        proof, _, _ = installation._file(str(path), 65536, private=True)
+        result = _read_post_engine_permit(store, lease_id, proof.sha256)
+        return result | {"permit_sha256": proof.sha256}
+    finally:
+        os.close(parent)
+
+
+def _confirm_durable_post_engine_permit(store, lease_id, expected):
+    from . import engine_policy
+
+    path = _post_engine_permit_path(store, lease_id)
+    parent = engine_policy._directory(str(path.parent), private=True)
+    try:
+        os.fsync(parent)  # The preceding publication may have completed its rename only.
+        require(_locate_post_engine_permit(store, lease_id) == expected, "post-engine-permit-recovery-drift")
+    finally:
+        os.close(parent)
+    return expected
+
+
+def _require_post_engine_observation(permit, observation, now):
+    """A first effect requires a fresh live census and the very same original journal."""
+    require(type(observation) is dict and observation.keys() == _POST_ENGINE_OBSERVATION_FIELDS
+            and type(now) is int and type(observation["observed_at"]) is int
+            and permit["observed_at"] <= observation["observed_at"] <= now
+            and now - observation["observed_at"] <= MAX_OBSERVATION_AGE
+            and all(observation[key] == permit[key] for key in _POST_ENGINE_OBSERVATION_FIELDS - {"observed_at"}),
+            "post-engine-permit-observation-drift")
+
+
+def _publish_post_engine_permit(session, owner, store, observation):
+    """Archive first within the original Root session, then seal the bound permit."""
+    record = store.read(owner.lease_id)
+    _post_engine_opt_in(store, record, owner.selector)
+    require(observation["original_sha256"] == ledger.digest(record)
+            and observation["scope_sha256"] == ledger.digest(owner.incus), "post-engine-permit-original-drift")
+    _, archive_sha256 = _publish_post_engine_archive(session, owner, store)
+    permit = observation | {"schema": 1, "archive_sha256": archive_sha256}
+    _require_post_engine_observation(permit, observation, store._now())
+    permit_sha256 = ledger.digest(permit)
+    _decode_post_engine_permit(store, owner.lease_id, ledger.canonical(permit), permit_sha256)
+    require(store.read(owner.lease_id) == record, "post-engine-permit-original-drift")
+    _publish_record(_post_engine_permit_path(store, owner.lease_id), permit)
+    require(_read_post_engine_permit(store, owner.lease_id, permit_sha256) == permit,
+            "post-engine-permit-publish-drift")
+    return permit | {"permit_sha256": permit_sha256}
+
+
 def publish_readback(directory, receipt):
     _publish_record(Path(directory) / "verified-absent.json", receipt)
 
