@@ -1298,18 +1298,20 @@ class AuthorizationHoldPreservationTests(unittest.TestCase):
         root = self.configuration.parent
         catalogues = {"native_run_configuration_catalogue": {
             entry.name: run_factory._fifth_retired_entry(entry) for entry in root.iterdir()}}
-        qualified = ({"schema": 14}, {"retirement": {"catalogues": catalogues}}, None, None)
         successor = SimpleNamespace(value={"ledger_path": str(self.new_bank)})
         receipt = run_factory._continuation_receipt
         before = self.snapshot()
-        with patch.object(run_factory, "_continuation_receipt",
-                          side_effect=lambda value: qualified if value is successor.value else receipt(value)), \
-             patch.object(run_factory, "_continuation_origin_absent", side_effect=lambda *_: self.observe()):
-            fd = run_factory.installation._open_directory(str(root))
-            try:
-                self.assertEqual(run_factory._current_configuration_catalogue(successor, fd), [])
-            finally:
-                os.close(fd)
+        for schema in (14, 21):
+            qualified = ({"schema": schema}, {"retirement": {"catalogues": catalogues}}, None, None)
+            with self.subTest(schema=schema), \
+                 patch.object(run_factory, "_continuation_receipt",
+                              side_effect=lambda value: qualified if value is successor.value else receipt(value)), \
+                 patch.object(run_factory, "_continuation_origin_absent", side_effect=lambda *_: self.observe()):
+                fd = run_factory.installation._open_directory(str(root))
+                try:
+                    self.assertEqual(run_factory._current_configuration_catalogue(successor, fd), [])
+                finally:
+                    os.close(fd)
         self.assertEqual(self.snapshot(), before)
 
     def test_rejects_alias_and_nonempty_original_bank(self):

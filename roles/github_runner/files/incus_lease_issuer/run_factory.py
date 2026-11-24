@@ -2482,7 +2482,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 16:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]

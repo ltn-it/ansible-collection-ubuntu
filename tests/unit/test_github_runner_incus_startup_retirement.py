@@ -654,6 +654,34 @@ class PostEngineArchiveTests(unittest.TestCase):
         self.assertEqual(set(member.name for member in self.folder.iterdir()),
                          {"original.json", "terminal.json", "stdout.log", "stderr.log", "manifest.json"})
 
+    def test_reused_independent_readback_syncs_both_directories_after_interrupted_rename(self):
+        _, binding = self.completed_cleanup()
+        value = {"schema": 1, "archive_sha256": binding}
+        path = startup_retirement._post_engine_readback_path(self.store, self.lease)
+        sync = os.fsync
+
+        def interrupted(fd):
+            if path.is_file() and os.path.samestat(os.fstat(fd), path.parent.stat()):
+                raise OSError("interrupted directory sync after rename")
+            sync(fd)
+
+        with mock.patch.object(os, "fsync", side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, "interrupted directory sync after rename"):
+                startup_retirement._publish_post_engine_readback(self.store, self.lease, value)
+        self.assertTrue(path.is_file())
+        confirmed = []
+
+        def record_sync(fd):
+            confirmed.append(os.fstat(fd))
+            sync(fd)
+
+        with mock.patch.object(os, "fsync", side_effect=record_sync):
+            digest = startup_retirement._publish_post_engine_readback(self.store, self.lease, value)
+        self.assertEqual(digest, ledger.digest(value))
+        self.assertEqual(len(confirmed), 2)
+        self.assertTrue(os.path.samestat(confirmed[0], path.parent.stat()))
+        self.assertTrue(os.path.samestat(confirmed[1], path.parent.parent.stat()))
+
     def test_original_record_drift_and_pending_cleanup_postcheck_hold(self):
         _, binding = self.completed_cleanup()
         with mock.patch.object(self.store, "require_cleanup_complete",

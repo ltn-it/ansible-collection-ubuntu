@@ -113,7 +113,7 @@ class StorageConsumerChurnTests(unittest.TestCase):
                                side_effect=[Denied('cleanup-consumers-task-inventory-changed'), None]) as scan:
             self.invoke()
         self.assertEqual(scan.call_args_list, [mock.call('data', 'descriptor', 'lease', (), 100,
-            set(), (), None, forbidden_namespace=(4, 4026532529))] * 2)
+            set(), (), None, forbidden_namespace=(4, 4026532529), retained_namespace_alias=False)] * 2)
 
     def test_real_consumers_visibility_and_bounds_never_retry(self):
         for reason in ['cleanup-consumers-open-reference', 'cleanup-consumers-mapped-reference',

@@ -460,7 +460,7 @@ def _read_post_engine_readback(store, lease_id, readback_sha256):
 
 
 def _publish_post_engine_readback(store, lease_id, value):
-    from . import generation_publisher
+    from . import engine_policy, generation_publisher
 
     path = _post_engine_readback_path(store, lease_id)
     if not os.path.lexists(path.parent):
@@ -468,7 +468,17 @@ def _publish_post_engine_readback(store, lease_id, value):
     digest = ledger.digest(value)
     if not os.path.lexists(path):
         _publish_record(path, value)
-    require(_read_post_engine_readback(store, lease_id, digest) == value, "post-engine-readback-drift")
+    directory = engine_policy._directory(str(path.parent), private=True)
+    try:
+        parent = installation._open_directory(str(path.parent.parent))
+        try:
+            os.fsync(directory)
+            os.fsync(parent)
+            require(_read_post_engine_readback(store, lease_id, digest) == value, "post-engine-readback-drift")
+        finally:
+            os.close(parent)
+    finally:
+        os.close(directory)
     return digest
 
 
