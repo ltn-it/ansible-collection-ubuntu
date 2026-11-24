@@ -16,6 +16,7 @@ from .identity import require
 
 
 POLICY = "protected-pre-vm-journal-v1"
+POST_ENGINE_POLICY_FIELD = "post_engine_failure_policy_sha256"
 MAX_OBSERVATION_AGE = 120
 FAILURES = frozenset({"failure", "startup_failure", "timed_out", "cancelled"})
 ARCHIVE_MEMBERS = ("original", "terminal", "failure", "inventory")
@@ -28,7 +29,8 @@ START_BOUNDARY = "root-journal-before-vm-authority"
 def business_policy(original):
     """Keep the same custody terms and opt in only the separately sealed business policy."""
     ledger.Ledger._validate_policy(original)
-    require("startup_retirement" not in original and original["retention_seconds"] == 14400,
+    require(not {"startup_retirement", "post_engine_failure_retirement"} & original.keys()
+            and original["retention_seconds"] == 14400,
             "startup-retirement-original-policy")
     return original | {"startup_retirement": POLICY}
 
@@ -41,18 +43,63 @@ def bootstrap_with_business_policy(bootstrap, original):
     return bootstrap | {"business_startup_policy_sha256": ledger.digest(business)}, business
 
 
-def archive_bootstrap_policies(store, bootstrap, original):
-    """Seal both policy rows in a fresh bank before publishing the bootstrap."""
-    require(type(store) is ledger.Ledger and not store.lease_ids(), "startup-retirement-new-bank")
-    base = bootstrap["custody_policy_sha256"]
-    require(base == ledger.digest(original), "startup-retirement-bootstrap-binding")
+def _bootstrap_business_policy(bootstrap, original):
+    ledger.Ledger._validate_policy(original)
+    require(bootstrap["custody_policy_sha256"] == ledger.digest(original)
+            and original["retention_seconds"] == 14400
+            and not {"startup_retirement", "post_engine_failure_retirement"} & original.keys(),
+            "bootstrap-original-failure-retention")
+    if "business_startup_policy_sha256" not in bootstrap:
+        return original
     business = business_policy(original)
-    selected = bootstrap.get("business_startup_policy_sha256")
-    require(selected == ledger.digest(business), "startup-retirement-bootstrap-business-binding")
-    require(store.archive_policy(original) == base and store.archive_policy(business) == selected,
-            "startup-retirement-policy-archive")
-    require(store.read_policy(base) == original and store.read_policy(selected) == business,
-            "startup-retirement-policy-readback")
+    require(bootstrap["business_startup_policy_sha256"] == ledger.digest(business),
+            "startup-retirement-bootstrap-business-binding")
+    return business
+
+
+def _post_engine_policy(business, selector, template):
+    matrix = template.get("matrix")
+    require(template.get("kind") == "business" and type(matrix) is dict and matrix.get("profile") == "heavy"
+            and selector == policy_registry.profile_selector("heavy", matrix.get("scenario"), matrix.get("target")),
+            "post-engine-retirement-heavy-selector")
+    policy = business | {"post_engine_failure_retirement": {"schema": 1, "selector": selector}}
+    ledger.Ledger._validate_policy(policy)
+    return policy
+
+
+def _bootstrap_custody_rows(bootstrap, original):
+    business = _bootstrap_business_policy(bootstrap, original)
+    policies = {ledger.digest(original): original, ledger.digest(business): business}
+    cells = bootstrap["cells"]
+    require(type(cells) is dict and all(type(template) is dict for template in cells.values()), "bootstrap-cells")
+    for selector, template in cells.items():
+        if POST_ENGINE_POLICY_FIELD in template:
+            policy = _post_engine_policy(business, selector, template)
+            expected = ledger.digest(policy)
+            require(template[POST_ENGINE_POLICY_FIELD] == expected, "post-engine-retirement-policy-binding")
+            policies[expected] = policy
+    return policies
+
+
+def bootstrap_with_post_engine_failure_policy(bootstrap, selector, original):
+    """Prepare a Root-only opt-in for this exact Heavy cell before sealing the bank."""
+    business = _bootstrap_business_policy(bootstrap, original)
+    cells = bootstrap["cells"]
+    require(type(selector) is str and selector in cells and type(cells[selector]) is dict
+            and POST_ENGINE_POLICY_FIELD not in cells[selector], "post-engine-retirement-new-selector")
+    template = cells[selector]
+    policy = _post_engine_policy(business, selector, template)
+    return bootstrap | {"cells": cells | {selector: template | {POST_ENGINE_POLICY_FIELD: ledger.digest(policy)}}}, policy
+
+
+def archive_bootstrap_policies(store, bootstrap, original):
+    """Seal the base and exact opted-in policy rows in a fresh bank."""
+    require(type(store) is ledger.Ledger and not store.lease_ids(), "startup-retirement-new-bank")
+    rows = _bootstrap_custody_rows(bootstrap, original)
+    require(len(rows) > 1, "startup-retirement-opt-in-required")
+    for digest, policy in rows.items():
+        require(store.archive_policy(policy) == digest and store.read_policy(digest) == policy,
+                "startup-retirement-policy-readback")
 
 
 def archived_original(directory, manifest_sha256, record):

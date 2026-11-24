@@ -100,6 +100,8 @@ def _root():
 
 
 def load_bootstrap(path, expected_sha256):
+    from . import startup_retirement
+
     _root()
     proof, raw, stamp = installation._file(engine._path(path), MAX_POLICY, private=True, keep=True)
     require(proof.sha256 == engine._hash(expected_sha256), "bootstrap-policy-drift")
@@ -127,15 +129,6 @@ def load_bootstrap(path, expected_sha256):
             and collected.service.installation.service_uid == base["service_uid"], "bootstrap-runner-domain")
     engine._path(value["ledger_path"])
     custody = engine._hash(value["custody_policy_sha256"])
-    with ledger.Ledger(value["ledger_path"], clock=time.time) as store:
-        original = store.read_policy(custody)
-        require(original["retention_seconds"] == 14400 and "startup_retirement" not in original,
-                "bootstrap-original-failure-retention")
-        if "business_startup_policy_sha256" in value:
-            from . import startup_retirement
-            policy_sha256 = engine._hash(value["business_startup_policy_sha256"])
-            require(store.read_policy(policy_sha256) == startup_retirement.business_policy(original),
-                    "bootstrap-business-startup-retirement-policy")
     prep = engine._keys(value["preparation"], PREPARATION_KEYS)
     for key in PREPARATION_KEYS:
         if key.endswith("sha256") or key == "signing_public_key_hex": engine._hash(prep[key])
@@ -159,6 +152,8 @@ def load_bootstrap(path, expected_sha256):
         kind = template.get("kind") if type(template) is dict else None
         keys = {"kind", "native_job_name", "native_observer_job_name", "github", "engine", "incus",
                 "lease_seconds", "job_timeout_seconds", "operating" if kind == "operating" else "matrix"}
+        if type(template) is dict and startup_retirement.POST_ENGINE_POLICY_FIELD in template:
+            keys.add(startup_retirement.POST_ENGINE_POLICY_FIELD)
         engine._keys(template, keys)
         require(kind in {"business", "operating"}, "bootstrap-cell-kind")
         for field in ("native_job_name", "native_observer_job_name"):
@@ -183,11 +178,19 @@ def load_bootstrap(path, expected_sha256):
             suffix = "Final quality / " + matrix["profile"] + " / " + matrix["scenario"] + " / " + matrix["target"]
         observer = template["native_observer_job_name"]
         require(observer == suffix or observer.endswith(" / " + suffix), "bootstrap-observer-name")
+    with ledger.Ledger(value["ledger_path"], clock=time.time) as store:
+        original = store.read_policy(custody)
+        rows = startup_retirement._bootstrap_custody_rows(value, original)
+        for policy_sha256, policy in rows.items():
+            if policy_sha256 != custody:
+                require(store.read_policy(policy_sha256) == policy, "bootstrap-custody-policy-archive")
     _continuation_receipt(value)
     return RootBootstrapPolicy(path, expected_sha256, raw, collected, stamp)
 
 
 def derive_selection(bootstrap, selector, caller_sha_locator, *, purpose="execution"):
+    from .startup_retirement import POST_ENGINE_POLICY_FIELD
+
     _root()
     require(type(bootstrap) is RootBootstrapPolicy
             and load_bootstrap(bootstrap.path, bootstrap.sha256) == bootstrap, "bootstrap-trusted-policy")
@@ -200,7 +203,7 @@ def derive_selection(bootstrap, selector, caller_sha_locator, *, purpose="execut
     native = policy_registry._identity(base, template["native_job_name" if purpose == "execution" else "native_observer_job_name"])
     custody = value["custody_policy_sha256"]
     if template["kind"] == "business":
-        custody = value.get("business_startup_policy_sha256", custody)
+        custody = template.get(POST_ENGINE_POLICY_FIELD, value.get("business_startup_policy_sha256", custody))
     return RootBootstrapSelection(bootstrap, selector, purpose, native, bootstrap.collector, value["ledger_path"],
         custody, ledger.digest(template), ledger.canonical(template),
         template["lease_seconds"], template["job_timeout_seconds"])
