@@ -381,6 +381,22 @@ class RootStageTests(unittest.TestCase):
         self.assertEqual(self.downloads(), 1)
         self.assertEqual(self.stamps(snapshot.directory), before)
 
+    def test_reader_cannot_create_intake_when_full_host_gate_denies(self):
+        with mock.patch.object(intake.admission, "require_intake_reader", side_effect=self.ticket):
+            with self.assertRaisesRegex(Denied, "^intake-stage-held$"):
+                self.stage(ticket=Denied("historical resource state changed"))
+        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertEqual(self.downloads(), 0)
+
+    def test_full_gate_is_required_after_sealed_archive_readback(self):
+        current = (self.worker, self.who, 240)
+        with mock.patch.object(intake.admission, "require_intake_reader", side_effect=self.ticket):
+            with self.assertRaisesRegex(Denied, "^intake-stage-held$"):
+                self.stage(ticket=[current, current, Denied("final historical resource state changed")])
+        directory, = self.root.iterdir()
+        self.assertEqual(set(self.stamps(directory)), intake.INVENTORY)
+        self.assertEqual(self.downloads(), 1)
+
     def test_partial_original_intent_holds_without_second_acquisition_or_repair(self):
         with mock.patch.object(intake, "acquire_run_snapshot", side_effect=Denied("possible partial")) as acquire:
             with self.assertRaisesRegex(Denied, "^intake-stage-held$"):

@@ -1,0 +1,8 @@
+---
+bugfixes:
+  - >-
+    github_runner - Revalidate the exact current GitHub job throughout private snapshot preparation
+    and perform the historical host checks at the intake creation, sealing and completion boundaries.
+  - >-
+    github_runner - Preserve the sealed intake and empty lease bank of the failed original push
+    when qualifying a fresh protected Incus test run.

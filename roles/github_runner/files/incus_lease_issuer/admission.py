@@ -294,6 +294,15 @@ def verify_intake_native(connected_socket, selected, nonce, token, api_token):
     return ticket
 
 
+def require_intake_reader(proof, connected_socket, selected, token, api_token):
+    """Keep current job authentication on intermediate intake readbacks."""
+    from . import run_factory
+
+    if type(proof) is run_factory.BootstrapNativeProof:
+        return run_factory.require_bootstrap_intake_reader(proof, connected_socket, selected, token, api_token)
+    return require_intake_native(proof, connected_socket, selected, token, api_token)
+
+
 def require_intake_native(proof, connected_socket, selected, token, api_token):
     """Fixed fresh native revalidation before/after slow private acquisition."""
     _root()

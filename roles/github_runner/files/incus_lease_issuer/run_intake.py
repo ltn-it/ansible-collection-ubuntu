@@ -131,7 +131,7 @@ def acquire_run_snapshot(proof, connected_socket, selected, token, api_token, *,
     """
     require(os.geteuid() == 0, "intake-root-required")
     try:
-        worker, who, remaining = admission.require_intake_native(
+        worker, who, remaining = admission.require_intake_reader(
             proof, connected_socket, selected, token, api_token)
         seconds = min(600, int(remaining))
         require(seconds > 0, "intake-auth-budget")
@@ -142,7 +142,7 @@ def acquire_run_snapshot(proof, connected_socket, selected, token, api_token, *,
         require(remaining > 0, "intake-auth-budget")
         request = MemoryRequest(request.source, request.controller, request.artifact,
             request.max_archive_bytes, request.max_tree_entries, request.max_file_bytes, remaining)
-        again = admission.require_intake_native(proof, connected_socket, selected, token, api_token)
+        again = admission.require_intake_reader(proof, connected_socket, selected, token, api_token)
         require(again[0] == worker and again[1] == who, "intake-native-drift")
         remaining = min(int(acquisition._remaining(deadline)), int(again[2]))
         require(remaining > 0, "intake-auth-budget")
@@ -150,7 +150,7 @@ def acquire_run_snapshot(proof, connected_socket, selected, token, api_token, *,
             request.max_archive_bytes, request.max_tree_entries, request.max_file_bytes, remaining)
         proven = _acquire_memory(request, api_token, artifact_fd=artifact_fd,
                                  source_fd=source_fd, controller_fd=controller_fd, _absolute_deadline=deadline)
-        again = admission.require_intake_native(proof, connected_socket, selected, token, api_token)
+        again = admission.require_intake_reader(proof, connected_socket, selected, token, api_token)
         require(again[0] == worker and again[1] == who, "intake-native-drift")
         snapshot = _validate_archives(proven, artifact_fd=artifact_fd,
                                       source_fd=source_fd, controller_fd=controller_fd)
@@ -457,14 +457,17 @@ def stage_run_snapshot(proof, connected_socket, selected, token, api_token, *, e
     root = stage = None
     fds = []
     try:
-        worker, who, remaining = admission.require_intake_native(proof, connected_socket, selected, token, api_token)
+        worker, who, remaining = admission.require_intake_reader(proof, connected_socket, selected, token, api_token)
         seconds = min(600, int(remaining))
         require(seconds > 0, "intake-auth-budget")
         deadline = time.monotonic() + seconds
         request = _native_request(selected, who, api_token, deadline, seconds)
         binding = _binding(selected, request)
         name = ledger.digest(binding)
-        again = admission.require_intake_native(proof, connected_socket, selected, token, api_token)
+        # Verify the complete host state before creating an intake directory.
+        # A challenge bound to a seal can only reopen and verify that archive.
+        revalidate = admission.require_intake_native if expected_receipt_sha256 is None else admission.require_intake_reader
+        again = revalidate(proof, connected_socket, selected, token, api_token)
         require(again[0] == worker and again[1] == who and time.monotonic() < deadline,
                 "intake-stage-native-drift")
         root = installation._open_directory(ROOT)

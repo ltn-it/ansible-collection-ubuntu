@@ -16,6 +16,121 @@ sys.path.insert(
 from incus_lease_issuer import identity, ledger, operating_cells as cells, run_factory
 
 
+class SealedPreleaseContinuationTests(unittest.TestCase):
+    def test_schema_twenty_only_admits_the_original_sealed_intake_extension(self):
+        previous_catalogues = {
+            "native_intake_catalogue": {"a" * 64: "1" * 64},
+            "native_run_configuration_catalogue": {"b" * 64: "2" * 64},
+        }
+        earlier = {"schema": 18, "retirement": {"catalogues": previous_catalogues}}
+        previous = {
+            "schema": 19, "purpose": cells.NINETEENTH_REASON,
+            "native_nineteenth": {"run_id": cells.NINETEENTH_RUN},
+            "previous_qualification": earlier,
+            "retirement": {"catalogues": deepcopy(previous_catalogues)},
+        }
+        intake = {
+            "name": "c" * 64, "device": 10, "inode": 30,
+            "seal_sha256": "3" * 64, "intent_sha256": "4" * 64,
+            "catalogue_sha256": "5" * 64,
+        }
+        catalogues = deepcopy(previous_catalogues)
+        catalogues["native_intake_catalogue"][intake["name"]] = intake["catalogue_sha256"]
+        proof = {
+            "schema": 20, "purpose": cells.TWENTIETH_REASON,
+            "native_twentieth": {"run_id": cells.TWENTIETH_RUN},
+            "previous_qualification": previous,
+            "previous_bootstrap": {"path": "/unit/original/bootstrap.json",
+                                   "sha256": "6" * 64, "device": 10, "inode": 40},
+            "previous_bank": {"path": "/unit/original/ledger", "state_file_sha256": "7" * 64,
+                              "device": 10, "inode": 50},
+            "sealed_intake": intake, "catalogues": catalogues,
+        }
+        with (
+            patch.object(cells, "NINETEENTH_QUALIFICATION", ledger.digest(previous)),
+            patch.object(cells, "NINETEENTH_GRAPH", ledger.digest(previous["native_nineteenth"])),
+            patch.object(cells, "TWENTIETH_GRAPH", ledger.digest(proof["native_twentieth"])),
+            patch.object(cells, "_validate_eighteenth_qualification", return_value={"prior": "checked"}),
+            patch.object(cells, "_validate_oci_retirement"),
+        ):
+            with patch.object(cells, "TWENTIETH_QUALIFICATION", ledger.digest(proof)):
+                self.assertEqual(cells.validate_continuation_qualification(proof), {"prior": "checked"})
+                drift = deepcopy(proof)
+                drift["native_twentieth"]["run_id"] += 1
+                with self.assertRaisesRegex(identity.Denied, "continuation-twentieth-history"):
+                    cells.validate_continuation_qualification(drift)
+
+            for keys, value, reason in (
+                (("native_twentieth", "run_id"), 1, "continuation-twentieth-history"),
+                (("previous_qualification", "purpose"), "altered", "continuation-nineteenth-history"),
+                (("previous_bank", "inode"), True, "engine-integer"),
+                (("previous_bootstrap", "path"), "relative", "engine-path"),
+                (("sealed_intake", "seal_sha256"), "short", "engine-digest"),
+                (("catalogues", "native_intake_catalogue", "a" * 64), "0" * 64,
+                 "continuation-twentieth-catalogue-extension"),
+                (("catalogues", "native_intake_catalogue", "d" * 64), "0" * 64,
+                 "continuation-twentieth-catalogue-extension"),
+                (("catalogues", "native_run_configuration_catalogue", "d" * 64), "0" * 64,
+                 "continuation-twentieth-catalogue-extension"),
+            ):
+                with self.subTest(keys=keys):
+                    changed = deepcopy(proof)
+                    member = changed
+                    for key in keys[:-1]:
+                        member = member[key]
+                    member[keys[-1]] = value
+                    with (
+                        patch.object(cells, "TWENTIETH_QUALIFICATION", ledger.digest(changed)),
+                        self.assertRaisesRegex(identity.Denied, reason),
+                    ):
+                        cells.validate_continuation_qualification(changed)
+
+    def test_sealed_intake_requires_its_original_inode_before_readback(self):
+        digest = "a" * 64
+        previous = {"schema": 19}
+        original = SimpleNamespace(path="/unit/old/bootstrap.json", sha256=digest, file_stamp=(10, 20),
+                                   value={"ledger_path": "/unit/old/ledger"})
+        descriptor = {"schema": 19, "successor": {"run_id": cells.TWENTIETH_RUN,
+                                                 "source_sha": cells.TWENTIETH_MAIN}}
+        proof = {
+            "previous_bootstrap": {"path": original.path, "sha256": digest, "device": 10, "inode": 20},
+            "previous_bank": {"path": original.value["ledger_path"], "device": 10, "inode": 30,
+                              "state_file_sha256": digest},
+            "previous_qualification": previous,
+            "sealed_intake": {"name": "b" * 64, "device": 10, "inode": 40,
+                              "seal_sha256": digest, "intent_sha256": digest},
+        }
+        intent = {
+            "original_job": {"run_id": cells.TWENTIETH_RUN, "job_id": cells.TWENTIETH_CHECKS[0],
+                             "check_run_id": cells.TWENTIETH_CHECKS[0]},
+            "binding": {"source": {"commit_sha": cells.TWENTIETH_MAIN},
+                        "controller": {"commit_sha": cells.NINETEENTH_SUCCESSOR_REUSABLE}},
+        }
+        with (
+            patch.object(run_factory, "load_bootstrap", return_value=original),
+            patch.object(run_factory, "_continuation_receipt", return_value=(descriptor, previous)),
+            patch.object(run_factory, "_check_empty_previous_bank"),
+            patch.object(ledger, "_observe_historical_bank"),
+            patch.object(ledger, "Ledger") as bank,
+            patch.object(run_factory.installation, "_file", return_value=(SimpleNamespace(sha256=digest), b"", None)),
+            patch.object(run_factory.installation, "_open_directory", return_value=42),
+            patch.object(run_factory.run_intake, "_directory_identity", return_value=(10, 40, 0, 0, 0o40700)),
+            patch.object(run_factory.run_intake, "_read_at", return_value=(intent, digest, None)),
+            patch.object(run_factory.run_intake, "_sealed_state_unchanged") as check_seal,
+            patch.object(run_factory.os, "close") as close,
+        ):
+            transaction = bank.return_value.__enter__.return_value._transaction
+            transaction.return_value.__enter__.return_value = {"leases": {}, "tokens": {}}
+            run_factory._revalidate_twentieth_prelease(proof, "/unit/new/ledger")
+            check_seal.assert_called_once_with(42, digest)
+            close.assert_called_once_with(42)
+            check_seal.reset_mock()
+            proof["sealed_intake"]["inode"] = 41
+            with self.assertRaisesRegex(identity.Denied, "continuation-twentieth-intake-identity"):
+                run_factory._revalidate_twentieth_prelease(proof, "/unit/new/ledger")
+            check_seal.assert_not_called()
+
+
 class TenthPreleaseTests(unittest.TestCase):
     def setUp(self):
         self.route = {
