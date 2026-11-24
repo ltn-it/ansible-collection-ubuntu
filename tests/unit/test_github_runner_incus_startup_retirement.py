@@ -337,6 +337,82 @@ class PostEngineArchiveTests(unittest.TestCase):
             self.publish()
         self.assertEqual(archive.read_bytes(), changed)
 
+    def completed_cleanup(self):
+        target_by_operation = {
+            "project-create": "project:proof-project",
+            "network-create": "network:default:proof-bridge",
+            "engine-prepare": "engine:" + self.lease,
+            "context-create": "context:" + self.record["cell_sha256"],
+            "fence-create": "fence:" + self.lease,
+            "slice-create": "slice:" + self.lease,
+            "certificate-create": "certificate:" + "7" * 64,
+        }
+        prepare = {operation: {"operation": operation, "target": target, "state": "verified", "at": 300}
+                   for operation, target in target_by_operation.items()}
+        withdrawals = {
+            "certificate-revoke": target_by_operation["certificate-create"],
+            "engine-stop": "engine:lit-lease-" + self.lease,
+            "fence-disable": target_by_operation["fence-create"],
+        }
+        self.record["effects"].pop("scope")
+        self.record["effects"].update(prepare)
+        for operation, target in withdrawals.items():
+            self.record["effects"][operation] = {
+                "operation": operation, "target": target, "state": "verified", "at": 401,
+            }
+        original = deepcopy(self.record)
+        _, binding = self.publish()
+        for creator, target in target_by_operation.items():
+            operation = ledger.CREATES[creator]
+            if operation not in withdrawals:
+                self.record["effects"][operation] = {
+                    "operation": operation, "target": target, "state": "verified", "at": 410,
+                }
+        return original, binding
+
+    def read_cleanup_journal(self, binding):
+        return startup_retirement._read_post_engine_cleanup_journal(self.store, self.lease, binding)
+
+    def test_verified_cleanup_reopens_original_archive_and_runner_stays_held(self):
+        original, binding = self.completed_cleanup()
+        for name in self.logs:
+            (self.runroot / name).unlink()
+        with (mock.patch.object(self.store, "require_cleanup_complete") as require_complete,
+              mock.patch.object(self.store, "close") as close):
+            journal = self.read_cleanup_journal(binding)
+        require_complete.assert_called_once_with(self.lease)
+        close.assert_not_called()
+        self.assertEqual(journal, {
+            "schema": 1, "state": "awaiting-independent-absence", "lease_id": self.lease,
+            "archive_sha256": binding, "original_sha256": ledger.digest(original),
+            "journal_sha256": ledger.digest(self.record), "native_acceptance": False,
+        })
+        with self.assertRaisesRegex(identity.Denied, "engine-other-pilot-lease-active"):
+            ledger.Ledger._require_exclusive_preparation({"leases": {self.lease: self.record}})
+
+    def test_unknown_or_crossed_delete_is_held_before_cleanup_postcheck(self):
+        _, binding = self.completed_cleanup()
+        operation = self.record["effects"]["project-delete"]
+        with mock.patch.object(self.store, "require_cleanup_complete") as require_complete:
+            for change in ({"state": "unknown"}, {"target": "project:other"}, {"at": 390}):
+                original = dict(operation)
+                operation.update(change)
+                with self.subTest(change=change), self.assertRaisesRegex(identity.Denied, "post-engine-cleanup-journal-held"):
+                    self.read_cleanup_journal(binding)
+                operation.update(original)
+            require_complete.assert_not_called()
+
+    def test_original_record_drift_and_pending_cleanup_postcheck_hold(self):
+        _, binding = self.completed_cleanup()
+        with mock.patch.object(self.store, "require_cleanup_complete",
+                               side_effect=identity.Denied("cleanup-postcheck-held")) as require_complete:
+            with self.assertRaisesRegex(identity.Denied, "cleanup-postcheck-held"):
+                self.read_cleanup_journal(binding)
+            self.record["native_terminal"]["native_sha256"] = "e" * 64
+            with self.assertRaisesRegex(identity.Denied, "post-engine-cleanup-original-drift"):
+                self.read_cleanup_journal(binding)
+            require_complete.assert_called_once_with(self.lease)
+
     def test_incomplete_capture_holds_before_archive_creation(self):
         self.record["effects"]["c" * 32]["engine_exit"]["stderr_state"] = "incomplete"
         with self.assertRaisesRegex(identity.Denied, "post-engine-archive-complete-exit"):
