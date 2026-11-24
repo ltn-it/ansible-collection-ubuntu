@@ -393,6 +393,45 @@ def _read_post_engine_archive(store, lease_id, expected_sha256):
     return receipt
 
 
+def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256):
+    """Reopen the original archive after cleanup without granting closure."""
+    folder = _post_engine_archive_path(store, lease_id)
+    _, raw, _ = installation._file(str(folder / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
+    original = identity.decode_json(raw)
+    _, _, manifest = _post_engine_archive_inputs(lease_id, original)
+    _verify_post_engine_archive(folder, manifest, archive_sha256)
+
+    record = store.read(lease_id)
+    creators = {"engine-prepare", "context-create", "project-create", "network-create", "fence-create", "slice-create"}
+    prior_withdrawals = {"certificate-create", "certificate-revoke", "engine-start", "engine-stop", "fence-disable"}
+    preparation = {"profile-configure", "context-publish", "context-refresh", "fence-renew"}
+    original_effects = original["effects"]
+    operations = {effect["operation"] for effect in original_effects.values()}
+    require(original["state"] in {"prepared", "cancelled"}
+            and not {"owned_instance", "custody", "partial_preparation_custody", "uploaded_evidence"} & original.keys()
+            and original.get("upload_verification", {}).get("state") != "intent"
+            and creators | prior_withdrawals <= operations <= creators | prior_withdrawals | preparation
+            and all(effect["state"] == "verified" for effect in original_effects.values()),
+            "post-engine-cleanup-original-scope")
+    effects = record["effects"]
+    require(record | {"effects": original_effects} == original
+            and all(effects.get(identifier) == effect for identifier, effect in original_effects.items()),
+            "post-engine-cleanup-original-drift")
+    expected = {(ledger.CREATES[effect["operation"]], effect["target"])
+                for effect in original_effects.values() if effect["operation"] in creators}
+    completed = [effect for identifier, effect in effects.items() if identifier not in original_effects]
+    require(len(expected) == len(creators) == len(completed)
+            and {(effect["operation"], effect["target"]) for effect in completed} == expected
+            and all(effect["state"] == "verified" and effect["at"] >= original["native_terminal"]["completed_at"]
+                    for effect in completed), "post-engine-cleanup-journal-held")
+    store.require_cleanup_complete(lease_id)
+    require(store.read(lease_id) == record, "post-engine-cleanup-journal-drift")
+
+    return {"schema": 1, "state": "awaiting-independent-absence", "lease_id": lease_id,
+            "archive_sha256": archive_sha256, "original_sha256": ledger.digest(original),
+            "journal_sha256": ledger.digest(record), "native_acceptance": False}
+
+
 def _publish_post_engine_archive(session, owner, store):
     """Seal the already-bound terminal result and private captures under the existing Root lock."""
     from . import cell_contract, engine_executor, engine_policy, generation_publisher, root_session
