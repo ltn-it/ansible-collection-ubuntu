@@ -391,6 +391,58 @@ class RootFinalizer:
                 record["partial_preparation_custody"]["pre_vm_retirement"]):
             self.verify_retired_before_vm_authority(registry, selector, store, lease_id, locator[0])
 
+    def _observe_failed_engine_without_vm(self, session, registry, selector, store, lease_id):
+        """Read the post-engine failure boundary. This observation grants no cleanup authority."""
+        from . import cleanup_storage, engine_graph_prune, operating_custody, policy_registry
+
+        owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
+        config = self._fresh(session, registry, selector, store, owner)
+        record = store.read(lease_id)
+        env = identity.decode_json(owner.engine_descriptor_bytes)["environment"]
+        require(env["QUALITY_INPUT_PROFILE"] == "heavy" and selector == policy_registry.profile_selector(
+            "heavy", env["QUALITY_INPUT_SCENARIO"], env["QUALITY_INPUT_TARGET"]), "failure-observation-heavy-cell")
+        terminal = record.get("native_terminal")
+        operating_custody._terminal_record(terminal, record)
+        require(terminal["conclusion"] == "failure" and terminal["observed_at"] <= store._now()
+                and record["state"] in {"prepared", "cancelled"}
+                and not {"custody", "partial_preparation_custody", "owned_instance", "uploaded_evidence"} & record.keys()
+                and record.get("upload_verification", {}).get("state") != "intent"
+                and all(row["state"] == "verified" and row["operation"] not in {
+                    "instance-stop", "instance-destroy", "image-copy", "engine-release", "context-delete",
+                    "project-delete", "network-delete", "fence-remove", "slice-remove"
+                } for row in record["effects"].values()), "failure-observation-unresolved")
+        _, start = cleanup_storage._drain_engine(owner, store, config)
+        actual = start["engine_exit"]
+        require(actual["observed_at"] <= terminal["completed_at"] and actual["signal"] is None
+                and type(actual["exit_code"]) is int and actual["exit_code"] > 0
+                and all(actual[name + "_state"] == "complete" for name in ("stdout", "stderr")),
+                "failure-observation-original-exit")
+        capture = engine_graph_prune._diagnostics(owner, start)
+        worker = ledger.Worker(**record["worker"])
+        network_fence.verify_disabled(owner, store, worker, config)
+        target = owner.incus
+        cert = owner.creator_targets["certificate-create"]
+        require(_effect(record, "certificate-revoke", cert) is not None, "failure-observation-cert-withdrawal")
+        admin = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
+            target["project"], target["network"], "default", target["pool"],
+            (cert.removeprefix("certificate:"),), target["instance"]))
+        cleanup = incus_mutation.RootIncusCleanup(admin, owner, store)
+        inventories = []
+        for _ in range(2):
+            require(cleanup.certificates_absent() and cleanup.readback("profile")["state"] == "required_fields_match",
+                    "failure-observation-scope")
+            scope = {kind: ledger.digest(cleanup._verify_delete_scope(kind)) for kind in ("project", "bridge")}
+            inventories.append(scope | {"quiet": cleanup.quiet_project()})
+            require(all(type(row.get("project")) is str and row["project"] != target["project"]
+                        for row in admin.pool_volumes()), "failure-observation-volumes")
+        self._fresh(session, registry, selector, store, owner)
+        require(inventories[0] == inventories[1] and store.read(lease_id) == record
+                and engine_graph_prune._diagnostics(owner, start) == capture,
+                "failure-observation-drift")
+        return {"lease_id": lease_id, "observed_at": store._now(), "original_sha256": ledger.digest(record),
+                "terminal_sha256": ledger.digest(terminal), "engine_exit_sha256": ledger.digest(actual),
+                "capture_sha256": capture, "project": target["project"], "inventory": inventories[0]}
+
     def finalize(self, registry, selector, store, lease_id):
         """Explicit Root call, serialized; no effect retry or job acceptance.
 

@@ -563,11 +563,18 @@ class Ledger:
     @staticmethod
     def _validate_policy(policy):
         required = {"custodian_ref", "storage_ref", "approval_ref", "retention_seconds", "max_lease_seconds"}
-        require(type(policy) is dict and set(policy) in (required, required | {"startup_retirement"}),
+        require(type(policy) is dict and required <= set(policy) <= required | {
+                    "startup_retirement", "post_engine_failure_retirement"},
                 "invalid-custody-policy")
         if "startup_retirement" in policy:
             require(policy["startup_retirement"] == "protected-pre-vm-journal-v1",
                     "invalid-startup-retirement-policy")
+        if "post_engine_failure_retirement" in policy:
+            marker = policy["post_engine_failure_retirement"]
+            require(type(marker) is dict and set(marker) == {"schema", "selector"}
+                    and type(marker["schema"]) is int and marker["schema"] == 1
+                    and type(marker["selector"]) is str and re.fullmatch(r"cell-[0-9a-f]{64}", marker["selector"])
+                    and policy["retention_seconds"] == 14400, "invalid-post-engine-retirement-policy")
         for key in ("custodian_ref", "storage_ref", "approval_ref"):
             value = policy[key]
             require(type(value) is str and 0 < len(value) <= 512

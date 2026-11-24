@@ -36,6 +36,23 @@ class BoundaryTests(unittest.TestCase):
                          lambda: factory.verify_bootstrap_native(None, None, "x", "x", "x", "x")):
                 with self.assertRaisesRegex(Denied, "run-factory-root-required"): call()
 
+    def test_installation_rejects_invalid_base_fields_even_with_matching_policy_hashes(self):
+        from incus_lease_issuer import startup_retirement
+        from test_github_runner_runtime_v2_installation import probe
+
+        original = {"custodian_ref": "fixture:owner", "storage_ref": "fixture:storage", "approval_ref": "fixture:review",
+                    "retention_seconds": 14400, "max_lease_seconds": 900}
+        matrix = {"profile": "heavy", "scenario": "example_heavy", "target": "ubuntu-24.04"}
+        selector = policy_registry.profile_selector(matrix["profile"], matrix["scenario"], matrix["target"])
+        field = startup_retirement.POST_ENGINE_POLICY_FIELD
+        for key, value in (("custodian_ref", ""), ("max_lease_seconds", 0)):
+            unsafe = original | {key: value}
+            opted_in = unsafe | {"post_engine_failure_retirement": {"schema": 1, "selector": selector}}
+            base, post = ledger.digest(unsafe), ledger.digest(opted_in)
+            runtime = {"custody_policy_sha256": base, "cells": {selector: {"kind": "business", "matrix": matrix, field: post}}}
+            with self.subTest(field=key), self.assertRaises(ValueError):
+                probe.bootstrap_custody_policies(runtime, {"policies": {base: unsafe, post: opted_in}})
+
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
 class RootBootstrapTests(unittest.TestCase):
@@ -200,6 +217,76 @@ class RootBootstrapTests(unittest.TestCase):
         proof, _ = self.mint()
         self.assertEqual(proof.policy.custody_policy_sha256, ledger.digest(business))
         return proof.policy, business
+
+    def test_post_engine_opt_in_binds_only_the_exact_heavy_cell_for_both_purposes(self):
+        from incus_lease_issuer import startup_retirement
+        from test_github_runner_runtime_v2_installation import probe
+
+        field = startup_retirement.POST_ENGINE_POLICY_FIELD
+        other = policy_registry.profile_selector("heavy", "other_heavy", "ubuntu-24.04")
+        second = deepcopy(self.value["cells"][self.selector])
+        second["matrix"]["scenario"] = "other_heavy"
+        second["native_job_name"] = "heavy / other_heavy / ubuntu-24.04"
+        second["native_observer_job_name"] = "Final quality / heavy / other_heavy / ubuntu-24.04"
+        case = next(iter(factory.operating_cells.CASES))
+        operating = factory.operating_cells.selector(case)
+        self.value["cells"].update({other: second, operating: {"kind": "operating",
+            "native_job_name": "Operating custody / " + case, "native_observer_job_name": "Operating result / " + case,
+            "lease_seconds": 900, "job_timeout_seconds": 900, "github": {"job": "operating", "workflow": "CI"},
+            "operating": {"case": case}, "engine": {"limits": {"timeout_seconds": 600}}, "incus": {}}})
+        base = self.value["custody_policy_sha256"]
+        initial = deepcopy(self.value)
+        with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
+            original = store.read_policy(base)
+            for with_pre_vm in (False, True):
+                with self.subTest(with_pre_vm=with_pre_vm):
+                    self.value = deepcopy(initial)
+                    business = original
+                    if with_pre_vm:
+                        self.value, business = startup_retirement.bootstrap_with_business_policy(self.value, original)
+                    with self.assertRaisesRegex(Denied, "post-engine-retirement-heavy-selector"):
+                        startup_retirement.bootstrap_with_post_engine_failure_policy(self.value, operating, original)
+                    self.value, policy = startup_retirement.bootstrap_with_post_engine_failure_policy(
+                        self.value, self.selector, original)
+                    self.assertEqual(policy, business | {"post_engine_failure_retirement": {"schema": 1, "selector": self.selector}})
+                    post_engine = ledger.digest(policy)
+                    with self.assertRaises(Denied):
+                        self.seal()
+                    startup_retirement.archive_bootstrap_policies(store, self.value, original)
+                    self.seal()
+                    state = identity.decode_json((self.store_path / "state.json").read_bytes())
+                    probe.bootstrap_custody_policies(self.value, state)
+                    altered = deepcopy(state)
+                    altered["policies"][post_engine]["post_engine_failure_retirement"]["schema"] = True
+                    with self.assertRaises(ValueError):
+                        probe.bootstrap_custody_policies(self.value, altered)
+                    for purpose in ("execution", "observer"):
+                        for selector, expected in ((self.selector, post_engine), (other, ledger.digest(business)), (operating, base)):
+                            selected = factory.derive_selection(self.bootstrap, selector, crypto.CALLER_SHA, purpose=purpose)
+                            self.assertEqual(selected.custody_policy_sha256, expected)
+                            self.assertEqual(store.read_policy(expected)["retention_seconds"], 14400)
+                            if selector != self.selector:
+                                self.assertEqual(selected.template_sha256, ledger.digest(initial["cells"][selector]))
+                    for selector, forbidden in ((self.selector, base), (self.selector, ledger.digest(business)),
+                                                (other, post_engine), (operating, post_engine)):
+                        bad = deepcopy(self.value)
+                        bad["cells"][selector][field] = forbidden
+                        self.path.write_bytes(ledger.canonical(bad))
+                        with self.assertRaisesRegex(Denied, "post-engine-retirement-(heavy-selector|policy-binding)"):
+                            factory.load_bootstrap(str(self.path), ledger.digest(bad))
+                        with self.assertRaises(ValueError):
+                            probe.bootstrap_custody_policies(bad, state)
+                    self.seal()
+        proof, _ = self.mint()
+        self.assertEqual(proof.policy.custody_policy_sha256, post_engine)
+        self.native.job["name"] = self.value["cells"][self.selector]["native_observer_job_name"]
+        self.native.claims["check_run_id"] = "735"
+        self.native.job.update(id=906, check_run_url=identity.API + "/repos/" + crypto.REPOSITORY + "/check-runs/735")
+        challenge = factory.challenge_bootstrap(self.server, self.bootstrap, self.selector)
+        self.native.claims["aud"] = challenge["audience"]
+        observer = factory.verify_bootstrap_native(self.server, self.bootstrap, self.selector, challenge["nonce"],
+            self.native.token(), "synthetic-job-token", purpose="observer")
+        self.assertEqual(observer.policy.custody_policy_sha256, post_engine)
 
     def test_real_signature_socket_nonce_ledger_and_opaque_proof_without_fake_cell(self):
         proof, token = self.mint()
