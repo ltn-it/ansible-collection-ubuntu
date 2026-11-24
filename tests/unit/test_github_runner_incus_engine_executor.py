@@ -429,7 +429,14 @@ class RootExecutorTests(unittest.TestCase):
         self.assertGreater(len(self.manifest.argv), 32)  # Actual engine argv exceeds Runner's contract.
         with self.assertRaises(Denied):
             executor.worker.validate_argv(self.manifest.argv)  # Runner parser stays unchanged.
-        self.assertTrue((Path(self.details["engine"]["runroot"]) / "engine-manifest.json").is_file())
+        runroot = Path(self.details["engine"]["runroot"])
+        self.assertEqual((runroot / "engine-manifest.json").read_bytes(), self.manifest.canonical_bytes)
+        config = runroot / "podman-launch.conf"
+        self.assertEqual(config.read_bytes(), b"[containers]\ndefault_sysctls = []\n")
+        self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+        child_environment = Path(f"/proc/{actual['pid']}/environ").read_bytes().split(b"\0")
+        self.assertIn(b"CONTAINERS_CONF_OVERRIDE=" + os.fsencode(config), child_environment)
+        self.assertNotIn("CONTAINERS_CONF_OVERRIDE", executor._environment(self.manifest))
 
     def test_actual_supervisor_argv_must_equal_complete_signed_array(self):
         self.spawn()

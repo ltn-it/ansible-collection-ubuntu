@@ -102,6 +102,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 18:
+        return _validate_eighteenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 17:
         return _validate_seventeenth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 16:
@@ -165,7 +167,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
     predecessors = {1: ORIGIN_MAIN, 2: PRIOR_MAIN, 3: THIRD_MAIN, 4: FOURTH_MAIN, 5: FIFTH_MAIN,
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
-                    15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN}
+                    15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -223,6 +225,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 18:
+        return _validate_eighteenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 17:
         return _validate_seventeenth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 16:
@@ -2205,18 +2209,29 @@ def _validate_seventeenth_qualification(value):
             "continuation-seventeenth-history")
     previous = value["previous_qualification"]
     catalogue_identities = _validate_sixteenth_qualification(previous)
-    retirement = engine_policy._keys(value["retirement"], {
+    _validate_oci_retirement(value["retirement"], previous["previous_qualification"]["retirement"]["catalogues"],
+                             SEVENTEENTH_LEASE, SEVENTEENTH_RETAIN_UNTIL)
+    return catalogue_identities
+
+
+def _validate_oci_retirement(retirement, old_catalogues, lease_id, retain_until, *, bound_exit=False):
+    retirement = engine_policy._keys(retirement, {
         "original_bootstrap", "original_bank", "original_record", "new_entries", "catalogues",
         "retain_until", "journal", "storage_unique_mount_id", "namespace_cookie",
     })
-    require(type(retirement["retain_until"]) is int and retirement["retain_until"] == SEVENTEENTH_RETAIN_UNTIL,
+    require(type(retirement["retain_until"]) is int and retirement["retain_until"] == retain_until,
             "continuation-seventeenth-retention")
     for key in ("storage_unique_mount_id", "namespace_cookie"):
         engine_policy._integer(retirement[key], 1, 2**64 - 1)
-    origin = engine_policy._keys(retirement["original_record"], {"lease_id", "sha256", "unknown_effect_id"})
-    require(origin["lease_id"] == SEVENTEENTH_LEASE and type(origin["unknown_effect_id"]) is str
+    origin_fields = {"lease_id", "sha256", "unknown_effect_id"}
+    if bound_exit:
+        origin_fields.add("engine_exit_sha256")
+    origin = engine_policy._keys(retirement["original_record"], origin_fields)
+    require(origin["lease_id"] == lease_id and type(origin["unknown_effect_id"]) is str
             and ledger.ID.fullmatch(origin["unknown_effect_id"]), "continuation-seventeenth-record")
     engine_policy._hash(origin["sha256"])
+    if bound_exit:
+        engine_policy._hash(origin["engine_exit_sha256"])
     for name, digest_key in (("original_bootstrap", "sha256"), ("original_bank", "state_file_sha256")):
         pin = engine_policy._keys(retirement[name], {"path", "device", "inode", digest_key})
         engine_policy._path(pin["path"])
@@ -2227,12 +2242,13 @@ def _validate_seventeenth_qualification(value):
     engine_policy._path(journal["path"])
     names = {"complete-receipt.json", "storage-identities.json"} | {
         f"{step}-{phase}.json" for step in SEVENTEENTH_RETIREMENT_STEPS for phase in ("intent", "receipt")}
+    if bound_exit:
+        names.add("podman-container-absence.json")
     for digest in engine_policy._keys(journal["members"], names).values():
         engine_policy._hash(digest)
-    old = previous["previous_qualification"]["retirement"]["catalogues"]
-    additions = engine_policy._keys(retirement["new_entries"], set(old))
-    catalogues = engine_policy._keys(retirement["catalogues"], set(old))
-    for kind, entries in old.items():
+    additions = engine_policy._keys(retirement["new_entries"], set(old_catalogues))
+    catalogues = engine_policy._keys(retirement["catalogues"], set(old_catalogues))
+    for kind, entries in old_catalogues.items():
         entry = engine_policy._keys(additions[kind], {"name", "device", "inode", "receipt_sha256", "inventory_sha256"})
         for key in ("name", "receipt_sha256", "inventory_sha256"):
             engine_policy._hash(entry[key])
@@ -2241,4 +2257,55 @@ def _validate_seventeenth_qualification(value):
         require(entry["name"] not in entries and len(entries) < 256
                 and catalogues[kind] == {**entries, entry["name"]: entry["inventory_sha256"]},
                 "continuation-seventeenth-preserved-catalogues")
+
+
+EIGHTEENTH_MAIN = "d2490ec0841ff5c372840aae06ce75a3d5a3f627"
+EIGHTEENTH_RUN = 45195208712
+EIGHTEENTH_CHECKS = (137770183949, 137778977498)
+EIGHTEENTH_GRAPH = "d14cdb29831c56d750fbb13d9448e46e526b214165adba61221f5237920c8c11"
+EIGHTEENTH_LEASE = "1e53744b864f8c6d35e749cc448ed27e"
+EIGHTEENTH_RETAIN_UNTIL = 1795460162
+EIGHTEENTH_REASON = "terminal-original-push-after-podman-oci-retirement"
+# The original retirement stays unqualified until independently verified.
+EIGHTEENTH_QUALIFICATION = "513285fbafad0248ef7e961f812486b4cc775de35d457456add6b0a70971a710"
+EIGHTEENTH_SUCCESSOR_WORKFLOW = "b42726d328d15e39794ee1c9cc1e6a252eb3810f42e50c1c124b078295c5d50f"
+EIGHTEENTH_SUCCESSOR_REUSABLE = "8119a37204a97040f035f23ab94e3ca50345b736"
+
+
+def eighteenth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, SEVENTEENTH_SUCCESSOR_REUSABLE,
+                                       EIGHTEENTH_GRAPH, EIGHTEENTH_CHECKS, EIGHTEENTH_MAIN)
+
+
+def _validate_eighteenth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == EIGHTEENTH_REASON and engine_policy._hash(ref["sha256"]) == EIGHTEENTH_QUALIFICATION,
+            "continuation-eighteenth-qualification")
+    engine_policy._hash(EIGHTEENTH_SUCCESSOR_WORKFLOW)
+    cell_contract._commit(EIGHTEENTH_SUCCESSOR_REUSABLE)
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=EIGHTEENTH_MAIN, expected_workflow=EIGHTEENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=EIGHTEENTH_SUCCESSOR_REUSABLE, reason="continuation-eighteenth-successor")
+    require(successor["source_sha"] not in {
+                ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN,
+                FIFTEENTH_MAIN, SIXTEENTH_MAIN, SEVENTEENTH_MAIN, EIGHTEENTH_MAIN}
+            and successor["run_id"] not in {
+                ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN,
+                FIFTEENTH_RUN, SIXTEENTH_RUN, SEVENTEENTH_RUN, EIGHTEENTH_RUN},
+            "continuation-eighteenth-replay")
+    return value
+
+
+def _validate_eighteenth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_eighteenth", "previous_qualification", "retirement"})
+    require(value["purpose"] == EIGHTEENTH_REASON and ledger.digest(value) == EIGHTEENTH_QUALIFICATION
+            and ledger.digest(value["native_eighteenth"]) == EIGHTEENTH_GRAPH,
+            "continuation-eighteenth-history")
+    previous = value["previous_qualification"]
+    catalogue_identities = _validate_seventeenth_qualification(previous)
+    _validate_oci_retirement(value["retirement"], previous["retirement"]["catalogues"],
+                             EIGHTEENTH_LEASE, EIGHTEENTH_RETAIN_UNTIL, bound_exit=True)
     return catalogue_identities

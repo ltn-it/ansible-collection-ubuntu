@@ -41,6 +41,7 @@ CGROUP_ROOT = "/sys/fs/cgroup"
 SLICE_PARENT = "/lit.slice/lit-lease.slice/"
 IMAGE_CONFIG = "5b4ca16538abccb297f565dda30c511203fade0e30ff14adb439c6d2b06550fd"
 CID = re.compile(r"[0-9a-f]{64}\Z")
+LAUNCH_CONFIG = "podman-launch.conf"
 # Keep local Popen ownership while running; durable authority remains the
 # Ledger/kernel tuple, never this cache. A restart must reacquire observations.
 _PROCESSES = {}
@@ -284,6 +285,25 @@ def _environment(manifest):
     # No caller/process environment, proxies, remote engines or credentials.
     return {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C",
             "HOME": details["engine"]["runroot"], "XDG_RUNTIME_DIR": details["engine"]["runroot"], "TMPDIR": details["engine"]["runroot"]}
+
+
+def _write_launch_inputs(runroot, manifest_bytes):
+    # The joined network namespace is owned outside the mapped container user
+    # namespace. Podman 4.9's default ping_group_range cannot be written there.
+    parent = installation._open_directory(runroot)
+    try:
+        for name, content in (("engine-manifest.json", manifest_bytes),
+                              (LAUNCH_CONFIG, b"[containers]\ndefault_sysctls = []\n")):
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=parent)
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+        os.fsync(parent)
+    finally:
+        os.close(parent)
 
 
 def _command(manifest, arguments, seconds=5):
@@ -951,28 +971,17 @@ def _spawn(prepared, manifest, store, effect_id=None, *, storage_view=None):
                     and retained["state"] == "intent" and "engine_process" not in retained
                     and "engine_container_id" not in retained, "engine-spawn-effect")
         require(tuple(details["argv"]) == manifest.argv, "engine-argv-not-compiled")
-        path = details["engine"]["runroot"] + "/engine-manifest.json"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb", closefd=False) as stream:
-                stream.write(manifest.canonical_bytes)
-                stream.flush()
-                os.fsync(fd)
-        finally:
-            os.close(fd)
-        parent = installation._open_directory(details["engine"]["runroot"])
-        try:
-            os.fsync(parent)
-        finally:
-            os.close(parent)
+        runroot = details["engine"]["runroot"]
+        _write_launch_inputs(runroot, manifest.canonical_bytes)
+        environment = _environment(manifest)
+        environment["CONTAINERS_CONF_OVERRIDE"] = runroot + "/" + LAUNCH_CONFIG
         cgroup_device, cgroup_inode = _start_cgroup(details, store, prepared.lease_id)
         capture = engine_supervision.Capture(manifest, store, prepared.lease_id, effect, cgroup_device, cgroup_inode)
         from . import runtime_entry
         options = {} if storage_view is None else storage_view.spawn_options()
         with runtime_entry._spawn_adoption():
             proc = subprocess.Popen(manifest.argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=_environment(manifest), close_fds=True, start_new_session=True,
+                stderr=subprocess.PIPE, env=environment, close_fds=True, start_new_session=True,
                 umask=0o077, **options)
             _UNTRACKED_PROCESSES[proc.pid] = (proc, capture)
             owned = engine_supervision.OwnedRun(proc, None, capture, store, prepared.lease_id, effect)
