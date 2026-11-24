@@ -32,6 +32,72 @@ def seventeenth_native_capture():
     return json.loads(fixture.read_bytes())
 
 
+class EighteenthContinuationTests(unittest.TestCase):
+    def test_actual_failed_native_run_and_fresh_inventory_are_bound(self):
+        fixture = Path(__file__).parent / "fixtures/g06-eighteenth-original-terminal-projection.json"
+        capture = json.loads(fixture.read_bytes())
+        graph = capture["graph"]
+        run = graph["run"] | {"repository": capture["repository"], "referenced_workflows": [capture["controller"]]}
+        inventory = {"total_count": len(graph["jobs"]), "jobs": graph["jobs"]}
+        provider = Mock(side_effect=[run, inventory, *capture["checks"], deepcopy(inventory)])
+        self.assertEqual(run_factory._continuation_eighteenth_native(provider), graph)
+        check_path = f"/actions/runs/{cells.EIGHTEENTH_RUN}"
+        jobs_path = check_path + "/attempts/1/jobs?per_page=100&page=1"
+        self.assertEqual(provider.call_args_list, [
+            call(check_path), call(jobs_path), *[call(f"/check-runs/{identifier}") for identifier in cells.EIGHTEENTH_CHECKS],
+            call(jobs_path),
+        ])
+        changed = deepcopy(inventory)
+        next(row for row in changed["jobs"] if row["id"] == cells.EIGHTEENTH_CHECKS[0])["runner_id"] = 79
+        provider = Mock(side_effect=[run, changed, *capture["checks"], deepcopy(changed)])
+        with self.assertRaisesRegex(identity.Denied, "continuation-ninth-original-failed-graph"):
+            run_factory._continuation_eighteenth_native(provider)
+
+    def test_successor_cannot_admit_a_replay_even_when_qualification_is_published(self):
+        workflow, reusable, qualification = "a" * 64, "b" * 40, "c" * 64
+        successor = {"source_sha": "e" * 40, "run_id": 99910000001, "run_attempt": 1,
+                     "first_parent": cells.EIGHTEENTH_MAIN, "source_workflow_sha256": workflow,
+                     "reusable_sha": reusable}
+        descriptor = {"schema": 18, "reason": cells.EIGHTEENTH_REASON,
+                      "qualification": {"path": "/unit/new-qualification.json", "sha256": qualification},
+                      "successor": successor}
+        with (patch.multiple(cells, EIGHTEENTH_QUALIFICATION=qualification, EIGHTEENTH_SUCCESSOR_WORKFLOW=workflow,
+                            EIGHTEENTH_SUCCESSOR_REUSABLE=reusable)):
+            self.assertEqual(cells.validate_continuation_descriptor(descriptor, workflow, reusable), descriptor)
+            for change in ({"run_id": cells.EIGHTEENTH_RUN}, {"source_sha": cells.EIGHTEENTH_MAIN}):
+                with self.subTest(change=change), self.assertRaises(identity.Denied):
+                    cells.validate_continuation_descriptor(descriptor | {"successor": successor | change}, workflow, reusable)
+        with patch.object(cells, "EIGHTEENTH_QUALIFICATION", None), self.assertRaises(identity.Denied):
+            cells.validate_continuation_descriptor(descriptor, workflow, reusable)
+
+    def test_podman_absence_is_bound_to_the_original_exit_and_private_store(self):
+        manifest_sha256 = "a" * 64
+        empty_sha256 = hashlib.sha256(b"").hexdigest()
+        cid = "b" * 64
+        process = {"pid": 123, "start_ticks": 42, "boot_id": "a" * 36}
+        exit_info = process | {"container_id": cid, "manifest_sha256": manifest_sha256,
+                               "exit_code": 126, "signal": None, "observed_at": 200,
+                               "stdout_bytes": 0, "stdout_sha256": empty_sha256, "stdout_state": "complete",
+                               "stderr_bytes": 0, "stderr_sha256": empty_sha256, "stderr_state": "complete"}
+        effect = {"operation": "engine-start", "state": "unknown", "at": 100, "engine_process": process,
+                  "engine_capture": {"manifest_sha256": manifest_sha256, "stdout_limit": 1,
+                                     "stderr_limit": 1, "total_limit": 2},
+                  "engine_container_id": cid, "engine_exit": exit_info}
+        exit_sha256 = ledger.digest(exit_info)
+        proof = {"format": "podman-4.9-sqlite-and-containers-storage",
+                 "container_id_sha256": hashlib.sha256(cid.encode()).hexdigest(),
+                 "name": "lit-lease-" + cells.EIGHTEENTH_LEASE, "engine_exit_sha256": exit_sha256,
+                 "manifest_sha256": manifest_sha256, "container_config_rows": 0, "container_state_rows": 0,
+                 "original_id_namespace_rows": 0, "storage_container_rows": 0,
+                 "cid_file_absent": True, "host_effects": 0,
+                 "database_sha256": "c" * 64, "volatile_catalogue_sha256": "d" * 64}
+        run_factory._revalidate_oci_exit(cells.EIGHTEENTH_LEASE, effect, exit_sha256, proof)
+        for change in ({"storage_container_rows": 1}, {"cid_file_absent": False},
+                       {"container_id_sha256": "0" * 64}, {"engine_exit_sha256": "0" * 64}):
+            with self.subTest(change=change), self.assertRaisesRegex(identity.Denied, "continuation-eighteenth"):
+                run_factory._revalidate_oci_exit(cells.EIGHTEENTH_LEASE, effect, exit_sha256, proof | change)
+
+
 class SeventeenthContinuationTests(unittest.TestCase):
     def test_bootstrap_requires_all_published_pins_and_a_fresh_first_push(self):
         workflow, reusable, qualification = "a" * 64, "b" * 40, "c" * 64
