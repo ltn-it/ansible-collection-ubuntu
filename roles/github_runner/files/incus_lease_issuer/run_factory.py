@@ -273,7 +273,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 17 or receipt.get("schema") == 17:
+    if descriptor["schema"] == 18 or receipt.get("schema") == 18:
+        require(descriptor["schema"] == receipt.get("schema") == 18, "continuation-eighteenth-receipt-kind")
+    elif descriptor["schema"] == 17 or receipt.get("schema") == 17:
         require(descriptor["schema"] == receipt.get("schema") == 17, "continuation-seventeenth-receipt-kind")
     elif descriptor["schema"] == 16 or receipt.get("schema") == 16:
         require(descriptor["schema"] == receipt.get("schema") == 16, "continuation-sixteenth-receipt-kind")
@@ -778,11 +780,18 @@ def _continuation_origin_absent(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    eighteenth_catalogues = None
     seventeenth_catalogues = None
     fifteenth_catalogues = None
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 18:
+        _revalidate_eighteenth_retirement(receipt["retirement"], receipt["previous_qualification"],
+                                          bootstrap.value["ledger_path"], descriptor["successor"])
+        eighteenth_catalogues = receipt["retirement"]["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 17
     if schema == 17:
         _revalidate_seventeenth_retirement(receipt["retirement"], receipt["previous_qualification"],
                                            bootstrap.value["ledger_path"], descriptor["successor"])
@@ -833,7 +842,8 @@ def _continuation_origin_absent(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = (seventeenth_catalogues or fifteenth_catalogues or fourteenth_catalogues or thirteenth_catalogues or twelfth_catalogues
+        retired = (eighteenth_catalogues or seventeenth_catalogues or fifteenth_catalogues or fourteenth_catalogues
+                   or thirteenth_catalogues or twelfth_catalogues
                    or (retirement or receipt["retirement"])["catalogues"])
     elif schema == 8:
         require(_eighth_failed_prefix_projection(bootstrap.value["ledger_path"],
@@ -1245,20 +1255,31 @@ def _revalidate_fifteenth_retirement(retirement, previous, successor_bank=None, 
 
 
 def _seventeenth_journal(retirement, parent):
+    return _oci_retirement_journal(retirement, parent, False)
+
+
+def _eighteenth_journal(retirement, parent):
+    return _oci_retirement_journal(retirement, parent, True)
+
+
+def _oci_retirement_journal(retirement, parent, bound_exit):
     """Re-read the complete separate retirement while the original stays unknown."""
     ref = retirement["journal"]
-    run = operating_cells.SEVENTEENTH_RUN
+    run = operating_cells.EIGHTEENTH_RUN if bound_exit else operating_cells.SEVENTEENTH_RUN
+    generation = "eighteenth" if bound_exit else "seventeenth"
     require(ref["path"] == str(parent / f"runner01-original-retirement-{run}"),
             "continuation-seventeenth-journal-path")
     steps = operating_cells.SEVENTEENTH_RETIREMENT_STEPS
     names = {"complete-receipt.json", "storage-identities.json"} | _twelfth_step_files(steps)
+    if bound_exit:
+        names.add("podman-container-absence.json")
     rows = _twelfth_journal_members(ref, names)
     original = retirement["original_record"]
     expected = {"run": run, "original_lease": original["lease_id"], "original_record_sha256": original["sha256"]}
     complete = rows["complete-receipt.json"]
     floor = retirement["retain_until"]
     require(all(complete.get(key) == value for key, value in expected.items())
-            and complete.get("scope") == "exact-seventeenth-original-retirement"
+            and complete.get("scope") == f"exact-{generation}-original-retirement"
             and complete.get("retain_until") == floor
             and complete.get("original_bank_sha256") == retirement["original_bank"]["state_file_sha256"]
             and complete.get("original_unknown_preserved") is True and complete.get("original_unknown_resolved") is False
@@ -1277,10 +1298,25 @@ def _seventeenth_journal(retirement, parent):
                 and receipt.get("original_unknown_resolved") is False,
                 "continuation-seventeenth-journal-effect")
         last = receipt["at"]
+    if bound_exit:
+        absence = rows["podman-container-absence.json"]
+        require(all(absence.get(key) == value for key, value in expected.items())
+                and type(absence.get("at")) is int
+                and floor <= absence["at"] <= rows["fence-withdraw-intent.json"]["at"]
+                and absence.get("proof", {}).get("engine_exit_sha256") == original["engine_exit_sha256"],
+                "continuation-eighteenth-podman-absence")
     return rows
 
 
 def _revalidate_seventeenth_retirement(retirement, previous, successor_bank=None, successor=None):
+    return _revalidate_oci_retirement(retirement, previous, successor_bank, successor, bound_exit=False)
+
+
+def _revalidate_eighteenth_retirement(retirement, previous, successor_bank=None, successor=None):
+    return _revalidate_oci_retirement(retirement, previous, successor_bank, successor, bound_exit=True)
+
+
+def _revalidate_oci_retirement(retirement, previous, successor_bank, successor, *, bound_exit):
     """Re-read the preserved Podman startup failure and its verified native absence."""
     require((successor_bank is None) == (successor is None), "continuation-seventeenth-successor-pair")
     ref = retirement["original_bootstrap"]
@@ -1288,10 +1324,18 @@ def _revalidate_seventeenth_retirement(retirement, previous, successor_bank=None
     original = retirement["original_record"]
     old = load_bootstrap(ref["path"], ref["sha256"])
     qualified = _continuation_receipt(old.value)
-    source, run, controller, job = (operating_cells.SEVENTEENTH_MAIN, operating_cells.SEVENTEENTH_RUN,
-        operating_cells.SIXTEENTH_SUCCESSOR_REUSABLE, operating_cells.SEVENTEENTH_CHECKS[0])
+    if bound_exit:
+        source, run, controller, job = (operating_cells.EIGHTEENTH_MAIN, operating_cells.EIGHTEENTH_RUN,
+            operating_cells.SEVENTEENTH_SUCCESSOR_REUSABLE, operating_cells.EIGHTEENTH_CHECKS[0])
+        previous_schema, expected_lease = 17, operating_cells.EIGHTEENTH_LEASE
+        read_journal = _eighteenth_journal
+    else:
+        source, run, controller, job = (operating_cells.SEVENTEENTH_MAIN, operating_cells.SEVENTEENTH_RUN,
+            operating_cells.SIXTEENTH_SUCCESSOR_REUSABLE, operating_cells.SEVENTEENTH_CHECKS[0])
+        previous_schema, expected_lease = 16, operating_cells.SEVENTEENTH_LEASE
+        read_journal = _seventeenth_journal
     require(old.file_stamp[:2] == (ref["device"], ref["inode"])
-            and qualified is not None and qualified[0]["schema"] == 16 and qualified[1] == previous
+            and qualified is not None and qualified[0]["schema"] == previous_schema and qualified[1] == previous
             and (qualified[0]["successor"]["source_sha"], qualified[0]["successor"]["run_id"],
                  qualified[0]["successor"]["reusable_sha"]) == (source, run, controller)
             and old.value["ledger_path"] == bank["path"] != successor_bank,
@@ -1304,7 +1348,7 @@ def _revalidate_seventeenth_retirement(retirement, previous, successor_bank=None
     require(selected.ledger_path == bank["path"], "continuation-seventeenth-original-registry")
     config, _, _ = preparation._config(configuration.preparation_config_path, configuration.preparation_config_sha256)
     parent = Path(config.lock_path).parent
-    rows = _seventeenth_journal(retirement, parent)
+    rows = read_journal(retirement, parent)
     lease = original["lease_id"]
     with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]), ledger.Ledger(
             bank["path"], clock=time.time) as store:
@@ -1321,7 +1365,7 @@ def _revalidate_seventeenth_retirement(retirement, previous, successor_bank=None
         require(proof.sha256 == bank["state_file_sha256"] and store.lease_ids() == (lease,),
                 "continuation-seventeenth-original-bank")
         record = store.read(lease)
-        require(lease == operating_cells.SEVENTEENTH_LEASE and ledger.digest(record) == original["sha256"]
+        require(lease == expected_lease and ledger.digest(record) == original["sha256"]
                 and record["state"] == "prepared" and "owned_instance" not in record
                 and [(key, item["operation"], item["state"]) for key, item in record["effects"].items()
                      if item["state"] != "verified"] == [(original["unknown_effect_id"], "engine-start", "unknown")],
@@ -1329,13 +1373,16 @@ def _revalidate_seventeenth_retirement(retirement, previous, successor_bank=None
         effect = record["effects"][original["unknown_effect_id"]]
         terminal = record["native_terminal"]
         keep = store.read_policy(record["policy_sha256"])["retention_seconds"]
+        exit_fields = {"engine_container_id", "engine_exit"} & effect.keys()
         require("engine_capture" in effect and "engine_process" in effect
-                and not {"engine_container_id", "engine_exit"} & effect.keys()
+                and exit_fields == ({"engine_container_id", "engine_exit"} if bound_exit else set())
                 and (terminal["source_sha"], terminal["controller_sha"], terminal["run_id"], terminal["job_id"],
                      terminal["check_run_id"], terminal["run_attempt"], terminal["conclusion"])
                 == (source, controller, run, job, job, 1, "failure")
                 and keep == 14400 and terminal["completed_at"] + keep == retirement["retain_until"] <= time.time(),
                 "continuation-seventeenth-original-terminal-retention")
+        if bound_exit:
+            _revalidate_oci_exit(lease, effect, original["engine_exit_sha256"], rows["podman-container-absence.json"]["proof"])
         complete = rows["complete-receipt.json"]
         require(complete["storage_policy_sha256"] == config.storage_quota_policy_sha256
                 and complete["storage_unique_mount_id"] == retirement["storage_unique_mount_id"],
@@ -1345,8 +1392,28 @@ def _revalidate_seventeenth_retirement(retirement, previous, successor_bank=None
         after, _, after_stamp = installation._file(path, MAX_POLICY, private=True)
         require(store.read(lease) == record and (after, after_stamp) == (proof, stamp),
                 "continuation-seventeenth-original-bank-drift")
-    require(_seventeenth_journal(retirement, parent) == rows and load_bootstrap(old.path, old.sha256) == old,
+    require(read_journal(retirement, parent) == rows and load_bootstrap(old.path, old.sha256) == old,
             "continuation-seventeenth-original-read-drift")
+
+
+def _revalidate_oci_exit(lease, effect, exit_sha256, proof):
+    original_exit = effect["engine_exit"]
+    ledger._validate_engine_exit(original_exit, effect)
+    require(ledger.digest(original_exit) == exit_sha256 and original_exit["exit_code"] == 126
+            and original_exit["signal"] is None and original_exit["stdout_state"] == "complete"
+            and original_exit["stderr_state"] == "complete", "continuation-eighteenth-original-exit")
+    expected = {
+        "format": "podman-4.9-sqlite-and-containers-storage",
+        "container_id_sha256": hashlib.sha256(effect["engine_container_id"].encode()).hexdigest(),
+        "name": "lit-lease-" + lease, "engine_exit_sha256": exit_sha256,
+        "manifest_sha256": effect["engine_capture"]["manifest_sha256"],
+        "container_config_rows": 0, "container_state_rows": 0, "original_id_namespace_rows": 0,
+        "storage_container_rows": 0, "cid_file_absent": True, "host_effects": 0,
+    }
+    engine._keys(proof, set(expected) | {"database_sha256", "volatile_catalogue_sha256"})
+    require(all(type(proof[key]) is type(value) and proof[key] == value for key, value in expected.items())
+            and engine._hash(proof["database_sha256"]) and engine._hash(proof["volatile_catalogue_sha256"]),
+            "continuation-eighteenth-container-absence")
 
 
 def _revalidate_twelfth_retirement(retirement, previous, successor_bank=None, successor=None):
@@ -1725,6 +1792,10 @@ def _revalidate_sixteenth_prelease(retirement, successor_bank):
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
     generation = descriptor["schema"]
+    eighteenth = receipt if generation == 18 else None
+    if eighteenth is not None:
+        receipt = eighteenth["previous_qualification"]
+        generation = 17
     seventeenth = receipt if generation == 17 else None
     if seventeenth is not None:
         receipt = seventeenth["previous_qualification"]
@@ -1812,6 +1883,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if seventeenth is not None:
         families.append((_continuation_seventeenth_native, {}, seventeenth["native_seventeenth"],
                          "continuation-seventeenth-native-drift"))
+    if eighteenth is not None:
+        families.append((_continuation_eighteenth_native, {}, eighteenth["native_eighteenth"],
+                         "continuation-eighteenth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -2151,7 +2225,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["failed_prefix"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 16:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
@@ -2609,6 +2683,11 @@ def _continuation_sixteenth_native(get):
 def _continuation_seventeenth_native(get):
     return _terminal_family(get, operating_cells.SEVENTEENTH_RUN, operating_cells.SEVENTEENTH_CHECKS,
                             operating_cells.seventeenth_native_projection)
+
+
+def _continuation_eighteenth_native(get):
+    return _terminal_family(get, operating_cells.EIGHTEENTH_RUN, operating_cells.EIGHTEENTH_CHECKS,
+                            operating_cells.eighteenth_native_projection)
 
 
 def _terminal_family(get, run_id, check_ids, projection):
