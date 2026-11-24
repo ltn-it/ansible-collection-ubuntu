@@ -532,7 +532,7 @@ class RootIncusMutator:
             "required_fields_match" if self._matches(kind, metadata) else "conflict"),
             "metadata_sha256": hashlib.sha256(canonical(metadata)).hexdigest()}
 
-    def _delete(self, kind, operation, target, path):
+    def _verify_delete_scope(self, kind):
         metadata = self._observe(kind)
         require(metadata is not None and self._matches(kind, metadata), "mutation-delete-not-owned")
         if kind != "certificate":
@@ -544,6 +544,10 @@ class RootIncusMutator:
             users = metadata.get("used_by")
             allowed = [] if kind == "bridge" else ["/1.0/profiles/default?" + urlencode({"project": self._project.project})]
             require(type(users) is list and (not users or users == allowed), "mutation-delete-in-use")
+        return metadata
+
+    def _delete(self, kind, operation, target, path):
+        self._verify_delete_scope(kind)
         return self._mutate(operation, target, "DELETE", path)
 
     def project_delete(self):

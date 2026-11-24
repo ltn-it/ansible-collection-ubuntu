@@ -1,0 +1,6 @@
+---
+minor_changes:
+  - >-
+    github_runner - Reuse the exact Incus ownership and attachment checks for a read-only observation of failed
+    Heavy workloads after verified engine exit and worker drain. Provide a private atomic archive of the bound
+    terminal observation and complete engine captures for the same failure path.

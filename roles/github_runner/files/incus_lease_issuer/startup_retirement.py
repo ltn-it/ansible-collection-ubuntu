@@ -5,8 +5,10 @@ fresh observations. The result does not grant a successful workload or change
 any original ledger result.
 """
 
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 import uuid
 
 from . import identity, installation, ledger, policy_registry
@@ -273,6 +275,131 @@ def publish_original_archive(store, lease_id, record, failure, inventory):
     require(archived_original(str(folder), binding, record) == hashes | {"sha256": binding},
             "startup-retirement-archive-readback")
     return str(folder), binding
+
+
+def _post_engine_archive_path(store, lease_id):
+    require(os.geteuid() == 0 and type(store) is ledger.Ledger and store.owner_uid == 0
+            and type(lease_id) is str and ledger.ID.fullmatch(lease_id), "post-engine-archive-root")
+    return Path(store.path).parent / "post-engine-failures" / lease_id
+
+
+def _post_engine_archive_inputs(lease_id, record):
+    from .operating_custody import _terminal_record
+
+    terminal = record.get("native_terminal")
+    _terminal_record(terminal, record)
+    starts = [row for row in record["effects"].values() if row["operation"] == "engine-start"]
+    require(len(starts) == 1 and starts[0]["target"] == "engine:lit-lease-" + lease_id
+            and starts[0]["state"] == "verified" and terminal["conclusion"] == "failure",
+            "post-engine-archive-failed-start")
+    start, actual = starts[0], starts[0].get("engine_exit")
+    ledger._validate_engine_exit(actual, start)
+    require(actual["signal"] is None and actual["exit_code"] > 0 and actual["observed_at"] <= terminal["completed_at"]
+            and all(actual[stream + "_state"] == "complete" for stream in ("stdout", "stderr")),
+            "post-engine-archive-complete-exit")
+    documents = {"original.json": ledger.canonical(record), "terminal.json": ledger.canonical(terminal)}
+    members = {name: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in documents.items()}
+    members.update({stream + ".log": {"size": actual[stream + "_bytes"], "sha256": actual[stream + "_sha256"]}
+                    for stream in ("stdout", "stderr")})
+    manifest = {"schema": 1, "kind": "post-engine-failure", "lease_id": lease_id, "members": members}
+    return start, documents, manifest
+
+
+def _verify_post_engine_archive(folder, manifest, expected_sha256):
+    from . import engine_policy
+
+    require(ledger.digest(manifest) == expected_sha256, "post-engine-archive-manifest-binding")
+    files = manifest["members"] | {"manifest.json": {"size": len(ledger.canonical(manifest)), "sha256": expected_sha256}}
+    directory = engine_policy._directory(str(folder), private=True)
+    try:
+        original = installation._stamp(os.fstat(directory))
+        require(set(os.listdir(directory)) == set(files), "post-engine-archive-inventory")
+        stamps = {}
+        for name, expected in files.items():
+            member = os.open(name, installation.FILE_FLAGS, dir_fd=directory)
+            try:
+                proof, _, stamps[name] = installation._hash_file(
+                    member, str(folder / name), max(1, expected["size"]), private=True)
+                require(proof.size == expected["size"] and proof.sha256 == expected["sha256"],
+                        "post-engine-archive-member-drift")
+            finally:
+                os.close(member)
+        named = engine_policy._directory(str(folder), private=True)
+        try:
+            require(installation._stamp(os.fstat(named)) == original
+                    and all(installation._stamp(os.stat(name, dir_fd=directory, follow_symlinks=False)) == stamp
+                            for name, stamp in stamps.items()), "post-engine-archive-replaced")
+        finally:
+            os.close(named)
+    finally:
+        os.close(directory)
+    return str(folder), expected_sha256
+
+
+def _read_post_engine_archive(store, lease_id, expected_sha256):
+    """Read a sealed archive against the same original lease snapshot."""
+    folder = _post_engine_archive_path(store, lease_id)
+    record = store.read(lease_id)
+    _, _, manifest = _post_engine_archive_inputs(lease_id, record)
+    receipt = _verify_post_engine_archive(folder, manifest, expected_sha256)
+    require(store.read(lease_id) == record, "post-engine-archive-record-drift")
+    return receipt
+
+
+def _publish_post_engine_archive(session, owner, store):
+    """Seal the already-bound terminal result and private captures under the existing Root lock."""
+    from . import cell_contract, engine_executor, engine_policy, generation_publisher, root_session
+
+    config = root_session._require_session(session)
+    require(type(owner) is cell_contract.OwnedCellForCleanup and owner.registry.path == config.registry_path
+            and owner.registry.sha256 == config.registry_sha256, "post-engine-archive-owner")
+    lease_id = owner.lease_id
+    folder = _post_engine_archive_path(store, lease_id)
+    record = store.read(lease_id)
+    require(cell_contract.owned_cell_for_cleanup(owner.registry, owner.selector, store, lease_id) == owner,
+            "post-engine-archive-owner-drift")
+    start, documents, manifest = _post_engine_archive_inputs(lease_id, record)
+    require(start["engine_exit"]["manifest_sha256"] == owner.engine_policy_sha256
+            and record["native_terminal"]["observed_at"] <= store._now(), "post-engine-archive-exit-binding")
+    binding = ledger.digest(manifest)
+    if os.path.lexists(folder.parent):
+        bank_parent = installation._open_directory(str(folder.parent.parent))
+        try:
+            os.fsync(bank_parent)  # The original mkdir may have succeeded before its parent fsync.
+        finally:
+            os.close(bank_parent)
+    else:
+        generation_publisher._mkdir(folder.parent)
+    parent = engine_policy._directory(str(folder.parent), private=True)
+    try:
+        if os.path.lexists(folder):
+            _verify_post_engine_archive(folder, manifest, binding)
+            os.fsync(parent)
+        else:
+            prefix = "." + lease_id + "."
+            require(not any(name.startswith(prefix) for name in os.listdir(parent)), "post-engine-archive-staging-held")
+            runroot = identity.decode_json(owner.engine_descriptor_bytes)["engine"]["runroot"]
+            with TemporaryDirectory(prefix=prefix, dir=folder.parent) as temporary:
+                staged = Path(temporary)
+                for name, raw in documents.items():
+                    generation_publisher._write(staged / name, raw)
+                sources = {}
+                for stream in ("stdout", "stderr"):
+                    proof, raw, stamp = engine_executor._bound_capture_file(runroot, start, stream, keep=True)
+                    generation_publisher._write(staged / (stream + ".log"), raw)
+                    sources[stream] = proof, None, stamp
+                    del raw
+                generation_publisher._json(staged / "manifest.json", manifest)
+                _verify_post_engine_archive(staged, manifest, binding)
+                require(all(engine_executor._bound_capture_file(runroot, start, name) == proof
+                            for name, proof in sources.items()) and store.read(lease_id) == record
+                        and root_session._require_session(session) == config, "post-engine-archive-source-drift")
+                _publish_staged(staged, folder)
+        receipt = _verify_post_engine_archive(folder, manifest, binding)
+        require(store.read(lease_id) == record, "post-engine-archive-record-drift")
+        return receipt
+    finally:
+        os.close(parent)
 
 
 def publish_readback(directory, receipt):
