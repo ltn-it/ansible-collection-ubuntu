@@ -306,14 +306,15 @@ from incus_lease_issuer import (capacity, engine_graph_prune, operating_cells, o
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
-def _operating_native_terminal(registry, selector, store, lease):
+def _operating_native_terminal(registry, selector, store, lease, *, completed_at=None):
     record = store.read(lease); who, p = record["identity"], registry.select(selector).identity
     prefix = identity.API + "/repos/" + p.repository
     actor = {"id": next(iter(p.actor_ids)), "type": "User", "login": "offline-fixture"}
     job = {"id": who["job_id"], "run_id": who["run_id"], "run_attempt": 1, "head_sha": who["caller_sha"],
         "runner_id": who["runner_id"], "name": p.required_native_job_name, "status": "completed", "conclusion": "failure",
         "check_run_url": prefix + "/check-runs/" + str(who["check_run_id"]),
-        "completed_at": dt.datetime.fromtimestamp(store._now() - 1, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        "completed_at": dt.datetime.fromtimestamp(store._now() - 1 if completed_at is None else completed_at,
+                                                dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     run = {"id": who["run_id"], "run_attempt": 1, "event": "push", "head_branch": "main", "head_sha": p.caller_sha,
         "workflow_id": p.workflow_id, "path": p.workflow_path,
         "repository": {"id": p.repository_id, "full_name": p.repository, "private": False, "owner": {"id": p.owner_id}},
@@ -349,6 +350,7 @@ def _operating_snapshot(io):
 def operating_cleanup_fixture(mode):
     """Actual factory/ELF/READY/opaque proof/retention/finalizer; native HTTP/kernel modeled."""
     real_time=time.time
+    post_engine = mode == "post-engine-watchdog"
     termination=mode.startswith("termination:")
     phase=mode.removeprefix("termination:")
     CASE=("expiry-controller-loss" if phase.startswith("expiry") else
@@ -374,6 +376,8 @@ def operating_cleanup_fixture(mode):
         memcpy(ack,out,size);ack[size]=0;strcat(ack,"/control/root-operating-ready.json");
         for(int n=0;n<1000 && access(ack,F_OK);n++) usleep(10000);
         return access(ack,F_OK)==0?23:92;''')
+        if post_engine:
+            code = engines.FIXED_ENGINE_C.replace("usleep(1000000);\n    return 0;", "usleep(30000);\n    return 23;")
         if termination:
             code=code.replace('for(int n=0;n<1000 && access(ack,F_OK);n++) usleep(10000);',
                 'for(int n=0;n<10000;n++) {if(!access(ack,F_OK) || !access(stopped,F_OK)) {usleep(500000);return 23;}usleep(10000);}')
@@ -401,8 +405,9 @@ def operating_cleanup_fixture(mode):
         io.stage.stop()
         stack.enter_context(mock.patch.object(run_factory.run_intake, "stage_run_snapshot", return_value=snapshot))
         template = deepcopy(next(iter(io.helper.value["cells"].values())))
-        template.pop("matrix")
-        template.update(kind="operating", lease_seconds=900, job_timeout_seconds=5400)
+        if not post_engine:
+            template.pop("matrix")
+            template.update(kind="operating", lease_seconds=900, job_timeout_seconds=5400)
         template["engine"]["engine"] = {"executable": str(binary), "executable_sha256": digest(binary.read_bytes())}
         template["engine"]["limits"]["timeout_seconds"] = 600
         if termination and phase=="capture-failure-normal":
@@ -418,15 +423,32 @@ def operating_cleanup_fixture(mode):
         io.helper.value["preparation"]["storage_quota_policy_sha256"] = quota.quota.sha
         io.helper.value["capacity"] = {**capacity.PROFILE, "pool_quota_policy_path": str(quota.pool_quota.path),
                                       "pool_quota_policy_sha256": quota.pool_quota.sha}
-        rows = {}
-        for case in (CASE, CASE2):
-            row = deepcopy(template)
-            row.update(native_job_name="Operating custody / " + case, native_observer_job_name="Operating result / " + case,
-                       operating={"case": case, "target": operating_cells.TARGET, "image": operating_cells.IMAGE})
-            rows[operating_cells.selector(case)] = row
-        io.helper.value["cells"] = rows
-        io.helper.selector = operating_cells.selector(CASE)
-        io.helper.native.job["name"] = "Operating custody / " + CASE
+        if post_engine:
+            from incus_lease_issuer import startup_retirement
+            scenario, platform = "keycloak-heavy", operating_cells.TARGET
+            name = f"heavy / {scenario} / {platform}"
+            template.update(native_job_name=name, native_observer_job_name="Final quality / " + name)
+            template["matrix"].update(profile="heavy", scenario=scenario, target=platform,
+                                      image=operating_cells.IMAGE, instance_type="vm",
+                                      cpu_limit="1", memory_limit="2GiB", disk_limit="6GiB")
+            io.helper.selector = policy_registry.profile_selector("heavy", scenario, platform)
+            io.helper.native.job["name"] = name
+            io.helper.value["cells"] = {io.helper.selector: template}
+            with ledger.Ledger(io.helper.store_path, clock=time.time) as bank:
+                original = bank.read_policy(io.helper.value["custody_policy_sha256"])
+                io.helper.value, _ = startup_retirement.bootstrap_with_post_engine_failure_policy(
+                    io.helper.value, io.helper.selector, original)
+                startup_retirement.archive_bootstrap_policies(bank, io.helper.value, original)
+        else:
+            rows = {}
+            for case in (CASE, CASE2):
+                row = deepcopy(template)
+                row.update(native_job_name="Operating custody / " + case, native_observer_job_name="Operating result / " + case,
+                           operating={"case": case, "target": operating_cells.TARGET, "image": operating_cells.IMAGE})
+                rows[operating_cells.selector(case)] = row
+            io.helper.value["cells"] = rows
+            io.helper.selector = operating_cells.selector(CASE)
+            io.helper.native.job["name"] = "Operating custody / " + CASE
         io.helper.seal(); io.bootstrap = io.helper.bootstrap; io.selector = io.helper.selector
         io.proof, io.token = io.helper.mint()
         if termination:
@@ -444,7 +466,8 @@ def operating_cleanup_fixture(mode):
         def image_routes(server, method, path, body):
             if path.startswith("/1.0/images"):
                 if method == "GET" and path == "/1.0/images/" + operating_cells.IMAGE + "?project=default":
-                    return mutations.reply(mutations.envelope({"fingerprint": operating_cells.IMAGE, "type": "virtual-machine"}))
+                    return mutations.reply(mutations.envelope({"fingerprint": operating_cells.IMAGE, "type": "virtual-machine",
+                                                               "architecture": "x86_64", "public": False}))
                 if path.startswith("/1.0/images?project="):
                     if method == "POST":
                         assert body["source"]["protocol"] == "incus"
@@ -452,6 +475,8 @@ def operating_cleanup_fixture(mode):
                         server.resources[key] = {"fingerprint": operating_cells.IMAGE, "type": "virtual-machine",
                             "public": False, "auto_update": False, "aliases": []}
                         server.resources[path] = ["/1.0/images/" + operating_cells.IMAGE]
+                        if post_engine:
+                            server.resources["/1.0/projects/" + path.split("=", 1)[1]]["used_by"].append(key)
                         return mutations.reply(mutations.envelope({}))
                     if path not in server.resources:
                         return mutations.reply(mutations.envelope([]))
@@ -462,6 +487,8 @@ def operating_cleanup_fixture(mode):
                 server.resources.pop(path.replace("?project=","/state?project="),None)
             if method=="DELETE" and path.startswith("/1.0/images/"):
                 server.resources["/1.0/images?project="+path.split("?project=",1)[1]]=[]
+                if post_engine:
+                    server.resources["/1.0/projects/" + path.split("?project=",1)[1]]["used_by"].remove(path)
             return result
         stack.enter_context(mock.patch.object(mutations.MutationFixture, "handle", image_routes))
         receipt = preparation.prepare(configuration.preparation_config_path, configuration.preparation_config_sha256,
@@ -471,6 +498,8 @@ def operating_cleanup_fixture(mode):
         manifest = engine_policy.compile_engine_policy(prepared.engine_descriptor_path, prepared.engine_descriptor_sha256)
         server = io.pub.base.server
         target = prepared.incus
+        if post_engine:
+            return _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, prepared, manifest)
         vm_url = "/1.0/instances/" + target["instance"] + "?project=" + target["project"]
         labels = target["ownership"]
         vm = {"name": target["instance"], "type": "virtual-machine", "config": {
@@ -803,8 +832,149 @@ def observe_original_termination(mode,stack,configuration,registry,store,lease,i
     return result
 
 
+def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, prepared, manifest):
+    from incus_lease_issuer import emergency_stop, startup_retirement
+
+    server, target = io.pub.base.server, prepared.incus
+    project = target["project"]
+    private_image = "/1.0/images/" + operating_cells.IMAGE + "?project=" + project
+    default_image = private_image.replace("?project=" + project, "?project=default")
+    server.resources["/1.0/instances?project=" + project] = []
+    server.resources["/1.0/operations?project=" + project + "&recursion=1"] = {}
+    server.resources["/1.0/storage-pools/" + target["pool"] + "/volumes?recursion=1&all-projects=true"] = []
+    server.extensions += ["storage"]
+    assert private_image in server.resources
+    assert store.read_policy(store.read(lease)["policy_sha256"])["post_engine_failure_retirement"]["selector"] == io.selector
+
+    boot = store.read(lease)["worker"]["boot_id"]
+    stack.enter_context(mock.patch.object(engine_executor.kernel, "read_boot_id", return_value=boot))
+    info = io.root.stat()
+    namespace = io.root / "native-netns-fixture"
+    write(namespace, b"modeled root-owned namespace")
+    namespace_info = namespace.stat()
+    effect = store.begin(lease, "slice-create", "slice:" + lease)
+    coordinates = {"boot_id": boot, "cgroup_device": info.st_dev, "cgroup_inode": info.st_ino}
+    store.bind_engine_slice(lease, effect, **coordinates)
+    store.record(lease, effect, "verified", evidence_sha256=ledger.digest(coordinates))
+    effect = store.begin(lease, "fence-create", "fence:" + lease)
+    store.bind_fence(lease, effect, policy_sha256="d" * 64, boot_id=boot, netns_device=namespace_info.st_dev,
+                     netns_inode=namespace_info.st_ino, host_ifindex=301, peer_ifindex=2, nft_table_handle=1)
+    store.record(lease, effect, "verified", evidence_sha256="d" * 64)
+    auth = store.read(lease)["authorizations"][-1]
+    effect = store.begin(lease, "fence-renew", "fence:" + lease + ":" + auth["token_id_sha256"])
+    deadline = min(auth["valid_until"], prepared.expires_at)
+    store.bind_fence_authorization(lease, effect, authorization_sha256=ledger.digest(auth), allow_expires_at=deadline,
+        issued_boot_ns=1000000000, expires_boot_ns=1000000000 + (deadline - store._now()) * 1000000000)
+    store.record(lease, effect, "verified", evidence_sha256="d" * 64)
+    stack.enter_context(mock.patch.object(engine_executor, "_cgroup", return_value=(info.st_dev, info.st_ino)))
+    stack.enter_context(mock.patch.object(engine_executor, "_slice_active"))
+    stack.enter_context(mock.patch.object(engine_executor, "_slice_inactive"))
+    stack.enter_context(mock.patch.object(engine_executor, "_slice_manager"))
+    stack.enter_context(mock.patch.object(engine_executor, "_drained_cgroup"))
+    stack.enter_context(mock.patch.object(engine_executor, "_drained"))
+    engine_executor._spawn(prepared, manifest, store)
+    start = next(row for row in store.read(lease)["effects"].values() if row["operation"] == "engine-start")
+    owned = engine_executor._PROCESSES[start["engine_process"]["pid"]]
+    end = time.monotonic() + 5
+    while (owned.returncode is None or not owned.eof) and time.monotonic() < end:
+        owned.pump(.01)
+    assert owned.returncode == 23 and owned.eof
+    owned.record_exit()
+    owned.release()
+    for operation, label in (("engine-stop", "engine:lit-lease-"), ("fence-disable", "fence:")):
+        effect = store.begin(lease, operation, label + lease)
+        store.record(lease, effect, "verified", evidence_sha256="d" * 64)
+
+    def remove_fence(_path, _sha, _owner, journal, _worker, _config):
+        if any(row["operation"] == "fence-remove" and row["state"] == "verified"
+               for row in journal.read(lease)["effects"].values()):
+            return
+        effect = journal.begin(lease, "fence-remove", "fence:" + lease)
+        journal.record(lease, effect, "verified", evidence_sha256="e" * 64)
+
+    @contextmanager
+    def observed_quota(*_args):
+        yield
+
+    @contextmanager
+    def namespace_witness(name):
+        assert name == "lit-lease-" + lease
+        with namespace.open("rb") as handle:
+            yield handle.fileno(), os.fstat(handle.fileno())
+
+    stack.enter_context(mock.patch.object(network_fence, "verify_disabled", return_value={"admitted": 0}))
+    stack.enter_context(mock.patch.object(network_fence, "remove", side_effect=remove_fence))
+    stack.enter_context(mock.patch.object(network_fence, "_namespace_witness", side_effect=namespace_witness))
+    stack.enter_context(mock.patch.object(network_fence, "_namespace_cookie", return_value=41))
+    stack.enter_context(mock.patch.object(network_fence, "_namespace_refs_drained"))
+    stack.enter_context(mock.patch.object(cleanup_storage, "_cleanup_limits", return_value=(4096, 20)))
+    stack.enter_context(mock.patch.object(cleanup_storage, "_no_consumers"))
+    stack.enter_context(mock.patch.object(storage_quota, "acquire_existing_evidence_quota", side_effect=observed_quota))
+
+    runtime, sha = configuration.runtime_config_path, configuration.runtime_config_sha256
+    emergency_stop.RootEmergencyStop(runtime, sha).stop(registry, io.selector, store, lease)
+    _operating_native_terminal(registry, io.selector, store, lease, completed_at=store._now())
+    original = store.read(lease)
+    assert any(row["operation"] == "certificate-revoke" and row["state"] == "verified"
+               for row in original["effects"].values())
+    assert "owned_instance" not in original and "custody" not in original
+    assert original["native_terminal"]["conclusion"] == "failure"
+    assert store._now() < original["native_terminal"]["completed_at"] + 14400
+    reads = []
+    interrupted = []
+    reader = finalization.RootFinalizer.readback_post_engine_failure
+    original_refresh = cleanup_storage._reconcile_verified_postchecks
+    independent_sessions = []
+
+    def readback(finalizer, real_registry, selector, bank, real_lease, permit_sha):
+        assert bank.read(real_lease)["state"] != "closed"
+        if not interrupted:
+            interrupted.append(True)
+            raise identity.Denied("fixture-independent-readback-unavailable")
+        result = reader(finalizer, real_registry, selector, bank, real_lease, permit_sha)
+        assert bank.read(real_lease)["state"] != "closed"
+        reads.append(result)
+        return result
+
+    def refresh(session, *args, **kwargs):
+        if kwargs.get("refresh"):
+            independent_sessions.append(session)
+        return original_refresh(session, *args, **kwargs)
+
+    with (mock.patch.object(finalization.RootFinalizer, "readback_post_engine_failure", readback),
+          mock.patch.object(cleanup_storage, "_reconcile_verified_postchecks", refresh),
+          mock.patch.object(evidence_export, "export_existing",
+                            side_effect=AssertionError("failed POC cleanup cannot export test evidence"))):
+        held = operating_custody.tick_runtime(runtime, sha, configuration.manifest_sha256)
+        assert held["state"] == "HELD" and store.read(lease)["state"] != "closed"
+        assert not startup_retirement._post_engine_readback_path(store, lease).exists()
+        image_deletes = [(method, path) for method, path, *_ in server.requests if method == "DELETE"]
+        assert ("DELETE", private_image) in image_deletes
+        result = operating_custody.tick_runtime(runtime, sha, configuration.manifest_sha256)
+    closed = store.read(lease)
+    assert result == {"state": "CUSTODY_TICK_COMPLETE", "events": [], "native_acceptance": False}, result
+    assert closed["state"] == "closed" and closed["closed_at"] < original["native_terminal"]["completed_at"] + 14400
+    assert closed["native_terminal"] == original["native_terminal"]
+    assert len(reads) == 1 and len(independent_sessions) == 2 and independent_sessions[0] is not independent_sessions[1]
+    assert "uploaded_evidence" not in closed
+    effects = {row["operation"]: row for row in closed["effects"].values()}
+    assert all(effects[operation]["cleanup_postcheck_resolution"]["kind"] == "fresh-root-readback"
+               for operation in ("engine-release", "context-delete"))
+    assert effects["image-delete"]["target"] == "image:" + project + ":" + operating_cells.IMAGE
+    deletions = [path for method, path, *_ in server.requests if method == "DELETE" and path.startswith("/1.0/images/")]
+    assert deletions == [private_image]
+    assert ("GET", default_image) in [(method, path) for method, path, *_ in server.requests]
+    permit = startup_retirement._locate_post_engine_permit(store, lease)
+    proof = startup_retirement._read_post_engine_readback(store, lease, reads[0]["readback_sha256"])
+    assert proof["permit_sha256"] == permit["permit_sha256"] and not proof["native_acceptance"]
+    return closed
+
+
 @unittest.skipUnless(sys.platform=="linux" and os.geteuid()==0,"private proper-EE Root only")
 class RootAsyncImageFinalizationTests(unittest.TestCase):
+    def test_opted_in_heavy_watchdog_closes_only_after_independent_readback(self):
+        self.assertEqual(operating_cleanup_fixture("post-engine-watchdog")["state"], "closed")
+
     def test_immediate_async_image_success_closes(self):
         self.assertEqual(operating_cleanup_fixture("immediate")["ledger_state"], "closed")
 
