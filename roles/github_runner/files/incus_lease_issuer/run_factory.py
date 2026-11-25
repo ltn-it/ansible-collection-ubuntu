@@ -785,6 +785,22 @@ def _continuation_catalogue(directory, expected, descriptor, bootstrap_sha, temp
 @identity._diagnostic_step("continuation-origin")
 def _continuation_origin_absent(bootstrap, qualified):
     """Product API reads only; call outside any nested Ledger transaction."""
+    path = bootstrap.value["ledger_path"]
+    directory = installation._open_directory(path)
+    try:
+        stamp = os.fstat(directory)
+        with ledger._observe_active_continuation_bank(path, stamp.st_dev, stamp.st_ino):
+            _continuation_origin_observations(bootstrap, qualified)
+        current = installation._open_directory(path)
+        try:
+            require(os.path.samestat(stamp, os.fstat(current)), "ledger-history-bank-drift")
+        finally:
+            os.close(current)
+    finally:
+        os.close(directory)
+
+
+def _continuation_origin_observations(bootstrap, qualified):
     descriptor, receipt, counts, _ = qualified
     schema = descriptor["schema"]
     previous_bank = None
@@ -910,15 +926,18 @@ def _continuation_origin_absent(bootstrap, qualified):
                             bootstrap.value["cells"], intake=False,
                             retired=retired["native_run_configuration_catalogue"] if retired is not None else None)
     successor = descriptor["successor"]
-    with ledger.Ledger(bootstrap.value["ledger_path"], clock=time.time) as store:
-        for identifier in store.lease_ids():
-            who = store.read(identifier)["identity"]
-            require(who["run_id"] == successor["run_id"] and who["caller_sha"] == successor["source_sha"]
-                    and who["reusable_sha"] == successor["reusable_sha"], "continuation-original-or-unknown-lease")
+    _require_continuation_bank(bootstrap.value["ledger_path"], successor)
 
 
     if previous_bank is not None:
         _check_empty_previous_bank(previous_bank, bootstrap.value["ledger_path"])
+
+
+def _require_continuation_bank(path, successor):
+    with ledger.Ledger(path, clock=time.time) as store:
+        wanted = successor["run_id"], successor["source_sha"], successor["reusable_sha"]
+        require(all(actual == wanted for actual in store.continuation_identities()),
+                "continuation-original-or-unknown-lease")
 
 
 def _revalidate_fourteenth_preservation(retirement, previous, successor_bank):
