@@ -118,6 +118,32 @@ def _child_directory(spool, name):
         raise
 
 
+def _publish_once(spool, destination, name, value):
+    """Publish a complete fsynced inode without replacing an existing record."""
+    stage = _child_directory(spool, "mail-staging")
+    temporary = ".mail-" + uuid.uuid4().hex
+    saved = False
+    try:
+        watchdog._save_once(stage, temporary, value)
+        saved = True
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        if rename(stage, temporary.encode("ascii"), destination, name.encode("ascii"), 1) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, "operating-mail-exclusive-publication")
+        saved = False
+        os.fsync(destination)
+        os.fsync(stage)
+    finally:
+        try:
+            if saved:
+                os.unlink(temporary, dir_fd=stage)
+                os.fsync(stage)
+        finally:
+            os.close(stage)
+
+
 def _replace_receipt(spool, name, value, expected_stamp):
     require(watchdog._read(spool, name)[2] == expected_stamp, "operating-mail-receipt-raced")
     stage = _child_directory(spool, "mail-staging")
@@ -223,22 +249,10 @@ def _archive_confirmed(spool, config, event_id):
         expected, _ = _expected(config, event, event_id, int(time.time()))
         _validate_receipt(receipt, expected, event, int(time.time()))
         value = {"schema": 1, "alarm": event, "receipt": receipt}
-        archive, stage = _child_directory(spool, "mail-archive"), _child_directory(spool, "mail-staging")
+        archive = _child_directory(spool, "mail-archive")
         try:
-            temporary = ".mail-" + uuid.uuid4().hex
-            watchdog._save_once(stage, temporary, value)
-            # Linux exclusive rename publishes one complete inode atomically.
-            # A hard-link publish would expose nlink=2 after a crash and make
-            # the strict private-file reader reject an otherwise valid tombstone.
-            rename = ctypes.CDLL(None, use_errno=True).renameat2
-            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-            rename.restype = ctypes.c_int
-            require(rename(stage, temporary.encode("ascii"), archive,
-                    (event_id + ".json").encode("ascii"), 1) == 0, "operating-mail-archive-publication-held")
-            os.fsync(archive)
-            os.fsync(stage)
+            _publish_once(spool, archive, event_id + ".json", value)
         finally:
-            os.close(stage)
             os.close(archive)
         require(_archived(spool, config, event_id) == value, "operating-mail-archive-readback")
     _remove_archived_sources(spool, value)

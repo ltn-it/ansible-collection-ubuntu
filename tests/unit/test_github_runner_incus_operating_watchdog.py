@@ -99,6 +99,56 @@ class RootWatchdogTests(unittest.TestCase):
         self.assertEqual(alarm.stat().st_ino, inode)
         self.assertEqual(stat.S_IMODE(alarm.stat().st_mode), 0o600)
 
+    def test_interrupted_alarm_publication_leaves_binding_and_recovers_once(self):
+        import errno
+
+        self.closed.return_value = True
+        self.event = watchdog.alarm_envelope(
+            source_machine_id=MACHINE, source_boot_id=BOOT, runtime_config_sha256=self.runtime_sha,
+            snapshot_manifest_sha256="b" * 64, lease_id="c" * 32, kind="failed-cell-retained",
+            state_sha256="d" * 64, observed_at=int(time.time()))
+        complete = {"state": "CUSTODY_TICK_COMPLETE", "events": [self.event], "native_acceptance": False}
+        self.native.return_value = complete
+        alarm = self.spool / ("alarm-" + self.event["event_id"] + ".json")
+        write = os.write
+
+        def partial(fd, data):
+            if Path(os.readlink(f"/proc/self/fd/{fd}")).parent.name != "mail-staging":
+                return write(fd, data)
+            write(fd, bytes(data)[:5])
+            raise OSError(errno.EIO, "interrupted private spool write")
+
+        with mock.patch.object(watchdog.os, "write", side_effect=partial), \
+             self.assertRaisesRegex(Denied, "operating-watchdog-held"):
+            self.tick()
+        self.assertFalse(alarm.exists())
+        self.assertTrue(self.binding_path.exists())
+        self.assertEqual(len(list((self.spool / "mail-staging").iterdir())), 1)
+
+        generic = watchdog.alarm_envelope(
+            source_machine_id=MACHINE, source_boot_id=BOOT, runtime_config_sha256=self.runtime_sha,
+            snapshot_manifest_sha256="b" * 64, lease_id=None, kind="supervisor-observation-held",
+            state_sha256="e" * 64, observed_at=int(time.time()))
+        self.native.return_value = {"state": "HELD", "events": [generic], "native_acceptance": False}
+        self.tick()
+        self.assertTrue(self.binding_path.exists())
+        self.assertFalse(alarm.exists())
+        self.closed.assert_not_called()
+
+        self.native.return_value = complete
+        self.tick()
+        self.assertFalse(self.binding_path.exists())
+        self.assertEqual(alarm.read_bytes(), ledger.canonical(self.event))
+        self.assertEqual(alarm.stat().st_nlink, 1)
+
+        spool = watchdog._private_directory(str(self.spool))
+        try:
+            inode = alarm.stat().st_ino
+            self.assertEqual(watchdog._record(spool, self.event), self.event["event_id"])
+            self.assertEqual(alarm.stat().st_ino, inode)
+        finally:
+            os.close(spool)
+
     def test_exact_digest_mode_symlink_and_extra_binding_name_fail_closed(self):
         old = self.sha; self.sha = "0" * 64
         with self.assertRaises(Denied): self.tick()

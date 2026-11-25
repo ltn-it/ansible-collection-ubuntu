@@ -34,19 +34,22 @@ class FinalizationReceipt:
     receipt_sha256: str
 
 
-def _operating_evidence(runtime, registry, selector, store, owner, record, *, released):
+def _operating_evidence(runtime, registry, selector, store, owner, record, *, session, released, observation=False):
     """Seal only Root-bound operating diagnostics; never business evidence/PASS.
 
     The original private spool is the publishing intent. A partial spool is
     held, never adopted. Its completed receipt survives raw storage deletion.
     """
-    from . import engine_policy, evidence_export, operating_custody, operating_export
+    from . import engine_policy, evidence_export, operating_custody, operating_export, startup_retirement
     descriptor = identity.decode_json(owner.engine_descriptor_bytes)
     env = descriptor["environment"]
     require(env.get("QUALITY_INPUT_PROFILE") == "operating", "finalization-operating-kind")
     operating_custody.require_cleanup_allowed(store, owner.lease_id)
-    operating_custody._custody_record(record.get("custody"), record,
-                                     store.read_policy(record["policy_sha256"]))
+    policy = store.read_policy(record["policy_sha256"])
+    operating_custody._custody_record(record.get("custody"), record, policy)
+    immediate = policy["retention_seconds"] == 0
+    require(not observation or immediate and released and record["state"] == "closed",
+            "finalization-operating-spool-observation")
     terminal = record["native_terminal"]
     start_id = owner.creators["engine-start"]["id"]
     start = record["effects"][start_id]
@@ -61,6 +64,9 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
         "manifest_sha256": owner.engine_policy_sha256, "exit_sha256": ledger.digest(actual),
         "native_terminal_sha256": ledger.digest(terminal), "custody_sha256": ledger.digest(record["custody"]),
         "instance_sha256": ledger.digest(record["owned_instance"])}
+    if immediate:
+        _, binding["private_failure_archive_sha256"] = startup_retirement.preserve_custody_failure(
+            session, owner, store, record, released=released)
     directory = evidence_export._spool_directory(descriptor["engine"]["runroot"])
     parent = engine_policy._directory(str(PurePosixPath(directory).parent), private=True)
     fd = None
@@ -84,6 +90,8 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
                 record["identity"]["run_id"], record["identity"]["caller_sha"],
                 record["identity"]["reusable_sha"], owner.incus["instance"], record["owned_instance"]["uuid"])
             diagnostic = operating_export.normalize_operating(raw, expected, actual)
+            stopped = operating_custody.operating_outcome(runtime.path, runtime.sha256, registry, selector,
+                store, owner.lease_id, retained=True, session=session) if immediate else None
             with evidence_export._quota(runtime, str(PurePosixPath(directory).parent)):
                 os.mkdir(name, 0o700, dir_fd=parent)
                 os.fsync(parent)
@@ -96,6 +104,8 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
                     "diagnostic": diagnostic.value, "diagnostics_sha256": diagnostics_sha,
                     "spool": {"device": info.st_dev, "inode": info.st_ino},
                     "evidence_policy_complete": False, "quality_pass": False}
+                if immediate:
+                    value["stopped_receipt"] = stopped
                 require(engine_graph_prune._diagnostics(owner, start) == diagnostics_sha,
                         "finalization-operating-diagnostic-drift")
                 evidence_export._create(fd, "operating-finalization.json", ledger.canonical(value))
@@ -106,8 +116,14 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
             raw = evidence_export._read(fd, "operating-finalization.json", engine_policy.MAX_DESCRIPTOR)
             value = identity.decode_json(raw)
             info = os.fstat(fd)
-            require(set(value) == {"schema", "kind", "binding", "diagnostic", "diagnostics_sha256", "spool",
-                                  "evidence_policy_complete", "quality_pass"}
+            fields = {"schema", "kind", "binding", "diagnostic", "diagnostics_sha256", "spool",
+                      "evidence_policy_complete", "quality_pass"}
+            if immediate:
+                fields.add("stopped_receipt")
+                require(value.get("stopped_receipt") == operating_custody._operating_receipt(record, owner.lease_id,
+                    selector, env["QUALITY_OPERATING_CASE"], actual, policy, retained=True),
+                    "finalization-operating-stopped-receipt-drift")
+            require(set(value) == fields
                     and type(value["schema"]) is int and value["schema"] == 1
                     and value["kind"] == "operating-finalization-diagnostic" and value["binding"] == binding
                     and value["evidence_policy_complete"] is False and value["quality_pass"] is False
@@ -117,7 +133,7 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
                 from . import engine_graph_prune
                 require(value["diagnostics_sha256"] == engine_graph_prune._diagnostics(owner, start),
                         "finalization-operating-diagnostic-drift")
-            return hashlib.sha256(raw).hexdigest()
+            return value["stopped_receipt"] if observation else hashlib.sha256(raw).hexdigest()
     finally:
         if fd is not None:
             os.close(fd)
@@ -235,21 +251,20 @@ class RootFinalizer:
                     "native_acceptance": False}
 
     def _startup_scope(self, session, registry, selector, store, lease_id):
-        from . import policy_registry, startup_retirement
+        from . import startup_retirement
         owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
         config = self._fresh(session, registry, selector, store, owner)
         record = store.read(lease_id)
         policy = store.read_policy(record["policy_sha256"])
-        require(policy.get("startup_retirement") == startup_retirement.POLICY
+        require(startup_retirement.pre_vm_archive_enabled(policy)
                 and record.get("native_terminal", {}).get("conclusion") in startup_retirement.FAILURES
                 and "partial_preparation_custody" not in record, "startup-retirement-unavailable")
         descriptor = identity.decode_json(owner.engine_descriptor_bytes)
         env = descriptor["environment"]
         profile, scenario, target = (env.get("QUALITY_INPUT_" + name)
                                      for name in ("PROFILE", "SCENARIO", "TARGET"))
-        require(profile in {"heavy", "application_acceptance"}
-                and selector == policy_registry.profile_selector(profile, scenario, target),
-                "startup-retirement-business-cell")
+        require(startup_retirement.pre_vm_cell_matches(policy, selector, profile, scenario, target),
+                "startup-retirement-cell")
         return owner, config, record, policy, profile, scenario, target
 
     def archive_before_vm_authority(self, registry, selector, store, lease_id):
@@ -317,7 +332,10 @@ class RootFinalizer:
                                   self._runtime.preparation_config_sha256) as session:
             owner = cell_contract.partial_preparation_owner(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
-            self._pre_vm_archive(store, lease_id, store.read(lease_id))
+            record = store.read(lease_id)
+            archived = self._pre_vm_archive(store, lease_id, record)
+            policy = store.read_policy(record["policy_sha256"])
+            require(policy["retention_seconds"] != 0 or archived is not None, "partial-zero-wait-original-archive")
             target = owner.incus
             fingerprint = owner.creator_targets.get("certificate-create", "").removeprefix("certificate:")
             client = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
@@ -398,13 +416,19 @@ class RootFinalizer:
         owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
         config = self._fresh(session, registry, selector, store, owner)
         record = store.read(lease_id)
-        startup_retirement._post_engine_opt_in(store, record, selector)
+        policy = startup_retirement._post_engine_opt_in(store, record, selector)
+        immediate = ledger.G06_NO_WAIT_MARKER in policy
         env = identity.decode_json(owner.engine_descriptor_bytes)["environment"]
-        require(env["QUALITY_INPUT_PROFILE"] == "heavy" and selector == policy_registry.profile_selector(
-            "heavy", env["QUALITY_INPUT_SCENARIO"], env["QUALITY_INPUT_TARGET"]), "failure-observation-heavy-cell")
+        profile, scenario, target_name = (env["QUALITY_INPUT_" + key] for key in ("PROFILE", "SCENARIO", "TARGET"))
+        if immediate and profile == "operating":
+            require(selector == operating_cells.selector(env["QUALITY_OPERATING_CASE"]), "failure-observation-cell")
+        else:
+            require((profile == "heavy" or immediate and profile == "application_acceptance")
+                    and selector == policy_registry.profile_selector(profile, scenario, target_name),
+                    "failure-observation-cell")
         observed_at = store._now()
         terminal = record.get("native_terminal")
-        expected_start, _, _ = startup_retirement._post_engine_archive_inputs(lease_id, record)
+        expected_start, _, _ = startup_retirement._post_engine_archive_inputs(lease_id, record, immediate=immediate)
         slice_creator = engine_executor._slice_creator(record)
         require(slice_creator is not None and slice_creator["state"] == "verified"
                 and slice_creator["target"] == "slice:" + lease_id, "failure-observation-slice")
@@ -424,7 +448,8 @@ class RootFinalizer:
             if prefix is not None:
                 require(row["target"].startswith(prefix) and row["target"].removeprefix(prefix) in tokens,
                         "failure-observation-foreign-renewal")
-        require(terminal["observed_at"] <= observed_at and record["state"] in {"prepared", "cancelled"}
+        require(max(terminal["observed_at"], expected_start["engine_exit"]["observed_at"]) <= observed_at
+                and record["state"] in {"prepared", "cancelled"}
                 and not {"custody", "partial_preparation_custody", "owned_instance", "uploaded_evidence"} & record.keys()
                 and record.get("upload_verification", {}).get("state") != "intent"
                 and required <= operations <= required | renewal_prefixes.keys()
@@ -495,9 +520,11 @@ class RootFinalizer:
                 "post-engine-permit-root")
         with root_session._session(self._runtime.preparation_config_path,
                                    self._runtime.preparation_config_sha256) as session:
+            record = store.read(lease_id)
+            if {"owned_instance", "custody"} & record.keys():
+                return None
             owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
-            record = store.read(lease_id)
             startup_retirement._post_engine_opt_in(store, record, selector)
             archive = startup_retirement._post_engine_archive_path(owner)
             quota_directory = archive if os.path.lexists(archive) else archive.parent
@@ -508,8 +535,6 @@ class RootFinalizer:
                             and existing["scope_sha256"] == ledger.digest(owner.incus), "post-engine-permit-resume-scope")
                     require(quota_directory == archive, "post-engine-permit-archive-missing")
                     return startup_retirement._confirm_durable_post_engine_permit(store, lease_id, existing, archive)
-            if {"owned_instance", "custody"} & record.keys():
-                return None
             admin, cleanup = self._post_engine_transport(config, owner, store)
             if admin.instances():
                 project = cleanup.readback("project")
@@ -563,7 +588,10 @@ class RootFinalizer:
                 store, lease_id, permit["archive_sha256"], archive, complete=False)
         require(progress["original_sha256"] == permit["original_sha256"], "post-engine-permit-original-drift")
         record = store.read(lease_id)
-        require(ledger.digest(record) == progress["journal_sha256"], "post-engine-cleanup-journal-drift")
+        startup_retirement._post_engine_opt_in(store, record, selector)
+        require(ledger.digest(record) == progress["journal_sha256"]
+                and permit["scope_sha256"] == ledger.digest(owner.incus)
+                and permit["policy_sha256"] == record["policy_sha256"], "post-engine-cleanup-journal-drift")
         target = owner.incus
         fingerprint = owner.creator_targets["certificate-create"].removeprefix("certificate:")
         admin = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path,
@@ -705,7 +733,7 @@ class RootFinalizer:
         spool. Raw context/engine storage is never retained as a success waiver.
         """
         require(os.geteuid() == 0, "finalization-root-required")
-        from . import root_session, cleanup_storage, evidence_export, emergency_stop, operating_custody
+        from . import root_session, cleanup_storage, evidence_export, emergency_stop, operating_custody, startup_retirement
         attempted = False
         try:
             # Safety withdrawal is independent of destructive eligibility.
@@ -732,9 +760,16 @@ class RootFinalizer:
                 # a partial archive. An explicit retained read survives deletion.
                 raw_released = _effect(record, "engine-release", "engine:"+lease_id)
                 descriptor = identity.decode_json(owner.engine_descriptor_bytes)
+                policy = store.read_policy(record["policy_sha256"])
+                private_archive = None
                 if descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
                     evidence_sha = _operating_evidence(self._runtime, registry, selector, store, owner, record,
-                                                      released=raw_released is not None)
+                                                      session=session, released=raw_released is not None)
+                    if policy["retention_seconds"] == 0:
+                        private_archive = startup_retirement._post_engine_archive_path(owner)
+                elif policy["retention_seconds"] == 0 and not operating_custody.require_cleanup_allowed(store, lease_id):
+                    private_archive, evidence_sha = startup_retirement.preserve_custody_failure(
+                        session, owner, store, record, released=raw_released is not None)
                 else:
                     exported = (evidence_export.read_existing(self._runtime.path, self._runtime.sha256,
                         registry, selector, store, lease_id) if raw_released is not None else
@@ -817,9 +852,14 @@ class RootFinalizer:
                         "instance:" + target["project"] + ":" + target["instance"], "instance", cleanup.instance_delete)
                 if project_deleted is None:
                     cleanup.wait_quiet(config.operation_wait_seconds)
-                cleanup_storage.reconcile_postchecks(session, owner, store, config, cleanup)
+                if private_archive is None:
+                    cleanup_storage.reconcile_postchecks(session, owner, store, config, cleanup)
+                else:
+                    cleanup_storage._reconcile_verified_postchecks(
+                        session, owner, store, config, cleanup, private_archive=private_archive)
                 image_target = copies[0]["target"] if copies else None
-                self._release_owned_resources(session, store, owner, config, cleanup, project_deleted, image_target)
+                self._release_owned_resources(session, store, owner, config, cleanup, project_deleted, image_target,
+                                              private_archive=private_archive)
                 store.close(lease_id)
                 closed = store.read(lease_id)
                 require(closed["state"] == "closed", "finalization-close-not-observed")

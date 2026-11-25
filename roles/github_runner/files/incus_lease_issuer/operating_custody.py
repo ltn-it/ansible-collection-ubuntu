@@ -496,6 +496,15 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                     if not matches:
                         continue
                     closed = record["state"] == "closed"
+                    retained = record.get("custody")
+                    if retained is not None:
+                        policy = store.read_policy(record["policy_sha256"])
+                        if policy["retention_seconds"] == 0:
+                            # The previous spool write can have failed after
+                            # custody was saved. Return its same event even
+                            # when this tick closes the lease before publishing.
+                            _custody_record(retained, record, policy)
+                            alarm("failed-cell-retained", lease_id, {"custody": retained})
                     if closed:
                         pre_vm = record.get("partial_preparation_custody", {}).get("pre_vm_retirement")
                         if pre_vm is None:
@@ -544,10 +553,12 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                                     runtime._registry, selector, store, lease_id))
                             record = store.read(lease_id)
                             policy = store.read_policy(record["policy_sha256"])
-                            if "startup_retirement" in policy and "partial_preparation_custody" not in record:
-                                from . import startup_retirement
+                            from . import startup_retirement
+
+                            if (startup_retirement.pre_vm_archive_enabled(policy)
+                                    and "partial_preparation_custody" not in record):
                                 ordinary_floor = record["native_terminal"]["completed_at"] + policy["retention_seconds"]
-                                if store._now() < ordinary_floor:
+                                if policy["retention_seconds"] == 0 or store._now() < ordinary_floor:
                                     locator = startup_retirement.private_archive_locator(store, lease_id)
                                     if locator is None:
                                         locator = finalizer.archive_before_vm_authority(
@@ -594,17 +605,20 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                             alarm("native-status-unavailable", lease_id, {"state": "original-terminal-unavailable"})
                             continue
                     record = store.read(lease_id)
-                    if record["native_terminal"]["conclusion"] == "failure":
-                        policy = store.read_policy(record["policy_sha256"])
-                        if policy.get("post_engine_failure_retirement") == {"schema": 1, "selector": selector}:
-                            try:
-                                finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)
-                                if _retire_opted_in_engine_failure(finalizer, runtime._registry, selector,
-                                                                  store, lease_id):
-                                    continue
-                            except Exception:
-                                alarm("cleanup-unknown", lease_id, {"state": "post-engine-retirement-not-proven"})
+                    from . import startup_retirement
+
+                    policy = store.read_policy(record["policy_sha256"])
+                    failures = startup_retirement.FAILURES if ledger.G06_NO_WAIT_MARKER in policy else {"failure"}
+                    if (record["native_terminal"]["conclusion"] in failures
+                            and not {"owned_instance", "custody"} & record.keys()
+                            and startup_retirement._post_engine_enabled(policy, selector)):
+                        try:
+                            finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)
+                            if _retire_opted_in_engine_failure(finalizer, runtime._registry, selector, store, lease_id):
                                 continue
+                        except Exception:
+                            alarm("cleanup-unknown", lease_id, {"state": "post-engine-retirement-not-proven"})
+                            continue
                     try:
                         require_cleanup_allowed(store, lease_id)
                     except ledger.Denied:
@@ -621,11 +635,13 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                             except Exception:
                                 alarm("safety-withdrawal-held", lease_id, {"state": "stopped-retention-not-proven"})
                                 continue
-                        alarm("failed-cell-retained", lease_id, {"custody": retained})
-                        try:
-                            _prune_retained_graph(root_config_path, expected_sha256, runtime._registry, selector, store, lease_id)
-                        except Exception:
-                            alarm("cleanup-unknown", lease_id, {"state": "retained-cache-prune-not-proven"})
+                        if policy["retention_seconds"] != 0 or record.get("custody") is None:
+                            alarm("failed-cell-retained", lease_id, {"custody": retained})
+                        if policy["retention_seconds"] != 0:
+                            try:
+                                _prune_retained_graph(root_config_path, expected_sha256, runtime._registry, selector, store, lease_id)
+                            except Exception:
+                                alarm("cleanup-unknown", lease_id, {"state": "retained-cache-prune-not-proven"})
                         continue
                     try:
                         finalization.RootFinalizer(root_config_path, expected_sha256).finalize(
@@ -705,18 +721,26 @@ def operating_outcome(root_config_path, expected_sha256, registry, selector, sto
             _custody_record(custody, record, store.read_policy(record["policy_sha256"]))
         else:
             require(record["state"] in {"prepared", "cancelled", "retained"}, "operating-outcome-closed")
-        who = record["identity"]
-        return {"schema": 1, "kind": "operating", "case": case, "selector": selector,
-            "run_id": who["run_id"], "run_attempt": 1, "source_sha": who["caller_sha"],
-            "controller_sha": who["reusable_sha"], "lease_id": lease_id,
-            "instance_uuid": observed_owner["uuid"], "raw_exit": {"code": actual["exit_code"], "signal": actual["signal"]},
-            "vm_state": "stopped", "access": "withdrawn", "retention_seconds": store.read_policy(record["policy_sha256"])["retention_seconds"],
-            "terminal_at": custody["terminal_at"] if retained else None,
-            "retain_until": custody["retain_until"] if retained else None,
-            "cutoff": ({"kind": "authorization" if record["authorizations"][-1]["valid_until"] <= record["expires_at"] else "lease",
-                        "deadline": record["authorization_expired_at"], "observed_at": record["cancelled_at"]}
-                       if case == "expiry-controller-loss" else None),
-            "state": "retained" if retained else "safety-proved-retention-armed"}
+        return _operating_receipt(record, lease_id, selector, case, actual,
+                                  store.read_policy(record["policy_sha256"]), retained=retained)
+
+
+def _operating_receipt(record, lease_id, selector, case, actual, policy, *, retained):
+    """Project the stopped snapshot fields bound to the original ledger."""
+    who = record["identity"]
+    custody = record.get("custody")
+    return {"schema": 1, "kind": "operating", "case": case, "selector": selector,
+        "run_id": who["run_id"], "run_attempt": 1, "source_sha": who["caller_sha"],
+        "controller_sha": who["reusable_sha"], "lease_id": lease_id,
+        "instance_uuid": record["owned_instance"]["uuid"],
+        "raw_exit": {"code": actual["exit_code"], "signal": actual["signal"]},
+        "vm_state": "stopped", "access": "withdrawn", "retention_seconds": policy["retention_seconds"],
+        "terminal_at": custody["terminal_at"] if retained else None,
+        "retain_until": custody["retain_until"] if retained else None,
+        "cutoff": ({"kind": "authorization" if record["authorizations"][-1]["valid_until"] <= record["expires_at"] else "lease",
+                    "deadline": record["authorization_expired_at"], "observed_at": record["cancelled_at"]}
+                   if case == "expiry-controller-loss" else None),
+        "state": "retained" if retained else "safety-proved-retention-armed"}
 
 
 def operating_ready_tick(config_path, config_sha256, registry, selector, store, lease_id, receipt):
@@ -877,7 +901,7 @@ def _partial_custody_record(value, record, policy):
     if early:
         from . import startup_retirement
         evidence = value["pre_vm_retirement"]
-        require(policy.get("startup_retirement") == startup_retirement.POLICY
+        require(startup_retirement.pre_vm_archive_enabled(policy)
                 and type(evidence) is dict and set(evidence) == {"archive_sha256", "inventory_sha256", "original_sha256", "observed_at"}
                 and all(type(evidence[key]) is str and ledger.HEX.fullmatch(evidence[key])
                         for key in ("archive_sha256", "inventory_sha256", "original_sha256"))

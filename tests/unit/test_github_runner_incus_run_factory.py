@@ -54,6 +54,67 @@ class BoundaryTests(unittest.TestCase):
                 probe.bootstrap_custody_policies(runtime, {"policies": {base: unsafe, post: opted_in}})
 
 
+    def test_c22_cannot_reuse_the_old_controller_or_run(self):
+        from incus_lease_issuer import operating_cells as cases
+
+        successor = {
+            "source_sha": "a" * 40, "run_id": cases.TWENTY_SECOND_RUN + 1, "run_attempt": 1,
+            "first_parent": cases.TWENTY_SECOND_MAIN,
+            "source_workflow_sha256": cases.TWENTY_SECOND_SUCCESSOR_WORKFLOW,
+            "reusable_sha": cases.TWENTY_SECOND_SUCCESSOR_REUSABLE,
+        }
+        descriptor = {
+            "schema": 22, "reason": cases.TWENTY_SECOND_REASON,
+            "qualification": {"path": "/private/qualification.json", "sha256": "b" * 64},
+            "successor": successor,
+        }
+        self.assertEqual(cases.validate_continuation_descriptor(
+            descriptor, successor["source_workflow_sha256"], successor["reusable_sha"]), descriptor)
+        for changes in ({"run_id": cases.TWENTY_SECOND_RUN},
+                        {"reusable_sha": cases.NINETEENTH_SUCCESSOR_REUSABLE},
+                        {"source_workflow_sha256": cases.NINETEENTH_SUCCESSOR_WORKFLOW},
+                        {"first_parent": cases.TWENTY_FIRST_MAIN}):
+            with self.subTest(changes=changes), self.assertRaises(Denied):
+                candidate = successor | changes
+                cases.validate_continuation_descriptor(descriptor | {"successor": candidate},
+                    candidate["source_workflow_sha256"], candidate["reusable_sha"])
+
+    def test_g06_zero_wait_requires_marker_and_exact_sealed_policy(self):
+        from incus_lease_issuer import startup_retirement
+        from test_github_runner_runtime_v2_installation import probe
+
+        original = {"custodian_ref": "fixture:owner", "storage_ref": "fixture:storage", "approval_ref": "fixture:review",
+                    "retention_seconds": 14400, "max_lease_seconds": 900}
+        source = {"repository": factory.SOURCE, "repository_id": 1103407173, "owner_id": 54334171,
+                  "workflow_id": 214182490, "workflow_path": ".github/workflows/collection-ci.yml",
+                  "reusable_repository": factory.VALIDATION,
+                  "reusable_path": ".github/workflows/collection-quality-profile-isolated.yml"}
+        legacy = {"schema": 1, "custody_policy_sha256": ledger.digest(original), "source_identity": source,
+                  "source_workflow_sha256": "a" * 64, "ledger_path": "/proof/fresh/ledger", "cells": {}}
+        g06, policy = startup_retirement.bootstrap_with_g06_no_minimum_wait(legacy, original)
+        state = {"policies": startup_retirement._bootstrap_custody_rows(g06, original)}
+        self.assertEqual(state["policies"][legacy["custody_policy_sha256"]], original)
+        self.assertEqual(policy["retention_seconds"], 0)
+        probe.bootstrap_custody_policies(g06, state)
+        probe.bootstrap_custody_policies(legacy, {"policies": {ledger.digest(original): original}})
+
+        ordinary_zero = original | {"retention_seconds": 0}
+        with self.assertRaisesRegex(Denied, "invalid-custody-limits"):
+            ledger.Ledger._validate_policy(ordinary_zero)
+        with self.assertRaises(ValueError):
+            probe.bootstrap_custody_policies(legacy | {"custody_policy_sha256": ledger.digest(ordinary_zero)},
+                                             {"policies": {ledger.digest(ordinary_zero): ordinary_zero}})
+        for altered in ({"source_workflow_sha256": "b" * 64}, {"ledger_path": "/proof/other/ledger"},
+                        {"source_identity": source | {"repository_id": 1}}):
+            with self.subTest(altered=altered):
+                with self.assertRaisesRegex(Denied, "g06-no-minimum-wait-(source|policy-binding)"):
+                    startup_retirement._bootstrap_custody_rows(g06 | altered, original)
+                with self.assertRaises(ValueError):
+                    probe.bootstrap_custody_policies(g06 | altered, state)
+        with self.assertRaises(ValueError):
+            probe.bootstrap_custody_policies(g06, {"policies": {ledger.digest(original): original}})
+
+
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
 class RootBootstrapTests(unittest.TestCase):
     @classmethod
@@ -217,6 +278,56 @@ class RootBootstrapTests(unittest.TestCase):
         proof, _ = self.mint()
         self.assertEqual(proof.policy.custody_policy_sha256, ledger.digest(business))
         return proof.policy, business
+
+
+    def test_g06_scope_selects_all_new_cells_and_blocks_other_admission(self):
+        from incus_lease_issuer import startup_retirement
+        from test_github_runner_runtime_v2_installation import probe
+
+        case = next(iter(factory.operating_cells.CASES))
+        operating = factory.operating_cells.selector(case)
+        self.value["cells"][operating] = {"kind": "operating", "native_job_name": "Operating custody / " + case,
+            "native_observer_job_name": "Operating result / " + case, "lease_seconds": 900, "job_timeout_seconds": 900,
+            "github": {}, "operating": {"case": case}, "engine": {"limits": {"timeout_seconds": 600}}, "incus": {}}
+        original_sha = self.value["custody_policy_sha256"]
+        with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
+            original = store.read_policy(original_sha)
+            self.value, new_base = startup_retirement.bootstrap_with_g06_no_minimum_wait(self.value, original)
+            self.value, business = startup_retirement.bootstrap_with_business_policy(self.value, original)
+            self.value, heavy = startup_retirement.bootstrap_with_post_engine_failure_policy(
+                self.value, self.selector, original)
+            with self.assertRaisesRegex(Denied, "unknown-custody-policy"):
+                self.seal()
+            startup_retirement.archive_bootstrap_policies(store, self.value, original)
+            self.seal()
+            state = identity.decode_json((self.store_path / "state.json").read_bytes())
+            probe.bootstrap_custody_policies(self.value, state)
+            self.assertEqual(store.read_policy(original_sha), original)
+            self.assertEqual(store.read_policy(ledger.digest(business)), business)
+            for purpose in ("execution", "observer"):
+                for selector, expected in ((self.selector, heavy), (operating, new_base)):
+                    selected = factory.derive_selection(self.bootstrap, selector, crypto.CALLER_SHA, purpose=purpose)
+                    self.assertEqual(store.read_policy(selected.custody_policy_sha256), expected)
+                    self.assertEqual(expected["retention_seconds"], 0)
+            proof, _ = self.mint()
+            scope = new_base[ledger.G06_NO_WAIT_MARKER]
+            self.assertEqual(proof.policy.custody_policy_sha256, ledger.digest(heavy))
+            args = {"policy_sha256": proof.policy.custody_policy_sha256, "cell_sha256": proof.policy.template_sha256,
+                    "deadline": crypto.NOW + 120}
+            with self.assertRaisesRegex(Denied, "g06-no-minimum-wait-admission-scope"):
+                store.prepare(proof.nonce, proof.worker, proof.identity, **args)
+            args["identity_policy_sha256"] = proof.identity.policy_sha256
+            for invalid in (None, "b" * 64):
+                with self.assertRaisesRegex(Denied, "g06-no-minimum-wait-admission-scope"):
+                    store.runtime_prepare(proof.nonce, proof.worker, proof.identity, **args, g06_no_wait_scope_sha256=invalid)
+            challenge = store.runtime_challenge(proof.worker, "run", proof.policy.template_sha256,
+                                                proof.identity.policy_sha256)
+            actual = replace(proof.identity, audience=challenge["audience"])
+            admitted = store.runtime_prepare(challenge["nonce"], proof.worker, actual, **args,
+                                             g06_no_wait_scope_sha256=scope)
+            self.assertEqual(store.read(admitted)["policy_sha256"], ledger.digest(heavy))
+            with self.assertRaisesRegex(Denied, "startup-retirement-new-bank"):
+                startup_retirement.archive_bootstrap_policies(store, self.value, original)
 
     def test_post_engine_opt_in_binds_only_the_exact_heavy_cell_for_both_purposes(self):
         from incus_lease_issuer import startup_retirement

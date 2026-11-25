@@ -31,6 +31,7 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 ID = re.compile(r"[0-9a-f]{32}\Z")
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 AUDIENCE = "urn:lightning-it:legacy-incus:"
+G06_NO_WAIT_MARKER = "g06_no_minimum_wait"
 # Fixed trusted implementation path; never a request/configuration parameter.
 ENGINE_EXECUTABLE = "/usr/bin/podman"
 MAX_CAPTURE_STREAM_BYTES = 64 * 1024 * 1024
@@ -580,8 +581,13 @@ class Ledger:
     def _validate_policy(policy):
         required = {"custodian_ref", "storage_ref", "approval_ref", "retention_seconds", "max_lease_seconds"}
         require(type(policy) is dict and required <= set(policy) <= required | {
-                    "startup_retirement", "post_engine_failure_retirement"},
+                    "startup_retirement", "post_engine_failure_retirement", G06_NO_WAIT_MARKER},
                 "invalid-custody-policy")
+        g06_policy = G06_NO_WAIT_MARKER in policy
+        if g06_policy:
+            scope = policy[G06_NO_WAIT_MARKER]
+            require(type(scope) is str and HEX.fullmatch(scope) and policy["retention_seconds"] == 0,
+                    "invalid-g06-no-minimum-wait-policy")
         if "startup_retirement" in policy:
             require(policy["startup_retirement"] == "protected-pre-vm-journal-v1",
                     "invalid-startup-retirement-policy")
@@ -590,12 +596,13 @@ class Ledger:
             require(type(marker) is dict and set(marker) == {"schema", "selector"}
                     and type(marker["schema"]) is int and marker["schema"] == 1
                     and type(marker["selector"]) is str and re.fullmatch(r"cell-[0-9a-f]{64}", marker["selector"])
-                    and policy["retention_seconds"] == 14400, "invalid-post-engine-retirement-policy")
+                    and policy["retention_seconds"] == (0 if g06_policy else 14400),
+                    "invalid-post-engine-retirement-policy")
         for key in ("custodian_ref", "storage_ref", "approval_ref"):
             value = policy[key]
             require(type(value) is str and 0 < len(value) <= 512
                     and not any(ord(c) < 32 for c in value), "invalid-custody-reference")
-        require(type(policy["retention_seconds"]) is int and 0 < policy["retention_seconds"] <= 86400
+        require(type(policy["retention_seconds"]) is int and (0 if g06_policy else 1) <= policy["retention_seconds"] <= 86400
                 and type(policy["max_lease_seconds"]) is int and 0 < policy["max_lease_seconds"] <= 5400,
                 "invalid-custody-limits")
 
@@ -962,14 +969,16 @@ class Ledger:
                              cell_sha256=cell_sha256, deadline=deadline, runtime=None)
 
     def runtime_prepare(self, nonce, worker, identity, *, policy_sha256, cell_sha256, deadline,
-                        identity_policy_sha256):
+                        identity_policy_sha256, g06_no_wait_scope_sha256=None):
         scope = _runtime_scope("run", cell_sha256, identity_policy_sha256)
         require(type(identity) is Identity and identity.policy_sha256 == identity_policy_sha256,
                 "runtime-identity-policy")
         return self._prepare(nonce, worker, identity, policy_sha256=policy_sha256,
-                             cell_sha256=cell_sha256, deadline=deadline, runtime=scope)
+                             cell_sha256=cell_sha256, deadline=deadline, runtime=scope,
+                             g06_no_wait_scope_sha256=g06_no_wait_scope_sha256)
 
-    def _prepare(self, nonce, worker, identity, *, policy_sha256, cell_sha256, deadline, runtime):
+    def _prepare(self, nonce, worker, identity, *, policy_sha256, cell_sha256, deadline, runtime,
+                 g06_no_wait_scope_sha256=None):
         require(type(nonce) is str and HEX.fullmatch(nonce), "invalid-challenge")
         require(type(worker) is Worker and type(identity) is Identity, "invalid-trusted-input")
         worker.validate()
@@ -986,6 +995,8 @@ class Ledger:
         with self._transaction() as state:
             policy = state["policies"].get(policy_sha256)
             require(policy is not None and deadline <= now + policy["max_lease_seconds"], "lease-deadline")
+            require(policy.get(G06_NO_WAIT_MARKER) == g06_no_wait_scope_sha256,
+                    "g06-no-minimum-wait-admission-scope")
             record = state["challenges"].get(digest(nonce))
             require(record is not None and record["state"] == "issued" and record["expires_at"] > now
                     and record["issued_at"] <= now and record["worker"] == asdict(worker)

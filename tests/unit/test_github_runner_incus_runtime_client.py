@@ -407,6 +407,24 @@ class RootRuntimeClientTests(unittest.TestCase):
         self.assertNotIn("final-quality", output.read_text())
         self.assertFalse(self.errors)
 
+    def test_zero_wait_stopped_receipt_requires_exact_terminal_timestamp(self):
+        case = "failure"
+        finished = int(time.time()) - 1
+        receipt = {"schema": 1, "kind": "operating", "case": case, "selector": "operating-failure",
+                   "run_id": 501, "run_attempt": 1, "source_sha": "e" * 40, "controller_sha": "c" * 40,
+                   "lease_id": LEASE, "instance_uuid": "12345678-1234-1234-1234-123456789abc",
+                   "raw_exit": {"code": 23, "signal": None}, "vm_state": "stopped", "access": "withdrawn",
+                   "retention_seconds": 0, "terminal_at": finished, "retain_until": finished,
+                   "cutoff": None, "state": "closed"}
+        with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": "501", "GITHUB_SHA": "e" * 40}):
+            self.assertEqual(client._operating_receipt(receipt, case, retained=True), receipt)
+            with self.assertRaises(client.ClientDenied):
+                client._operating_receipt(dict(receipt, retain_until=finished + 1), case, retained=True)
+            with self.assertRaises(client.ClientDenied):
+                client._operating_receipt(dict(receipt, vm_state="running"), case, retained=True)
+            with self.assertRaises(client.ClientDenied):
+                client._operating_receipt(dict(receipt, state="retained"), case, retained=True)
+
     def test_check_is_local_only_no_oidc_authentication_or_lease(self):
         result = client.check()
         self.assertEqual(result["state"], "local-prerequisites-only")

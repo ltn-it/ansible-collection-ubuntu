@@ -1,0 +1,5 @@
+---
+minor_changes:
+  - >-
+    github_runner - Support a zero-wait custody policy for operating drills. Preserve the verified stopped
+    observation before cleanup so the protected report can still read that observation after closure.
