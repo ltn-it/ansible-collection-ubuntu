@@ -125,6 +125,20 @@ class InitialBudgetTests(unittest.TestCase):
                     runtime_rpc._initial_transition_budget(config, expiry, 1000)
         self.assertEqual(runtime_rpc._initial_transition_budget(self.config(None), 1600, 1000), (300, 1569))
 
+    def test_derived_initial_budget_keeps_the_full_catalogue_renewal_window(self):
+        from incus_lease_issuer import runtime_rpc
+        from incus_lease_issuer.identity import Denied
+        config = self.config()
+        with patch.object(client.time, "time", return_value=1000), \
+             patch.dict(client._CONFIGURATIONS, {"test-cell": "a" * 64}, clear=True):
+            self.assertEqual(client._heartbeat_at("test-cell", 1286), 1196)
+            self.assertEqual(client._heartbeat_at("fixed-cell", 1286), 1256)
+            self.assertEqual(client._heartbeat_at("test-cell", 1060), 1030)
+        self.assertEqual(runtime_rpc._initial_transition_budget(config, 1286, 1000, derived=True), (194, 1195))
+        self.assertEqual(runtime_rpc._initial_transition_budget(config, 1272, 1000, derived=True), (180, 1181))
+        with self.assertRaisesRegex(Denied, "runtime-initial-authorization-budget"):
+            runtime_rpc._initial_transition_budget(config, 1271, 1000, derived=True)
+
     def test_floor_cannot_raise_maximum_or_accept_malformed_clock_claim(self):
         from incus_lease_issuer import runtime_rpc
         from incus_lease_issuer.identity import Denied

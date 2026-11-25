@@ -755,10 +755,12 @@ existing 60-second idle bound; individual frames remain bounded by five seconds.
 Root policy may explicitly seal `initial_transition_minimum_seconds` between one
 and the configured initial maximum. Without it, the minimum equals the maximum.
 Before admitting a lease, Root reduces the initial allowance to the smaller of
-the configured maximum and the signed authorization remainder, retaining the
-31-second reserve and a further unwind second. Too little remaining allowance
-denies preparation. A selected minimum is an operator policy, not evidence that
-native initialization will finish within it; jobs cannot override either bound.
+the configured maximum and the signed authorization remainder. Fixed
+configurations reserve 31 seconds. Derived configurations reserve 91 seconds
+for the client to renew while Root checks the retained catalogue before and
+after resolving the configuration. Both reserve a further second for unwind.
+Too little remaining allowance denies preparation. The sealed minimum and
+maximum apply to every job.
 
 A closed two-history operating continuation retains both authenticated failed
 Main-run histories and their Root-private no-work qualification. Each opaque

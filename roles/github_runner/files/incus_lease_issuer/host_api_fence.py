@@ -161,7 +161,7 @@ def _rules(policy, deadline=0):
     return {"nftables": [{"add": row} for row in objects]}
 
 
-def _readback(policy, *, tuple_value=None, maximum_ms=0, expected_deadline=None):
+def _readback(policy, *, tuple_value=None, maximum_ms=0, expected_deadline=None, allow_expiring=False):
     """Exact table-local native1.0.9 profile; unrelated tables stay opaque.
 
     nft1.0.9 emits existing iface_index values as names even with -n. Bind
@@ -169,6 +169,8 @@ def _readback(policy, *, tuple_value=None, maximum_ms=0, expected_deadline=None)
     Timers are integer seconds, floored on output; return a lower-bound ms
     liveness value only after checking its conservative upper bound. Absolute
     time remains the independently required exact per-packet UTC deadline.
+    The continuation observer can bind the tuple in its final fractional second.
+    Its remaining lifetime lower bound is zero.
     """
     data = identity.decode_json(_nft(policy, "-n", "-j", "-T", "-a", "list", "table", "inet", policy.table))
     engine._keys(data, {"nftables"})
@@ -202,7 +204,8 @@ def _readback(policy, *, tuple_value=None, maximum_ms=0, expected_deadline=None)
                         and type(tuple_value[0]) is int and 0 < tuple_value[0] <= 4294967295
                         and value["concat"][1] == tuple_value[1]
                         and type(element["timeout"]) is int and type(element["expires"]) is int
-                        and 0 < element["expires"] <= element["timeout"] <= 5400
+                        and 0 < element["timeout"] <= 5400
+                        and (0 if allow_expiring else 1) <= element["expires"] <= element["timeout"]
                         and type(maximum_ms) is int and (element["expires"] + 1) * 1000 <= maximum_ms,
                         "host-api-tuple-timer")
                 try:

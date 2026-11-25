@@ -1965,7 +1965,8 @@ def _twelfth_host_fence(config, original_ifindex, successor_bank, successor, *,
             require(pair[0] != original_ifindex and pair[0] == creators[0]["fence"]["host_ifindex"]
                     and grant["baseline_sha256"] == baseline["baseline_sha256"],
                     "continuation-twelfth-host-fence-original-tuple")
-        handle, _, expires, deadline = host_api_fence._readback(policy, tuple_value=pair, maximum_ms=5400000)
+        handle, _, expires, deadline = host_api_fence._readback(
+            policy, tuple_value=pair, maximum_ms=5400000, allow_expiring=True)
         require(handle == baseline["nft_table_handle"]
                 and (deadline == expires == 0 or grant is not None and deadline == grant["allow_expires_at"])
                 and store.read(claimants[0]) == active
