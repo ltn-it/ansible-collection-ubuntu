@@ -180,6 +180,22 @@ def archived_original(directory, manifest_sha256, record):
     return {**manifest, "sha256": manifest_sha256}
 
 
+def pre_vm_archive_enabled(policy):
+    return policy.get("startup_retirement") == POLICY or ledger.G06_NO_WAIT_MARKER in policy
+
+
+def pre_vm_cell_matches(policy, selector, profile, scenario, target):
+    if ledger.G06_NO_WAIT_MARKER in policy and profile == "operating":
+        from . import operating_cells
+
+        prefix = "g06-operating-"
+        return (target == operating_cells.TARGET and type(scenario) is str and scenario.startswith(prefix)
+                and scenario.removeprefix(prefix) in operating_cells.CASES
+                and selector == operating_cells.selector(scenario.removeprefix(prefix)))
+    return (profile in {"heavy", "application_acceptance"}
+            and selector == policy_registry.profile_selector(profile, scenario, target))
+
+
 def effective_floor(record, policy, *, selector, profile, scenario, target, archive, observations, now):
     """Choose the minimum from the original sealed policy and the bound witnesses."""
     ledger.Ledger._validate_policy(policy)
@@ -190,8 +206,7 @@ def effective_floor(record, policy, *, selector, profile, scenario, target, arch
     _terminal_record(terminal, record)
     require(type(now) is int and terminal["completed_at"] <= now, "startup-retirement-clock")
     ordinary_floor = terminal["completed_at"] + policy["retention_seconds"]
-    if (policy.get("startup_retirement") != POLICY or profile not in {"heavy", "application_acceptance"}
-            or selector != policy_registry.profile_selector(profile, scenario, target)):
+    if not pre_vm_archive_enabled(policy) or not pre_vm_cell_matches(policy, selector, profile, scenario, target):
         return ordinary_floor
     require(record.get("state") in {"prepared", "cancelled"} and "owned_instance" not in record and "custody" not in record and terminal["conclusion"] in FAILURES,
             "startup-retirement-actual-abort")
@@ -320,7 +335,7 @@ def record_preparation_abort(store, lease_id, stage):
     path = _abort_path(store, lease_id)
     record = store.read(lease_id)
     policy = store.read_policy(record["policy_sha256"])
-    if policy.get("startup_retirement") == POLICY:
+    if pre_vm_archive_enabled(policy):
         _publish_record(path, _abort_record(lease_id, record, stage))
 
 
@@ -398,25 +413,36 @@ def _require_post_engine_archive_space(parent, manifest, capture_limit):
             "post-engine-archive-capacity")
 
 
-def _post_engine_archive_inputs(lease_id, record):
+def _post_engine_archive_inputs(lease_id, record, *, custody_failure=False, immediate=False):
     from .operating_custody import _terminal_record
 
     terminal = record.get("native_terminal")
     _terminal_record(terminal, record)
     starts = [row for row in record["effects"].values() if row["operation"] == "engine-start"]
+    failures = FAILURES if immediate else {"failure"}
     require(len(starts) == 1 and starts[0]["target"] == "engine:lit-lease-" + lease_id
-            and starts[0]["state"] == "verified" and terminal["conclusion"] == "failure",
+            and starts[0]["state"] == "verified"
+            and (record["state"] == "retained" if custody_failure else terminal["conclusion"] in failures),
             "post-engine-archive-failed-start")
     start, actual = starts[0], starts[0].get("engine_exit")
     ledger._validate_engine_exit(actual, start)
-    require(actual["signal"] is None and actual["exit_code"] > 0 and actual["observed_at"] <= terminal["completed_at"]
-            and all(actual[stream + "_state"] == "complete" for stream in ("stdout", "stderr")),
+    if custody_failure:
+        require(type(record.get("custody")) is dict, "custody-failure-archive-terminal")
+        # The native job can succeed when it correctly observes an intentional
+        # negative engine outcome. Preserve that result separately from the exit.
+    elif immediate:
+        require(actual["signal"] is not None or actual["exit_code"] > 0, "post-engine-archive-complete-exit")
+    else:
+        require(actual["signal"] is None and actual["exit_code"] > 0
+                and actual["observed_at"] <= terminal["completed_at"], "post-engine-archive-complete-exit")
+    require(all(actual[stream + "_state"] == "complete" for stream in ("stdout", "stderr")),
             "post-engine-archive-complete-exit")
     documents = {"original.json": ledger.canonical(record), "terminal.json": ledger.canonical(terminal)}
     members = {name: {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in documents.items()}
     members.update({stream + ".log": {"size": actual[stream + "_bytes"], "sha256": actual[stream + "_sha256"]}
                     for stream in ("stdout", "stderr")})
-    manifest = {"schema": 1, "kind": "post-engine-failure", "lease_id": lease_id, "members": members}
+    kind = "custody-failure" if custody_failure else "post-engine-failure"
+    manifest = {"schema": 1, "kind": kind, "lease_id": lease_id, "members": members}
     return start, documents, manifest
 
 
@@ -454,7 +480,8 @@ def _verify_post_engine_archive(folder, manifest, expected_sha256):
 def _read_post_engine_archive(store, lease_id, expected_sha256, archive):
     """Read a sealed archive against the same original lease snapshot."""
     record = store.read(lease_id)
-    _, _, manifest = _post_engine_archive_inputs(lease_id, record)
+    immediate = ledger.G06_NO_WAIT_MARKER in store.read_policy(record["policy_sha256"])
+    _, _, manifest = _post_engine_archive_inputs(lease_id, record, immediate=immediate)
     receipt = _verify_post_engine_archive(archive, manifest, expected_sha256)
     require(store.read(lease_id) == record, "post-engine-archive-record-drift")
     return receipt
@@ -464,7 +491,8 @@ def _read_post_engine_cleanup_journal(store, lease_id, archive_sha256, archive, 
     """Accept only verified cleanup entries for the exact archived creators."""
     _, raw, _ = installation._file(str(archive / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
     original = identity.decode_json(raw)
-    _, _, manifest = _post_engine_archive_inputs(lease_id, original)
+    immediate = ledger.G06_NO_WAIT_MARKER in store.read_policy(original["policy_sha256"])
+    _, _, manifest = _post_engine_archive_inputs(lease_id, original, immediate=immediate)
     _verify_post_engine_archive(archive, manifest, archive_sha256)
 
     record = store.read(lease_id)
@@ -548,7 +576,7 @@ def _publish_post_engine_readback(store, lease_id, value):
     return digest
 
 
-def _publish_post_engine_archive(session, owner, store):
+def _publish_post_engine_archive(session, owner, store, *, custody_failure=False):
     """Seal the already-bound terminal result and private captures under the existing Root lock."""
     from . import cell_contract, engine_executor, engine_policy, generation_publisher, root_session
 
@@ -560,8 +588,11 @@ def _publish_post_engine_archive(session, owner, store):
     record = store.read(lease_id)
     require(cell_contract.owned_cell_for_cleanup(owner.registry, owner.selector, store, lease_id) == owner,
             "post-engine-archive-owner-drift")
-    start, documents, manifest = _post_engine_archive_inputs(lease_id, record)
+    immediate = ledger.G06_NO_WAIT_MARKER in store.read_policy(record["policy_sha256"])
+    start, documents, manifest = _post_engine_archive_inputs(
+        lease_id, record, custody_failure=custody_failure, immediate=immediate)
     require(start["engine_exit"]["manifest_sha256"] == owner.engine_policy_sha256
+            and start["engine_exit"]["observed_at"] <= store._now()
             and record["native_terminal"]["observed_at"] <= store._now(), "post-engine-archive-exit-binding")
     binding = ledger.digest(manifest)
     with _post_engine_evidence_quota(config, folder.parent):
@@ -598,6 +629,36 @@ def _publish_post_engine_archive(session, owner, store):
             os.close(parent)
 
 
+def preserve_custody_failure(session, owner, store, record, *, released):
+    """Verify the exact original capture before release and after raw paths go away."""
+    from . import operating_custody, root_session
+
+    config = root_session._require_session(session)
+    lease_id = owner.lease_id
+    policy = store.read_policy(record["policy_sha256"])
+    require(policy["retention_seconds"] == 0 and ledger.G06_NO_WAIT_MARKER in policy
+            and store.read(lease_id) == record, "custody-failure-archive-policy")
+    operating_custody._custody_record(record.get("custody"), record, policy)
+    path = _post_engine_archive_path(owner)
+    if not os.path.lexists(path):
+        require(not released and record["state"] == "retained", "custody-failure-archive-missing")
+        _publish_post_engine_archive(session, owner, store, custody_failure=True)
+    with _post_engine_evidence_quota(config, path):
+        _, raw, _ = installation._file(str(path / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
+        original = identity.decode_json(raw)
+        fields = ("identity", "cell_sha256", "policy_sha256", "native_terminal", "custody", "owned_instance")
+        require(raw == ledger.canonical(original) and all(original[key] == record[key] for key in fields),
+                "custody-failure-archive-original-drift")
+        operating_custody._custody_record(original["custody"], original, policy)
+        start, _, manifest = _post_engine_archive_inputs(lease_id, original, custody_failure=True)
+        require(start == record["effects"][owner.creators["engine-start"]["id"]],
+                "custody-failure-archive-capture-drift")
+        _, digest = _verify_post_engine_archive(path, manifest, ledger.digest(manifest))
+        require(store.read(lease_id) == record and root_session._require_session(session) == config,
+                "custody-failure-archive-current-drift")
+    return path, digest
+
+
 _POST_ENGINE_OBSERVATION_FIELDS = frozenset({
     "lease_id", "original_sha256", "terminal_sha256", "scope_sha256", "census_sha256",
     "policy_sha256", "image_effect_sha256", "default_image_sha256", "observed_at",
@@ -609,12 +670,17 @@ def _post_engine_permit_path(store, lease_id):
     return archive.with_name(lease_id + ".permit.json")
 
 
+def _post_engine_enabled(policy, selector):
+    return (ledger.G06_NO_WAIT_MARKER in policy
+            or policy.get("post_engine_failure_retirement") == {"schema": 1, "selector": selector})
+
+
 def _post_engine_opt_in(store, record, selector):
     policy = store.read_policy(record["policy_sha256"])
     ledger.Ledger._validate_policy(policy)
-    require(ledger.digest(policy) == record["policy_sha256"]
-            and policy.get("post_engine_failure_retirement") == {"schema": 1, "selector": selector},
+    require(ledger.digest(policy) == record["policy_sha256"] and _post_engine_enabled(policy, selector),
             "post-engine-permit-policy")
+    return policy
 
 
 def _decode_post_engine_permit(store, lease_id, raw, permit_sha256, archive):
@@ -631,12 +697,12 @@ def _decode_post_engine_permit(store, lease_id, raw, permit_sha256, archive):
             "post-engine-permit-content")
     proof, original_raw, _ = installation._file(str(archive / "original.json"), MAX_ARCHIVE_MEMBER, private=True, keep=True)
     original = identity.decode_json(original_raw)
-    _, _, manifest = _post_engine_archive_inputs(lease_id, original)
-    _verify_post_engine_archive(archive, manifest, permit["archive_sha256"])
     policy = store.read_policy(original["policy_sha256"])
     marker = policy.get("post_engine_failure_retirement")
-    require(type(marker) is dict, "post-engine-permit-policy")
-    _post_engine_opt_in(store, original, marker.get("selector"))
+    _post_engine_opt_in(store, original, (marker or {}).get("selector"))
+    _, _, manifest = _post_engine_archive_inputs(
+        lease_id, original, immediate=ledger.G06_NO_WAIT_MARKER in policy)
+    _verify_post_engine_archive(archive, manifest, permit["archive_sha256"])
     image = [row for row in original["effects"].values() if row["operation"] == "image-copy"]
     require(proof.sha256 == permit["original_sha256"] and original["policy_sha256"] == permit["policy_sha256"]
             and permit["terminal_sha256"] == ledger.digest(original["native_terminal"])

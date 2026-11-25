@@ -131,6 +131,8 @@ def _lock(directory, name):
 
 
 def _record(spool, value):
+    from . import operating_local_mail
+
     event_fields(value)
     try:
         archive = os.open("mail-archive", installation.DIR_FLAGS, dir_fd=spool)
@@ -164,16 +166,18 @@ def _record(spool, value):
                             "dispatch_at": receipt["dispatch_at"], "phase": "MAILBOX_CONFIRMED",
                             "local_mailbox_confirmed": True, "personal_acknowledged": False,
                             "capacity_released": False}, "watchdog-mail-archive-receipt")
+                os.fsync(archive)
                 return original["event_id"]
         finally:
             os.close(archive)
     name = "alarm-" + value["event_id"] + ".json"
     try:
-        _save_once(spool, name, value)
+        operating_local_mail._publish_once(spool, spool, name, value)
     except FileExistsError:
         previous = event_fields(_read(spool, name)[0])
         require(previous == {**value, "observed_at": previous["observed_at"]}
                 and previous["observed_at"] <= value["observed_at"], "watchdog-event-drift")
+        os.fsync(spool)
     return value["event_id"]
 
 

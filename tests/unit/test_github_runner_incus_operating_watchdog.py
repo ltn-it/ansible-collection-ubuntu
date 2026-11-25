@@ -99,6 +99,39 @@ class RootWatchdogTests(unittest.TestCase):
         self.assertEqual(alarm.stat().st_ino, inode)
         self.assertEqual(stat.S_IMODE(alarm.stat().st_mode), 0o600)
 
+    def test_interrupted_alarm_publication_leaves_binding_and_recovers_once(self):
+        import errno
+
+        self.closed.return_value = True
+        alarm = self.spool / ("alarm-" + self.event["event_id"] + ".json")
+        write = os.write
+
+        def partial(fd, data):
+            if Path(os.readlink(f"/proc/self/fd/{fd}")).parent.name != "mail-staging":
+                return write(fd, data)
+            write(fd, bytes(data)[:5])
+            raise OSError(errno.EIO, "interrupted private spool write")
+
+        with mock.patch.object(watchdog.os, "write", side_effect=partial), \
+             self.assertRaisesRegex(Denied, "operating-watchdog-held"):
+            self.tick()
+        self.assertFalse(alarm.exists())
+        self.assertTrue(self.binding_path.exists())
+        self.assertEqual(len(list((self.spool / "mail-staging").iterdir())), 1)
+
+        self.tick()
+        self.assertFalse(self.binding_path.exists())
+        self.assertEqual(alarm.read_bytes(), ledger.canonical(self.event))
+        self.assertEqual(alarm.stat().st_nlink, 1)
+
+        spool = watchdog._private_directory(str(self.spool))
+        try:
+            inode = alarm.stat().st_ino
+            self.assertEqual(watchdog._record(spool, self.event), self.event["event_id"])
+            self.assertEqual(alarm.stat().st_ino, inode)
+        finally:
+            os.close(spool)
+
     def test_exact_digest_mode_symlink_and_extra_binding_name_fail_closed(self):
         old = self.sha; self.sha = "0" * 64
         with self.assertRaises(Denied): self.tick()

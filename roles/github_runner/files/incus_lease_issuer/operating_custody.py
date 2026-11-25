@@ -554,10 +554,12 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                                     runtime._registry, selector, store, lease_id))
                             record = store.read(lease_id)
                             policy = store.read_policy(record["policy_sha256"])
-                            if "startup_retirement" in policy and "partial_preparation_custody" not in record:
-                                from . import startup_retirement
+                            from . import startup_retirement
+
+                            if (startup_retirement.pre_vm_archive_enabled(policy)
+                                    and "partial_preparation_custody" not in record):
                                 ordinary_floor = record["native_terminal"]["completed_at"] + policy["retention_seconds"]
-                                if store._now() < ordinary_floor:
+                                if policy["retention_seconds"] == 0 or store._now() < ordinary_floor:
                                     locator = startup_retirement.private_archive_locator(store, lease_id)
                                     if locator is None:
                                         locator = finalizer.archive_before_vm_authority(
@@ -604,17 +606,19 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                             alarm("native-status-unavailable", lease_id, {"state": "original-terminal-unavailable"})
                             continue
                     record = store.read(lease_id)
-                    if record["native_terminal"]["conclusion"] == "failure":
-                        policy = store.read_policy(record["policy_sha256"])
-                        if policy.get("post_engine_failure_retirement") == {"schema": 1, "selector": selector}:
-                            try:
-                                finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)
-                                if _retire_opted_in_engine_failure(finalizer, runtime._registry, selector,
-                                                                  store, lease_id):
-                                    continue
-                            except Exception:
-                                alarm("cleanup-unknown", lease_id, {"state": "post-engine-retirement-not-proven"})
+                    from . import startup_retirement
+
+                    policy = store.read_policy(record["policy_sha256"])
+                    failures = startup_retirement.FAILURES if ledger.G06_NO_WAIT_MARKER in policy else {"failure"}
+                    if (record["native_terminal"]["conclusion"] in failures
+                            and startup_retirement._post_engine_enabled(policy, selector)):
+                        try:
+                            finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)
+                            if _retire_opted_in_engine_failure(finalizer, runtime._registry, selector, store, lease_id):
                                 continue
+                        except Exception:
+                            alarm("cleanup-unknown", lease_id, {"state": "post-engine-retirement-not-proven"})
+                            continue
                     try:
                         require_cleanup_allowed(store, lease_id)
                     except ledger.Denied:
@@ -632,10 +636,11 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                                 alarm("safety-withdrawal-held", lease_id, {"state": "stopped-retention-not-proven"})
                                 continue
                         alarm("failed-cell-retained", lease_id, {"custody": retained})
-                        try:
-                            _prune_retained_graph(root_config_path, expected_sha256, runtime._registry, selector, store, lease_id)
-                        except Exception:
-                            alarm("cleanup-unknown", lease_id, {"state": "retained-cache-prune-not-proven"})
+                        if policy["retention_seconds"] != 0:
+                            try:
+                                _prune_retained_graph(root_config_path, expected_sha256, runtime._registry, selector, store, lease_id)
+                            except Exception:
+                                alarm("cleanup-unknown", lease_id, {"state": "retained-cache-prune-not-proven"})
                         continue
                     try:
                         finalization.RootFinalizer(root_config_path, expected_sha256).finalize(
@@ -895,7 +900,7 @@ def _partial_custody_record(value, record, policy):
     if early:
         from . import startup_retirement
         evidence = value["pre_vm_retirement"]
-        require(policy.get("startup_retirement") == startup_retirement.POLICY
+        require(startup_retirement.pre_vm_archive_enabled(policy)
                 and type(evidence) is dict and set(evidence) == {"archive_sha256", "inventory_sha256", "original_sha256", "observed_at"}
                 and all(type(evidence[key]) is str and ledger.HEX.fullmatch(evidence[key])
                         for key in ("archive_sha256", "inventory_sha256", "original_sha256"))

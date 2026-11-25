@@ -403,9 +403,11 @@ class RootOperatingFinalizationTests(unittest.TestCase):
 
     def test_zero_wait_seals_stop_before_cleanup_and_reads_it_after_closure(self):
         from contextlib import nullcontext
+        import hashlib
+        import shutil
 
         import test_github_runner_incus_engine_graph_prune as fixtures
-        from incus_lease_issuer import evidence_export, identity, ledger, operating_custody, runtime_rpc
+        from incus_lease_issuer import evidence_export, identity, ledger, operating_custody, runtime_rpc, startup_retirement
 
         helper = fixtures.RootGraphPruneTests()
         self.addCleanup(helper.doCleanups)
@@ -428,8 +430,11 @@ class RootOperatingFinalizationTests(unittest.TestCase):
         record = helper.store.read(helper.lease)
         self.assertEqual(record["custody"]["terminal_at"], record["custody"]["retain_until"])
         self.assertFalse(operating_custody.require_cleanup_allowed(helper.store, helper.lease))
+        archive = helper.spool.with_suffix(".private")
         with helper.model(), helper.session() as (owner, _config, session), \
-             mock.patch.object(evidence_export, "_quota", side_effect=lambda *_: nullcontext()):
+             mock.patch.object(evidence_export, "_quota", side_effect=lambda *_: nullcontext()), \
+             mock.patch.object(startup_retirement, "_post_engine_archive_path", return_value=archive), \
+             mock.patch.object(startup_retirement, "_post_engine_evidence_quota", side_effect=lambda *_: nullcontext()):
             inputs = (runtime, helper.registry, fixtures.ready_fixtures.SELECTOR, helper.store, owner)
             digest = finalization._operating_evidence(*inputs, record, session=session, released=False)
             path = helper.spool / "operating-finalization.json"
@@ -437,10 +442,24 @@ class RootOperatingFinalizationTests(unittest.TestCase):
             self.assertEqual(ledger.digest(data), digest)
             self.assertEqual(data["stopped_receipt"]["instance_uuid"], record["owned_instance"]["uuid"])
             self.assertIs(data["quality_pass"], False)
+            manifest_bytes = (archive / "manifest.json").read_bytes()
+            self.assertEqual(data["binding"]["private_failure_archive_sha256"], hashlib.sha256(manifest_bytes).hexdigest())
+            self.assertEqual((archive / "original.json").read_bytes(), ledger.canonical(record))
+            self.assertEqual((archive / "terminal.json").read_bytes(), ledger.canonical(record["native_terminal"]))
+            actual = record["effects"][owner.creators["engine-start"]["id"]]["engine_exit"]
+            for stream in ("stdout", "stderr"):
+                captured = (archive / (stream + ".log")).read_bytes()
+                self.assertEqual(len(captured), actual[stream + "_bytes"])
+                self.assertEqual(hashlib.sha256(captured).hexdigest(), actual[stream + "_sha256"])
+            shutil.rmtree(helper.io.descriptor["engine"]["runroot"])
             closed = dict(record, state="closed", closed_at=helper.store._now())
-            replay = finalization._operating_evidence(*inputs, closed, session=session, released=True, observation=True)
-            self.assertEqual(replay, data["stopped_receipt"])
-            data["stopped_receipt"]["instance_uuid"] = "00000000-0000-0000-0000-000000000000"
-            path.write_bytes(ledger.canonical(data))
-            with self.assertRaisesRegex(ValueError, "finalization-operating-stopped-receipt-drift"):
-                finalization._operating_evidence(*inputs, closed, session=session, released=True, observation=True)
+            with mock.patch.object(helper.store, "read", return_value=closed):
+                replay = finalization._operating_evidence(*inputs, closed, session=session, released=True, observation=True)
+                self.assertEqual(replay, data["stopped_receipt"])
+                data["stopped_receipt"]["instance_uuid"] = "00000000-0000-0000-0000-000000000000"
+                path.write_bytes(ledger.canonical(data))
+                with self.assertRaisesRegex(ValueError, "finalization-operating-stopped-receipt-drift"):
+                    finalization._operating_evidence(*inputs, closed, session=session, released=True, observation=True)
+                (archive / "stdout.log").write_bytes(b"altered")
+                with self.assertRaisesRegex(ValueError, "post-engine-archive-member-drift|installation-file-limit"):
+                    finalization._operating_evidence(*inputs, closed, session=session, released=True, observation=True)

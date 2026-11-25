@@ -56,6 +56,23 @@ class StartupRetirementTests(unittest.TestCase):
         self.assertEqual(self.floor(), 499)
         self.assertEqual(self.record, original)
 
+    def test_zero_wait_operating_uses_the_same_pre_authority_proof(self):
+        from incus_lease_issuer import operating_cells
+
+        self.policy = {**self.policy, "retention_seconds": 0, ledger.G06_NO_WAIT_MARKER: "7" * 64}
+        self.policy.pop("startup_retirement")
+        self.record["policy_sha256"] = ledger.digest(self.policy)
+        self.refresh_bindings()
+        self.assertEqual(startup_retirement.effective_floor(self.record, self.policy,
+            selector=operating_cells.selector("broker-cancel"), profile="operating",
+            scenario="g06-operating-broker-cancel", target=operating_cells.TARGET,
+            archive=self.archive, observations=self.observations, now=self.now), self.observations["at"])
+        with self.assertRaisesRegex(identity.Denied, "startup-retirement-fresh-scope"):
+            startup_retirement.effective_floor(self.record, self.policy,
+                selector=operating_cells.selector("broker-cancel"), profile="operating",
+                scenario="g06-operating-broker-cancel", target=operating_cells.TARGET,
+                archive=self.archive, observations=self.observations | {"active_consumers": 1}, now=self.now)
+
     def test_previous_bound_lease_keeps_four_hours(self):
         self.policy.pop("startup_retirement")
         self.record["policy_sha256"] = ledger.digest(self.policy)
@@ -311,6 +328,7 @@ class PostEngineArchiveTests(unittest.TestCase):
         self.store = self.enterContext(ledger.Ledger(str(bank), clock=lambda: 500))
         binding = StartupRetirementTests()
         binding.setUp()
+        self.store.archive_policy(binding.policy)
         self.record = binding.record
         capture = {"manifest_sha256": manifest_sha, "total_limit": 64}
         process = {"pid": 10, "start_ticks": 11, "boot_id": "22ee1b5a-fee8-4294-bf0b-4a151df0876d"}
@@ -385,6 +403,30 @@ class PostEngineArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(identity.Denied, "post-engine-permit-observation-drift"):
             startup_retirement._require_post_engine_observation(permit, observation, 1000)
         startup_retirement._require_post_engine_observation(permit, observation | {"observed_at": 498}, 500)
+
+    def test_no_wait_permit_archives_a_signalled_engine_after_native_cancel(self):
+        import dataclasses
+        from incus_lease_issuer import operating_cells
+
+        self.owner = dataclasses.replace(self.owner, selector=operating_cells.selector("broker-cancel"))
+        policy = self.store.read_policy(self.record["policy_sha256"])
+        original = deepcopy(self.record)
+        self.record["native_terminal"]["conclusion"] = "cancelled"
+        self.record["effects"]["c" * 32]["engine_exit"].update(exit_code=None, signal=15, observed_at=450)
+        with self.assertRaisesRegex(identity.Denied, "post-engine-archive-failed-start"):
+            self.publish()
+        scope = policy | {"retention_seconds": 0, ledger.G06_NO_WAIT_MARKER: "7" * 64}
+        self.record["policy_sha256"] = self.store.archive_policy(scope)
+        observation = {"lease_id": self.lease, "original_sha256": ledger.digest(self.record),
+                       "terminal_sha256": ledger.digest(self.record["native_terminal"]),
+                       "scope_sha256": ledger.digest(self.owner.incus), "census_sha256": "9" * 64,
+                       "policy_sha256": self.record["policy_sha256"], "image_effect_sha256": None,
+                       "default_image_sha256": None, "observed_at": 490}
+        permit = startup_retirement._publish_post_engine_permit(None, self.owner, self.store, observation)
+        self.assertEqual(self.locate_permit(), permit)
+        self.assertEqual((self.folder / "terminal.json").read_bytes(), ledger.canonical(self.record["native_terminal"]))
+        self.assertEqual((self.folder / "stdout.log").read_bytes(), self.logs["stdout.log"])
+        self.assertEqual(self.store.read_policy(original["policy_sha256"]), policy)
 
     def test_corrupt_or_uncommitted_permit_cannot_be_interpreted_as_an_absent_permit(self):
         observation = self.permit_observation()
