@@ -149,6 +149,8 @@ class OperatingCellTests(unittest.TestCase):
                        {"sha": sha, "parents": [{"sha": cells.INITIAL_MAIN}] * 2}):
             with self.assertRaises(Denied): cells.validate_initial_main(commit, sha)
 
+    @patch.object(cells, "TWENTY_THIRD_SUCCESSOR_WORKFLOW", "8" * 64)
+    @patch.object(cells, "TWENTY_THIRD_SUCCESSOR_REUSABLE", "7" * 40)
     def test_closed_native_failure_accepts_only_a_new_exact_successor(self):
         original = {
             "schema": 23, "reason": cells.TWENTY_THIRD_REASON,
@@ -164,7 +166,9 @@ class OperatingCellTests(unittest.TestCase):
         controller = original["successor"]["reusable_sha"]
         cells.validate_continuation_commit(commit, original, caller, run, controller)
         for field, bad in (("run_id", cells.TWENTY_THIRD_RUN), ("run_attempt", 2),
-                           ("first_parent", cells.TWENTY_SECOND_MAIN), ("source_sha", cells.TWENTY_THIRD_MAIN)):
+                           ("first_parent", cells.TWENTY_SECOND_MAIN), ("source_sha", cells.TWENTY_THIRD_MAIN),
+                           ("source_workflow_sha256", cells.TWENTY_SECOND_SUCCESSOR_WORKFLOW),
+                           ("reusable_sha", cells.TWENTY_SECOND_SUCCESSOR_REUSABLE)):
             changed = deepcopy(original)
             changed["successor"][field] = bad
             with self.subTest(field=field), self.assertRaises(Denied):
@@ -177,10 +181,15 @@ class OperatingCellTests(unittest.TestCase):
         previous = deepcopy(original)
         previous.update(schema=22, reason=cells.TWENTY_SECOND_REASON)
         previous["successor"].update(source_sha=cells.TWENTY_THIRD_MAIN, run_id=cells.TWENTY_THIRD_RUN,
-                                     first_parent=cells.TWENTY_SECOND_MAIN)
+                                     first_parent=cells.TWENTY_SECOND_MAIN,
+                                     source_workflow_sha256=cells.TWENTY_SECOND_SUCCESSOR_WORKFLOW,
+                                     reusable_sha=cells.TWENTY_SECOND_SUCCESSOR_REUSABLE)
         previous_commit = {"sha": cells.TWENTY_THIRD_MAIN, "parents": [{"sha": cells.TWENTY_SECOND_MAIN}]}
         cells.validate_continuation_commit(previous_commit, previous, cells.TWENTY_THIRD_MAIN,
-                                           cells.TWENTY_THIRD_RUN, controller)
+                                           cells.TWENTY_THIRD_RUN, cells.TWENTY_SECOND_SUCCESSOR_REUSABLE)
+        with self.assertRaisesRegex(Denied, "continuation-closed-vm-successor"):
+            cells.validate_continuation_commit(previous_commit, previous, cells.TWENTY_THIRD_MAIN,
+                                               cells.TWENTY_THIRD_RUN, controller)
 
     def test_business_roles_guard_remains_required_in_existing_parser(self):
         _, native, who = fixture()
