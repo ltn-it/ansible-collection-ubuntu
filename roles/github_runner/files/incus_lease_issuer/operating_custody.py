@@ -496,19 +496,18 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                     if not matches:
                         continue
                     closed = record["state"] == "closed"
+                    retained = record.get("custody")
+                    if retained is not None:
+                        policy = store.read_policy(record["policy_sha256"])
+                        if policy["retention_seconds"] == 0:
+                            # The previous spool write can have failed after
+                            # custody was saved. Return its same event even
+                            # when this tick closes the lease before publishing.
+                            _custody_record(retained, record, policy)
+                            alarm("failed-cell-retained", lease_id, {"custody": retained})
                     if closed:
                         pre_vm = record.get("partial_preparation_custody", {}).get("pre_vm_retirement")
                         if pre_vm is None:
-                            # A zero-wait cleanup can close after the first alarm
-                            # was generated but before its spool write survived.
-                            # Replay the same custody event before retiring the
-                            # binding. The existing mail spool deduplicates it.
-                            retained = record.get("custody")
-                            if retained is not None:
-                                policy = store.read_policy(record["policy_sha256"])
-                                if policy["retention_seconds"] == 0:
-                                    _custody_record(retained, record, policy)
-                                    alarm("failed-cell-retained", lease_id, {"custody": retained})
                             continue
                         from . import startup_retirement
                         try:
@@ -635,7 +634,8 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                             except Exception:
                                 alarm("safety-withdrawal-held", lease_id, {"state": "stopped-retention-not-proven"})
                                 continue
-                        alarm("failed-cell-retained", lease_id, {"custody": retained})
+                        if policy["retention_seconds"] != 0 or record.get("custody") is None:
+                            alarm("failed-cell-retained", lease_id, {"custody": retained})
                         if policy["retention_seconds"] != 0:
                             try:
                                 _prune_retained_graph(root_config_path, expected_sha256, runtime._registry, selector, store, lease_id)

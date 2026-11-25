@@ -93,17 +93,27 @@ class PostEngineWatchdogTests(unittest.TestCase):
     def test_immediate_closure_replays_the_same_custody_alarm(self):
         self.record.update(state="retained", custody={"retain_until": 1000})
         self.store.read_policy.return_value = {"retention_seconds": 0}
-        self.allowed.side_effect = Denied("model-original-watchdog-tick")
+        self.allowed.side_effect = [Denied("model-original-watchdog-tick"), False]
+
+        def finalize(*_):
+            self.record["state"] = "closed"
+
+        self.finalizer.finalize.side_effect = finalize
         with mock.patch.object(custody, "_custody_record") as validate, \
              mock.patch.object(custody, "_prune_retained_graph"):
+            # The first event does not reach the spool. The next tick closes
+            # the already retained lease and must return the event before the
+            # watchdog can retire its binding.
             initial, = self.tick()["events"]
-            self.record["state"] = "closed"
+            during_cleanup, = self.tick()["events"]
+            self.assertEqual(self.record["state"], "closed")
             recovered, = self.tick()["events"]
         self.assertEqual(recovered["kind"], "failed-cell-retained")
-        self.assertEqual(recovered["event_id"], initial["event_id"])
+        self.assertEqual(recovered["event_id"], during_cleanup["event_id"])
+        self.assertEqual(during_cleanup["event_id"], initial["event_id"])
         self.assertEqual(recovered["lease_id"], self.lease)
-        self.assertEqual(validate.call_count, 2)
-        self.finalizer.finalize.assert_not_called()
+        self.assertEqual(validate.call_count, 4)
+        self.finalizer.finalize.assert_called_once_with(self.registry, self.selector, self.store, self.lease)
         self.store.read_policy.return_value = {"retention_seconds": 14400}
         self.assertEqual(self.tick()["events"], [])
 
