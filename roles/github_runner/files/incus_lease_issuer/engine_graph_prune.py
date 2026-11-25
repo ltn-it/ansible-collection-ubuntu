@@ -15,8 +15,8 @@ import hashlib
 import os
 import time
 
-from . import (cell_contract, cleanup_storage as cleanup, engine_policy as engine,
-               identity, incus_admin, incus_mutation, installation, ledger,
+from . import (cell_contract, cleanup_storage as cleanup, engine_executor, engine_policy as engine,
+               identity, incus_admin, incus_mutation, ledger,
                network_fence, operating_custody as custody, root_session)
 from .identity import Denied, require
 
@@ -34,14 +34,9 @@ class GraphPruneReceipt:
 def _diagnostics(owner, start):
     data = identity.decode_json(owner.engine_descriptor_bytes)
     runroot, output = data["engine"]["runroot"], data["output_path"]
-    actual, capture = start["engine_exit"], start["engine_capture"]
     found = {}
     for name in ("stdout", "stderr"):
-        size = actual[name + "_bytes"]
-        proof, _raw, stamp = installation._file(runroot + "/" + name + ".log", max(1, size), private=True, keep=True)
-        require(proof.size == size and proof.sha256 == actual[name + "_sha256"]
-                and (proof.device, proof.inode) == (capture[name + "_device"], capture[name + "_inode"]),
-                "graph-prune-capture-drift")
+        proof, _, stamp = engine_executor._bound_capture_file(runroot, start, name)
         found[name] = (proof, stamp)
     # These are diagnostic DATA, not code, approval or a sealed export. Cases
     # killed before final reporting may legitimately have no result JSON.

@@ -470,7 +470,7 @@ def _consumer_tasks(leader, maximum, end):
 
 
 def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
-                  original_process=None, *, forbidden_namespace=None):
+                  original_process=None, *, forbidden_namespace=None, retained_namespace_alias=False):
     """Acquire a whole stable observation; churn never becomes an absence proof."""
     churn = {"cleanup-consumers-task-inventory-changed", "cleanup-consumers-process-replaced",
              "cleanup-consumers-observation-race"}
@@ -478,7 +478,8 @@ def _no_consumers(data, descriptor_path, lease_id, opened, end, identities, moun
         _deadline(end)
         try:
             _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
-                               original_process, forbidden_namespace=forbidden_namespace)
+                               original_process, forbidden_namespace=forbidden_namespace,
+                               retained_namespace_alias=retained_namespace_alias)
         except Denied as error:
             if str(error) not in churn:
                 raise
@@ -517,12 +518,19 @@ def _check_task_maps(mappings, protected, identities, end, previous):
 
 
 def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities, mount_targets,
-                       original_process=None, *, forbidden_namespace=None):
+                       original_process=None, *, forbidden_namespace=None, retained_namespace_alias=False):
     require(forbidden_namespace is None or type(forbidden_namespace) is tuple
             and len(forbidden_namespace) == 2
             and all(type(value) is int and 0 < value < 2**63 for value in forbidden_namespace)
             and os.major(forbidden_namespace[0]) == 0 and os.minor(forbidden_namespace[0]) > 0,
             "cleanup-consumers-forbidden-namespace")
+    require(type(retained_namespace_alias) is bool
+            and (not retained_namespace_alias or forbidden_namespace is not None), "cleanup-consumers-namespace-alias")
+    namespace_alias = "/run/netns/lit-lease-" + lease_id if retained_namespace_alias else None
+    alias_mount_namespace = None
+    if retained_namespace_alias:
+        host_mounts = os.stat("/proc/self/ns/mnt")
+        alias_mount_namespace = (host_mounts.st_dev, host_mounts.st_ino)
     protected = (data["engine"]["storage_root"], data["engine"]["runroot"],
                  data["output_path"], data["context_path"], descriptor_path)
     protected_bytes = tuple(path.encode() for path in protected)
@@ -628,14 +636,17 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
                 # mountinfo is relative to this task's root, even when tasks
                 # share a namespace. Compare only fully read task views.
                 mountinfo = read(proc / "mountinfo", 4 * 1024**2)
-                if mountinfo != previous_mountinfo:
+                permits_alias = namespace == alias_mount_namespace
+                mount_view = mountinfo, permits_alias
+                if mount_view != previous_mountinfo:
                     rows = _consumer_mount_rows(mountinfo, end)
                     require(forbidden_namespace is None or not any(
                         row[1] == forbidden_namespace[0] and row[2] == "net:[" + str(forbidden_namespace[1]) + "]"
+                        and (not permits_alias or row[3] != namespace_alias)
                         for row in rows), "cleanup-consumers-namespace-mount-reference")
                     require(not any(referenced(row[3]) for row in rows), "cleanup-consumers-mount-reference")
                     _consumer_mount_aliases(rows, mount_targets, end)
-                    previous_mountinfo = mountinfo
+                    previous_mountinfo = mount_view
                 require(not shared or _same_fd_table(int(proc.name), observer),
                         "cleanup-consumers-fd-table-changed")
                 after_ns = (proc / "ns/mnt").stat()
@@ -652,6 +663,82 @@ def _no_consumers_once(data, descriptor_path, lease_id, opened, end, identities,
         except (FileNotFoundError, ProcessLookupError):
             require(not leader.exists(), "cleanup-consumers-observation-race")
     _deadline(end)
+
+
+def observe_post_engine_consumers(owner, store, config, start):
+    """Pin the live, disabled namespace and prove it and owned storage have no consumers."""
+    from . import kernel, network_fence
+
+    record = _fresh(owner, store, config)
+    require(type(owner) is cell_contract.OwnedCellForCleanup
+            and record["effects"][owner.creators["engine-start"]["id"]] == start,
+            "cleanup-post-engine-original")
+    ledger._validate_engine_exit(start["engine_exit"], start)
+    process = start["engine_process"]
+    fence = record["effects"][owner.creators["fence-create"]["id"]]["fence"]
+    boot = kernel.read_boot_id()
+    require(process["boot_id"] == fence["boot_id"] == boot, "cleanup-post-engine-boot")
+    coordinates = (fence["netns_device"], fence["netns_inode"])
+    namespace = "lit-lease-" + owner.lease_id
+    host = network_fence._host_namespace()
+    require(coordinates != host, "cleanup-post-engine-host-namespace")
+    data = identity.decode_json(owner.engine_descriptor_bytes)
+    paths = (data["engine"]["storage_root"], data["engine"]["runroot"], data["output_path"], data["context_path"])
+    descriptor = owner.engine_descriptor_path
+    maximum, seconds = _cleanup_limits(config)
+    end = time.monotonic() + seconds
+    opened, inventories, identities, pinned = [], [], set(), []
+    try:
+        for path in paths:
+            fd = engine._directory(path, private=True)
+            opened.append(fd)
+            inventory = _inventory_tree(fd, end, maximum)
+            maximum -= len(inventory[0])
+            inventories.append(inventory)
+            identities.update(info[:2] for info in inventory[1].values())
+            pinned.append((path, inventory[1][()][0], inventory[2]))
+        creator = record["effects"][owner.creators["engine-prepare"]["id"]]
+        directories = [{"path": path, "device": inventory[1][()][0], "inode": inventory[1][()][1]}
+                       for path, inventory in zip(paths[:3], inventories)]
+        require(creator["evidence_sha256"] == ledger.digest({"prepared": owner.prepared_sha256,
+                    "directories": directories}), "cleanup-post-engine-creator-inodes")
+        parent = engine._directory(str(PurePosixPath(descriptor).parent), private=True)
+        opened.append(parent)
+        proof = installation._file(descriptor, engine.MAX_DESCRIPTOR, private=True)
+        require(proof[0].sha256 == owner.engine_descriptor_sha256
+                and proof[0].device == os.fstat(parent).st_dev, "cleanup-post-engine-descriptor")
+        identities.add((proof[0].device, proof[0].inode))
+        pinned.append((descriptor, proof[0].device, storage_quota._mount_id(parent)))
+        rows = _consumer_mount_rows(_consumer_read(Path("/proc/self/mountinfo"), 4 * 1024**2, end), end)
+        targets = _consumer_mount_targets(rows, pinned)
+        with network_fence._namespace_witness(namespace) as (fd, info):
+            require((info.st_dev, info.st_ino) == coordinates, "cleanup-post-engine-namespace")
+            cookie = network_fence._namespace_cookie(fd, info)
+            for _ in range(2):
+                _no_consumers(data, descriptor, owner.lease_id, opened, end, identities, targets, process,
+                              forbidden_namespace=coordinates, retained_namespace_alias=True)
+                network_fence._namespace_refs_drained(fd, info, cookie)
+                _deadline(end)
+            with network_fence._namespace_witness(namespace) as (_, again):
+                require((again.st_dev, again.st_ino) == coordinates
+                        and network_fence._host_namespace() == host, "cleanup-post-engine-namespace-drift")
+        for path, fd, inventory in zip(paths, opened, inventories):
+            again = engine._directory(path, private=True)
+            try:
+                require(_identity(os.fstat(again)) == _identity(os.fstat(fd))
+                        and _inventory_tree(again, end, len(inventory[0]))[1:] == inventory[1:],
+                        "cleanup-post-engine-tree-drift")
+            finally:
+                os.close(again)
+        require(installation._file(descriptor, engine.MAX_DESCRIPTOR, private=True) == proof
+                and _fresh(owner, store, config) == record and kernel.read_boot_id() == boot,
+                "cleanup-post-engine-observation-drift")
+        _deadline(end)
+        return ledger.digest({"boot_id": boot, "coords": coordinates, "cookie": cookie, "mounts": targets,
+                              "identities": sorted(identities), "descriptor_sha256": proof[0].sha256})
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
 
 
 def _partial_no_consumers(owner, opened, end, inventories):
@@ -724,22 +811,55 @@ def _consume_reconciliation(proof, store, identifier, effect_id):
 
 def reconcile_postchecks(session, owner, store, config, cleanup):
     """GET-only original-scope resolution, never a repeated delete or timing PASS."""
+    from . import operating_custody, root_session
+    require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
+    _fresh(owner, store, config)
+    if type(owner) is not cell_contract.PartialPreparationOwner:
+        operating_custody.require_cleanup_allowed(store, owner.lease_id)
+    _reconcile_verified_postchecks(session, owner, store, config, cleanup)
+
+
+def _evidence_quota_directory(owner, data, private_archive):
+    runroot = data["engine"]["runroot"]
+    if private_archive is not None:
+        from . import startup_retirement
+        require(private_archive == startup_retirement._post_engine_archive_path(owner),
+                "cleanup-storage-private-archive")
+        return str(private_archive)
+    if type(owner) is cell_contract.PartialPreparationOwner:
+        return str(PurePosixPath(runroot).parent)
+    return runroot + ".public-evidence"
+
+
+def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, refresh=False, private_archive=None):
+    """Read verified effects for callers that have already checked custody."""
     from . import kernel, root_session
     require(root_session._require_session(session) == config, "cleanup-reconciliation-session")
     record = _fresh(owner, store, config)
-    from . import operating_custody
-    if type(owner) is not cell_contract.PartialPreparationOwner:
-        operating_custody.require_cleanup_allowed(store, owner.lease_id)
     require(not any(e["state"] in {"intent", "unknown"} for e in record["effects"].values()),
             "cleanup-reconciliation-uncertain")
+    namespace_census = {}
+    if private_archive is not None:
+        target = "fence:" + owner.lease_id
+        creator = _effect(record, "fence-create", target)
+        require(creator is not None and creator[0] == owner.creators["fence-create"]["id"],
+                "cleanup-reconciliation-fence-creator")
+        fence = creator[1].get("fence")
+        ledger._validate_fence(fence)
+        require(fence["boot_id"] == kernel.read_boot_id(), "cleanup-reconciliation-fence-boot")
+        alias_retained = _effect(record, "fence-remove", target) is None
+        require(not refresh or not alias_retained, "cleanup-reconciliation-fence-unremoved")
+        namespace_census = {"forbidden_namespace": (fence["netns_device"], fence["netns_inode"]),
+                            "retained_namespace_alias": alias_retained}
     for effect_id, effect in record["effects"].items():
         if "cleanup_postcheck" not in effect:
             continue
-        try:
-            store.require_cleanup_postchecks(owner.lease_id)
-            return  # The original process already has the complete live witnesses.
-        except Denied:
-            pass
+        if not refresh:
+            try:
+                store.require_cleanup_postchecks(owner.lease_id)
+                return  # The original process already has the complete live witnesses.
+            except Denied:
+                pass
         end = time.monotonic() + config.operation_wait_seconds
         require(effect["state"] == "verified", "cleanup-reconciliation-uncertain")
         value = store.read_cleanup_observation(owner.lease_id, effect_id, deadline=end)
@@ -755,8 +875,7 @@ def reconcile_postchecks(session, owner, store, config, cleanup):
                     if effect["operation"] == "engine-release" else [data["context_path"], owner.engine_descriptor_path])
         require(metadata["paths"] == expected and len(metadata["parents"]) == len(expected),
                 "cleanup-reconciliation-paths")
-        spool = (str(PurePosixPath(data["engine"]["runroot"]).parent)
-                 if type(owner) is cell_contract.PartialPreparationOwner else data["engine"]["runroot"] + ".public-evidence")
+        spool = _evidence_quota_directory(owner, data, private_archive)
         require(metadata["spool"] == spool, "cleanup-reconciliation-spool")
         identities = set(struct.iter_unpack(">QQ", pairs))
         require(len(identities) * 16 == len(pairs), "cleanup-reconciliation-duplicate-inode")
@@ -805,7 +924,7 @@ def reconcile_postchecks(session, owner, store, config, cleanup):
             finally:
                 os.close(group)
             _no_consumers(data, owner.engine_descriptor_path, owner.lease_id, opened, end,
-                          identities, targets, process)
+                          identities, targets, process, **namespace_census)
             with storage_quota.acquire_existing_evidence_quota(config.storage_quota_policy_path,
                     config.storage_quota_policy_sha256, metadata["spool"]):
                 require(cleanup.certificates_absent(), "cleanup-reconciliation-certificate-live")
@@ -839,7 +958,7 @@ def reconcile_postchecks(session, owner, store, config, cleanup):
             for fd in reversed(opened): os.close(fd)
 
 
-def release_engine(owner, store, config):
+def release_engine(owner, store, config, *, private_archive=None):
     """Release only the three directory inodes created by engine-prepare."""
     effect, opened = None, []
     publication_attempted = False
@@ -873,11 +992,8 @@ def release_engine(owner, store, config):
         creator = record["effects"][owner.creators["engine-prepare"]["id"]]
         require(creator["evidence_sha256"] == ledger.digest({"prepared": owner.prepared_sha256,
                     "directories": directories}), "cleanup-storage-original-inodes")
-        # The public sibling stays bounded by the original Root quota even
-        # after the raw graph/runroot/output have all been removed.
-        spool = (str(PurePosixPath(data["engine"]["runroot"]).parent)
-                 if type(owner) is cell_contract.PartialPreparationOwner else
-                 data["engine"]["runroot"] + ".public-evidence")
+        # The retained evidence stays on the original Root quota after raw cleanup.
+        spool = _evidence_quota_directory(owner, data, private_archive)
         require(all(spool != path and not spool.startswith(path + "/") for path in paths),
                 "cleanup-storage-spool-inside-raw")
         with storage_quota.acquire_existing_evidence_quota(
@@ -950,7 +1066,7 @@ def _partial_context_files(owner, store, config, record, context, binding, bindi
     return files
 
 
-def delete_context(owner, store, config):
+def delete_context(owner, store, config, *, private_archive=None):
     """Authenticate the original TLS context, then unlink that exact inventory."""
     effect, opened = None, []
     publication_attempted = False
@@ -1024,8 +1140,7 @@ def delete_context(owner, store, config):
             descriptor_inventory = ((), {(): _identity(os.fstat(descriptor_fd))}, storage_quota._mount_id(descriptor_fd))
             context_observation = _postcheck_observation(owner,
                 [(context, fd, inventory), (descriptor, descriptor_fd, descriptor_inventory)],
-                (str(PurePosixPath(data["engine"]["runroot"]).parent)
-                 if type(owner) is cell_contract.PartialPreparationOwner else data["engine"]["runroot"] + ".public-evidence"), end)
+                _evidence_quota_directory(owner, data, private_archive), end)
         finally:
             os.close(descriptor_fd)
         publication_attempted = True

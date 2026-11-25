@@ -82,6 +82,66 @@ def _mkdir(path):
         os.close(parent)
 
 
+def bind_bootstrap_poc_policy(bootstrap, anchor, custody_policy, *, approved_selector=None):
+    """Bind an operator-approved POC cell before sealing a qualified Root successor."""
+    from . import operating_cells, startup_retirement
+
+    require(type(bootstrap) is dict and type(bootstrap.get("schema")) is int and bootstrap["schema"] == 1
+            and type(bootstrap.get("source_identity")) is dict
+            and bootstrap["source_identity"].get("repository") == acquisition.SUPPLEMENTARY
+            and bootstrap["source_identity"].get("repository_id") == acquisition.REPOSITORIES[acquisition.SUPPLEMENTARY]
+            and type(bootstrap.get("ledger_path")) is str
+            and type(bootstrap.get("cells")) is dict
+            and all(type(cell) is dict for cell in bootstrap["cells"].values()),
+            "poc-bootstrap-input")
+    path = str(Path(engine._path(bootstrap["ledger_path"])).parent / "bootstrap.json")
+    require(anchor == {"schema": 2, "bootstrap_path": path, "bootstrap_sha256": ledger.digest(bootstrap)},
+            "poc-bootstrap-anchor-drift")
+
+    field = startup_retirement.POST_ENGINE_POLICY_FIELD
+    # A successor must be explicitly selected again. Never copy an earlier
+    # generation's exception merely because the complete template was copied.
+    cells = {selector: {key: value for key, value in cell.items() if key != field}
+             for selector, cell in bootstrap["cells"].items()}
+    projected = bootstrap | {"cells": cells}
+    if approved_selector is not None:
+        profile, scenario, target = "heavy", "keycloak-heavy", operating_cells.TARGET
+        require(type(approved_selector) is str
+                and approved_selector == policy_registry.profile_selector(profile, scenario, target),
+                "poc-bootstrap-selector")
+        cell = cells.get(approved_selector)
+        require(cell is not None and cell.get("kind") == "business" and type(cell.get("matrix")) is dict,
+                "poc-bootstrap-cell")
+        matrix = cell["matrix"]
+        require((matrix.get("profile"), matrix.get("scenario"), matrix.get("target"),
+                 matrix.get("instance_type"), matrix.get("image"))
+                == (profile, scenario, target, "vm", operating_cells.IMAGE), "poc-bootstrap-cell")
+        projected, _ = startup_retirement.bootstrap_with_post_engine_failure_policy(
+            projected, approved_selector, custody_policy)
+    startup_retirement._bootstrap_custody_rows(projected, custody_policy)
+    return projected, anchor | {"bootstrap_sha256": ledger.digest(projected)}
+
+
+def archive_bootstrap_custody(store, bootstrap, anchor, custody_policy, *, approved_selector=None):
+    """Seed the successor's fresh, unpublished bank with its sealed policy rows."""
+    from . import startup_retirement
+
+    selected, _ = bind_bootstrap_poc_policy(bootstrap, anchor, custody_policy, approved_selector=approved_selector)
+    require(selected == bootstrap, "poc-bootstrap-unbound-policy")
+    require(type(store) is ledger.Ledger and str(store.path) == bootstrap["ledger_path"],
+            "poc-bootstrap-bank-binding")
+    rows = startup_retirement._bootstrap_custody_rows(bootstrap, custody_policy)
+    with store._transaction(read_only=True) as state:
+        require(not any(state[key] for key in ("policies", "leases", "challenges", "tokens")),
+                "poc-bootstrap-bank-not-fresh")
+    if len(rows) > 1:
+        startup_retirement.archive_bootstrap_policies(store, bootstrap, custody_policy)
+    else:
+        digest = bootstrap["custody_policy_sha256"]
+        require(store.archive_policy(custody_policy) == digest and store.read_policy(digest) == custody_policy,
+                "poc-bootstrap-bank-readback")
+
+
 def _relative(value):
     return engine._relative(value)
 

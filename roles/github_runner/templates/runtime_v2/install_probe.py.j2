@@ -257,6 +257,46 @@ def canonical(value):
     return json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False).encode()
 
 
+def bootstrap_custody_policies(runtime, state):
+    field = "post_engine_failure_policy_sha256"
+    require(type(runtime["cells"]) is dict and all(type(template) is dict for template in runtime["cells"].values()))
+    opted_in = [(name, template) for name, template in runtime["cells"].items() if field in template]
+    if "business_startup_policy_sha256" not in runtime and not opted_in:
+        return
+    require(type(state.get("policies")) is dict)
+
+    def exact_row(digest, expected):
+        require(type(digest) is str and SHA.fullmatch(digest))
+        archived = state["policies"].get(digest)
+        require(type(archived) is dict)
+        raw = canonical(archived)
+        require(raw == canonical(expected) and hashlib.sha256(raw).hexdigest() == digest)
+
+    base = runtime["custody_policy_sha256"]
+    require(type(base) is str and SHA.fullmatch(base))
+    original = state["policies"].get(base)
+    require(type(original) is dict and set(original) == {
+            "custodian_ref", "storage_ref", "approval_ref", "retention_seconds", "max_lease_seconds"}
+            and type(original["retention_seconds"]) is int and original["retention_seconds"] == 14400
+            and type(original["max_lease_seconds"]) is int and 0 < original["max_lease_seconds"] <= 5400
+            and all(type(original[key]) is str and 0 < len(original[key]) <= 512
+                    and not any(ord(character) < 32 for character in original[key])
+                    for key in ("custodian_ref", "storage_ref", "approval_ref")))
+    exact_row(base, original)
+    business = original
+    if "business_startup_policy_sha256" in runtime:
+        business = original | {"startup_retirement": "protected-pre-vm-journal-v1"}
+        exact_row(runtime["business_startup_policy_sha256"], business)
+    for selector, template in opted_in:
+        matrix = template.get("matrix")
+        require(template.get("kind") == "business" and type(matrix) is dict and matrix.get("profile") == "heavy")
+        scenario, target = (matrix.get(key) for key in ("scenario", "target"))
+        require(all(type(value) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", value)
+                    for value in (scenario, target))
+                and selector == "cell-" + hashlib.sha256(canonical(["heavy", scenario, target])).hexdigest())
+        exact_row(template[field], business | {"post_engine_failure_retirement": {"schema": 1, "selector": selector}})
+
+
 def retired_preparation(runtime, config_digest, state, state_raw, reference):
     """Code-only migration of one separately retired partial; never a new lease.
 
@@ -528,17 +568,8 @@ def configurations(path, digest, group, public_pin=None, retired_reference=None,
             and type(state["leases"]) is dict)
     original = {key:value for key,value in state.items() if key != "checksum"}
     require(state["checksum"] == hashlib.sha256(json.dumps(original,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest())
-    if bootstrap and "business_startup_policy_sha256" in runtime:
-        base, business = (runtime[key] for key in ("custody_policy_sha256", "business_startup_policy_sha256"))
-        require(all(type(digest) is str and SHA.fullmatch(digest) for digest in (base, business))
-                and base != business and type(state.get("policies")) is dict)
-        original_policy, business_policy = (state["policies"].get(digest) for digest in (base, business))
-        require(type(original_policy) is dict and set(original_policy) == {
-                    "custodian_ref", "storage_ref", "approval_ref", "retention_seconds", "max_lease_seconds"}
-                and type(original_policy["retention_seconds"]) is int and original_policy["retention_seconds"] == 14400
-                and business_policy == original_policy | {"startup_retirement": "protected-pre-vm-journal-v1"}
-                and hashlib.sha256(canonical(original_policy)).hexdigest() == base
-                and hashlib.sha256(canonical(business_policy)).hexdigest() == business)
+    if bootstrap:
+        bootstrap_custody_policies(runtime, state)
     require(all(value is None or type(value) is dict for value in (retired_reference, pending_reference))
             and not (retired_reference and pending_reference))
     if retired_reference:

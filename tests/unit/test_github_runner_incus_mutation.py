@@ -372,6 +372,17 @@ class RootIncusMutationTests(unittest.TestCase):
         self.assertEqual(self.writes()[-1], ("DELETE", path, None))
         self.assertEqual(self.transport.readback("project")["state"], "absent_observed")
 
+    def test_readonly_delete_scope_rejects_project_attachments(self):
+        self.transport.project_create()
+        path = "/1.0/projects/" + self.project.project
+        allowed = [self.transport._profile_path()]
+        self.assertEqual(self.transport._verify_delete_scope("project")["used_by"], allowed)
+        for attachment in ("/1.0/images/foreign", "/1.0/storage-pools/pool/buckets/foreign"):
+            self.fixture.resources[path]["used_by"] = allowed + [attachment]
+            with self.subTest(attachment=attachment), self.assertRaisesRegex(Denied, "mutation-delete-in-use"):
+                self.transport._verify_delete_scope("project")
+        self.assertFalse(any(method == "DELETE" for method, _, _ in self.writes()))
+
     def test_expired_certificate_cannot_create_but_owned_cleanup_remains_possible(self):
         self.transport.certificate_create()
         with mock.patch.object(mutation.time, "time", return_value=NOW + 200):

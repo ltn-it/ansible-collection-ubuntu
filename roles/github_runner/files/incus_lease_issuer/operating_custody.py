@@ -444,6 +444,18 @@ def _prune_retained_graph(path, sha256, registry, selector, store, lease_id):
             engine_graph_prune.prune_graph(owner, store, config, session=session)
 
 
+def _retire_opted_in_engine_failure(finalizer, registry, selector, store, lease_id):
+    permit = finalizer.prepare_post_engine_permit(registry, selector, store, lease_id)
+    if permit is None:
+        return False
+    permit_sha256 = permit["permit_sha256"]
+    finalizer.finalize_post_engine_failure(registry, selector, store, lease_id, permit_sha256)
+    readback = finalizer.readback_post_engine_failure(registry, selector, store, lease_id, permit_sha256)
+    finalizer.close_post_engine_failure(registry, selector, store, lease_id, permit_sha256,
+                                        readback["readback_sha256"])
+    return True
+
+
 def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
     """One bounded independent pass over this immutable runtime's leases.
 
@@ -582,6 +594,17 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                             alarm("native-status-unavailable", lease_id, {"state": "original-terminal-unavailable"})
                             continue
                     record = store.read(lease_id)
+                    if record["native_terminal"]["conclusion"] == "failure":
+                        policy = store.read_policy(record["policy_sha256"])
+                        if policy.get("post_engine_failure_retirement") == {"schema": 1, "selector": selector}:
+                            try:
+                                finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)
+                                if _retire_opted_in_engine_failure(finalizer, runtime._registry, selector,
+                                                                  store, lease_id):
+                                    continue
+                            except Exception:
+                                alarm("cleanup-unknown", lease_id, {"state": "post-engine-retirement-not-proven"})
+                                continue
                     try:
                         require_cleanup_allowed(store, lease_id)
                     except ledger.Denied:

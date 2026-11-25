@@ -580,6 +580,52 @@ class NineteenthRetirementJournalTests(OCIRetirementFixture):
             self.revalidate()
 
 
+class TwentyFirstPrivateImageRetirementTests(unittest.TestCase):
+    def setUp(self):
+        self.image = "image:g06-r78-" + cells.TWENTY_FIRST_LEASE + ":" + cells.IMAGE
+        self.effect = {"operation": "image-copy", "target": self.image, "state": "verified"}
+        self.effects = {"e" * 32: self.effect}
+        self.metadata = {"target": self.image, "copy_effect_sha256": ledger.digest(self.effect),
+                         "private_metadata_sha256": "a" * 64, "source_cache_metadata_sha256": "b" * 64,
+                         "project_without_image_sha256": "c" * 64, "project_image_link": True}
+        self.result = {"operation": "image-delete", "target": self.image,
+                       "response": "sync_received", "operation_id": None}
+
+    def validate(self):
+        rows = {"image-delete-receipt.json": {"metadata": self.metadata, "result": self.result}}
+        run_factory._twenty_first_image_retirement(rows, self.effects, cells.TWENTY_FIRST_LEASE)
+
+    def test_private_image_deletion_is_bound_to_original_copy(self):
+        self.validate()
+        self.effect["at"] = 100
+        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-first-image-effect"):
+            self.validate()
+
+    def test_default_image_or_missing_native_receipt_is_denied(self):
+        self.result["target"] = "image:default:" + cells.IMAGE
+        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-first-image-effect"):
+            self.validate()
+        self.result.update(target=self.image, response="operation_pending")
+        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-first-image-response"):
+            self.validate()
+
+    def test_original_scope_and_successor_anchor_bind_different_parts_of_the_receipt(self):
+        qualification = {"schema": 21, "native_twenty_first": {"run_id": cells.TWENTY_FIRST_RUN},
+                         "retirement": {"original_record": {"sha256": "a" * 64},
+                                        "journal": {"path": "/native/original",
+                                                    "members": {"complete-receipt.json": "b" * 64}}}}
+        scope = cells.twenty_first_scope_sha256(qualification)
+        after = deepcopy(qualification)
+        after["retirement"]["journal"]["members"]["complete-receipt.json"] = "c" * 64
+        self.assertEqual(cells.twenty_first_scope_sha256(after), scope)
+        self.assertNotEqual(ledger.digest(qualification), ledger.digest(after))
+        after["retirement"]["journal"]["path"] = "/native/other"
+        self.assertNotEqual(cells.twenty_first_scope_sha256(after), scope)
+        after = deepcopy(qualification)
+        after["retirement"]["original_record"]["sha256"] = "d" * 64
+        self.assertNotEqual(cells.twenty_first_scope_sha256(after), scope)
+
+
 class SixteenthContinuationTests(unittest.TestCase):
     def test_pinned_successor_admits_first_attempt_and_rejects_replay(self):
         workflow = cells.SIXTEENTH_SUCCESSOR_WORKFLOW
@@ -1252,18 +1298,20 @@ class AuthorizationHoldPreservationTests(unittest.TestCase):
         root = self.configuration.parent
         catalogues = {"native_run_configuration_catalogue": {
             entry.name: run_factory._fifth_retired_entry(entry) for entry in root.iterdir()}}
-        qualified = ({"schema": 14}, {"retirement": {"catalogues": catalogues}}, None, None)
         successor = SimpleNamespace(value={"ledger_path": str(self.new_bank)})
         receipt = run_factory._continuation_receipt
         before = self.snapshot()
-        with patch.object(run_factory, "_continuation_receipt",
-                          side_effect=lambda value: qualified if value is successor.value else receipt(value)), \
-             patch.object(run_factory, "_continuation_origin_absent", side_effect=lambda *_: self.observe()):
-            fd = run_factory.installation._open_directory(str(root))
-            try:
-                self.assertEqual(run_factory._current_configuration_catalogue(successor, fd), [])
-            finally:
-                os.close(fd)
+        for schema in (14, 21):
+            qualified = ({"schema": schema}, {"retirement": {"catalogues": catalogues}}, None, None)
+            with self.subTest(schema=schema), \
+                 patch.object(run_factory, "_continuation_receipt",
+                              side_effect=lambda value: qualified if value is successor.value else receipt(value)), \
+                 patch.object(run_factory, "_continuation_origin_absent", side_effect=lambda *_: self.observe()):
+                fd = run_factory.installation._open_directory(str(root))
+                try:
+                    self.assertEqual(run_factory._current_configuration_catalogue(successor, fd), [])
+                finally:
+                    os.close(fd)
         self.assertEqual(self.snapshot(), before)
 
     def test_rejects_alias_and_nonempty_original_bank(self):

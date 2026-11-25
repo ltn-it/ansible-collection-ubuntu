@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace, MappingProxyType
 import unittest
 from unittest import mock
@@ -28,6 +29,7 @@ FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
 from incus_lease_issuer import (generation_publisher as publisher, generation_acquisition as acquisition,
                                engine_policy as engine, identity, ledger, policy_registry, preparation, runtime_entry, runtime_rpc)
+from incus_lease_issuer import operating_cells, startup_retirement
 from incus_lease_issuer.identity import Denied
 
 
@@ -182,6 +184,112 @@ class ArchiveGuards(unittest.TestCase):
         with mock.patch.object(os,"geteuid",return_value=2101):
             with self.assertRaisesRegex(Denied,"generation-root-required"):
                 publisher.RootGenerationPublisher(None,None)
+
+
+class BootstrapCustodyPublisherTests(unittest.TestCase):
+    def setUp(self):
+        parent = "/run" if sys.platform == "linux" and os.geteuid() == 0 else None
+        temporary = TemporaryDirectory(dir=parent)
+        self.addCleanup(temporary.cleanup)
+        self.folder = Path(temporary.name).resolve()
+        self.baseline = {"custodian_ref": "original-custody", "storage_ref": "original-store",
+                         "approval_ref": "protected-approval", "retention_seconds": 14400,
+                         "max_lease_seconds": 5400}
+        self.original = ledger.digest(self.baseline)
+        profile, scenario, target = "heavy", "keycloak-heavy", operating_cells.TARGET
+        self.selector = policy_registry.profile_selector(profile, scenario, target)
+        self.foreign = policy_registry.profile_selector(profile, scenario, "ubuntu-22.04")
+        self.drill = operating_cells.selector("failure")
+        self.bootstrap = {"schema": 1, "source_identity": {"repository": acquisition.SUPPLEMENTARY,
+                          "repository_id": acquisition.REPOSITORIES[acquisition.SUPPLEMENTARY]},
+                          "ledger_path": str(self.folder / "ledger"), "custody_policy_sha256": self.original,
+                          "cells": {
+                              self.selector: {"kind": "business", "matrix": {"profile": profile,
+                                  "scenario": scenario, "target": target, "instance_type": "vm",
+                                  "image": operating_cells.IMAGE}},
+                              self.foreign: {"kind": "business", "matrix": {"profile": profile,
+                                  "scenario": scenario, "target": "ubuntu-22.04"}},
+                              self.drill: {"kind": "operating", "operating": {"case": "failure"}},
+                          }}
+
+    def anchor(self, bootstrap):
+        return {"schema": 2, "bootstrap_path": str(self.folder / "bootstrap.json"),
+                "bootstrap_sha256": ledger.digest(bootstrap)}
+
+    def stage(self, bootstrap, *, approved_selector=None):
+        path = Path(bootstrap["ledger_path"])
+        path.mkdir(mode=0o700)
+        ledger.Ledger.initialize(str(path), owner_uid=os.geteuid())
+        with ledger.Ledger(str(path), owner_uid=os.geteuid()) as store:
+            publisher.archive_bootstrap_custody(
+                store, bootstrap, self.anchor(bootstrap), self.baseline, approved_selector=approved_selector)
+            with store._transaction(read_only=True) as state:
+                self.assertEqual(state["leases"], {})
+                return state["policies"]
+
+    def test_approved_exact_heavy_is_sealed_in_fresh_bank(self):
+        before = deepcopy(self.bootstrap)
+        bootstrap, prior_startup = startup_retirement.bootstrap_with_business_policy(self.bootstrap, self.baseline)
+        staged, anchor = publisher.bind_bootstrap_poc_policy(
+            bootstrap, self.anchor(bootstrap), self.baseline, approved_selector=self.selector)
+        field = startup_retirement.POST_ENGINE_POLICY_FIELD
+        digest = staged["cells"][self.selector][field]
+        expected = prior_startup | {"post_engine_failure_retirement": {"schema": 1, "selector": self.selector}}
+        self.assertEqual(anchor, self.anchor(staged))
+        self.assertEqual(staged["custody_policy_sha256"], self.original)
+        self.assertEqual(staged["business_startup_policy_sha256"], ledger.digest(prior_startup))
+        self.assertEqual(staged["cells"][self.drill], before["cells"][self.drill])
+        self.assertEqual(staged["cells"][self.foreign], before["cells"][self.foreign])
+        self.assertEqual(self.bootstrap, before)
+        self.assertFalse(self.folder.joinpath("ledger").exists())
+        self.assertEqual(self.stage(staged, approved_selector=self.selector),
+                         {self.original: self.baseline, ledger.digest(prior_startup): prior_startup, digest: expected})
+
+    def test_stage_without_opt_in_does_not_carry_a_prior_generation_marker(self):
+        active, _ = startup_retirement.bootstrap_with_post_engine_failure_policy(
+            self.bootstrap, self.selector, self.baseline)
+        before = deepcopy(active)
+        staged, anchor = publisher.bind_bootstrap_poc_policy(active, self.anchor(active), self.baseline)
+        self.assertEqual(staged, self.bootstrap)
+        self.assertEqual(anchor, self.anchor(staged))
+        self.assertEqual(active, before)
+        self.assertEqual(self.stage(staged), {self.original: self.baseline})
+
+    def test_no_poc_option_keeps_existing_pre_vm_policy_and_rejects_prefilled_marker(self):
+        bootstrap, startup = startup_retirement.bootstrap_with_business_policy(self.bootstrap, self.baseline)
+        active, _ = startup_retirement.bootstrap_with_post_engine_failure_policy(
+            bootstrap, self.selector, self.baseline)
+        path = Path(bootstrap["ledger_path"])
+        path.mkdir(mode=0o700)
+        ledger.Ledger.initialize(str(path), owner_uid=os.geteuid())
+        with ledger.Ledger(str(path), owner_uid=os.geteuid()) as store:
+            with self.assertRaisesRegex(Denied, "poc-bootstrap-unbound-policy"):
+                publisher.archive_bootstrap_custody(store, active, self.anchor(active), self.baseline)
+            staged, anchor = publisher.bind_bootstrap_poc_policy(active, self.anchor(active), self.baseline)
+            self.assertEqual(staged, bootstrap)
+            publisher.archive_bootstrap_custody(store, staged, anchor, self.baseline)
+            with store._transaction(read_only=True) as state:
+                self.assertEqual(state["policies"], {self.original: self.baseline, ledger.digest(startup): startup})
+                self.assertEqual(state["leases"], {})
+            with self.assertRaisesRegex(Denied, "poc-bootstrap-bank-not-fresh"):
+                publisher.archive_bootstrap_custody(store, staged, anchor, self.baseline)
+
+    def test_foreign_selector_target_image_and_changed_anchor_do_not_stage(self):
+        for selector in (self.foreign, self.drill):
+            with self.subTest(selector=selector), self.assertRaisesRegex(Denied, "poc-bootstrap-selector"):
+                publisher.bind_bootstrap_poc_policy(
+                    self.bootstrap, self.anchor(self.bootstrap), self.baseline, approved_selector=selector)
+        for field, value in (("target", "ubuntu-22.04"), ("image", "images:ubuntu/24.04"),
+                             ("instance_type", "container")):
+            foreign = deepcopy(self.bootstrap)
+            foreign["cells"][self.selector]["matrix"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(Denied, "poc-bootstrap-cell"):
+                publisher.bind_bootstrap_poc_policy(
+                    foreign, self.anchor(foreign), self.baseline, approved_selector=self.selector)
+        with self.assertRaisesRegex(Denied, "poc-bootstrap-anchor-drift"):
+            publisher.bind_bootstrap_poc_policy(self.bootstrap, self.anchor(self.bootstrap) | {"bootstrap_sha256": "0" * 64},
+                                                self.baseline, approved_selector=self.selector)
+        self.assertFalse(self.folder.joinpath("ledger").exists())
 
 
 @unittest.skipUnless(sys.platform=="linux" and os.geteuid()==0,"private proper-EE Root only")

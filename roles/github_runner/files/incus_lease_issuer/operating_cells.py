@@ -118,6 +118,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 21:
+        return _validate_twenty_first_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 20:
         return _validate_twentieth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 19:
@@ -188,7 +190,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
                     15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
-                    19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN}
+                    19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN, 21: TWENTY_FIRST_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -246,6 +248,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 21:
+        return _validate_twenty_first_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 20:
         return _validate_twentieth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 19:
@@ -2240,7 +2244,7 @@ def _validate_seventeenth_qualification(value):
 
 
 def _validate_oci_retirement(retirement, old_catalogues, lease_id, retain_until, *, bound_exit=False,
-                             verified_start=False):
+                             verified_start=False, image_copy=False):
     retirement = engine_policy._keys(retirement, {
         "original_bootstrap", "original_bank", "original_record", "new_entries", "catalogues",
         "retain_until", "journal", "storage_unique_mount_id", "namespace_cookie",
@@ -2279,6 +2283,9 @@ def _validate_oci_retirement(retirement, old_catalogues, lease_id, retain_until,
     journal = engine_policy._keys(retirement["journal"], {"path", "members"})
     engine_policy._path(journal["path"])
     steps = NINETEENTH_RETIREMENT_STEPS if verified_start else SEVENTEENTH_RETIREMENT_STEPS
+    if image_copy:
+        require(verified_start is True, "continuation-twenty-first-image-proof-domain")
+        steps = TWENTY_FIRST_RETIREMENT_STEPS
     names = {"complete-receipt.json", "storage-identities.json"} | {
         f"{step}-{phase}.json" for step in steps for phase in ("intent", "receipt")}
     if bound_exit or verified_start:
@@ -2465,4 +2472,60 @@ def _validate_twentieth_qualification(value):
                 old["native_intake_catalogue"] | {intake["name"]: intake["catalogue_sha256"]}
             and catalogues["native_run_configuration_catalogue"] == old["native_run_configuration_catalogue"],
             "continuation-twentieth-catalogue-extension")
+    return catalogue_identities
+
+
+TWENTY_FIRST_MAIN = "3dd9d0071f3af477e2a560ce1add7b6f6954d8e7"
+TWENTY_FIRST_RUN = 45485652188
+TWENTY_FIRST_CHECKS = (138775231413, 138782155173)
+TWENTY_FIRST_GRAPH = "bb66aef25f2c934d52e3e95823775b3d18ff238720c58ffe0e92951551dde1ad"
+TWENTY_FIRST_LEASE = "79500cdfe5ff0bdfbbe7f5eab75e6579"
+TWENTY_FIRST_RETAIN_UNTIL = 1795569267
+TWENTY_FIRST_REASON = "terminal-original-push-after-private-image-retirement"
+TWENTY_FIRST_RETIREMENT_STEPS = (*NINETEENTH_RETIREMENT_STEPS[:-2], "image-delete", *NINETEENTH_RETIREMENT_STEPS[-2:])
+# This digest covers the original failure, sealed inputs, bank and journal path.
+# The protected successor anchor binds the journal member digests after readback.
+TWENTY_FIRST_SCOPE_SHA256 = "e95c1fb2e374bd46ad9e1a8d3aaf6640775068286eca623de35eabe56760cb93"
+
+
+def twenty_first_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, NINETEENTH_SUCCESSOR_REUSABLE,
+                                       TWENTY_FIRST_GRAPH, TWENTY_FIRST_CHECKS, TWENTY_FIRST_MAIN)
+
+
+def _validate_twenty_first_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == TWENTY_FIRST_REASON, "continuation-twenty-first-qualification")
+    engine_policy._hash(ref["sha256"])
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=TWENTY_FIRST_MAIN, expected_workflow=NINETEENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=NINETEENTH_SUCCESSOR_REUSABLE, reason="continuation-twenty-first-successor")
+    require(successor["source_sha"] not in {
+                ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN, FIFTEENTH_MAIN,
+                SIXTEENTH_MAIN, SEVENTEENTH_MAIN, EIGHTEENTH_MAIN, NINETEENTH_MAIN, TWENTIETH_MAIN,
+                TWENTY_FIRST_MAIN}
+            and successor["run_id"] not in {
+                ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN, FIFTEENTH_RUN,
+                SIXTEENTH_RUN, SEVENTEENTH_RUN, EIGHTEENTH_RUN, NINETEENTH_RUN, TWENTIETH_RUN,
+                TWENTY_FIRST_RUN}, "continuation-twenty-first-replay")
+    return value
+
+
+def twenty_first_scope_sha256(value):
+    retirement = value["retirement"]
+    return ledger.digest(value | {"retirement": retirement | {"journal": {"path": retirement["journal"]["path"]}}})
+
+
+def _validate_twenty_first_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_twenty_first", "previous_qualification", "retirement"})
+    require(value["purpose"] == TWENTY_FIRST_REASON and ledger.digest(value["native_twenty_first"]) == TWENTY_FIRST_GRAPH,
+            "continuation-twenty-first-history")
+    previous = value["previous_qualification"]
+    catalogue_identities = _validate_twentieth_qualification(previous)
+    _validate_oci_retirement(value["retirement"], previous["catalogues"], TWENTY_FIRST_LEASE,
+                             TWENTY_FIRST_RETAIN_UNTIL, verified_start=True, image_copy=True)
+    require(twenty_first_scope_sha256(value) == TWENTY_FIRST_SCOPE_SHA256, "continuation-twenty-first-original-scope")
     return catalogue_identities

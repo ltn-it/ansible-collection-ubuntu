@@ -1,0 +1,7 @@
+# POC cleanup after a failed Podman workload
+
+The protected Root publisher can opt in the exact `heavy / keycloak-heavy / ubuntu-24.04` VM cell when staging a new bootstrap. The selection binds the admitted cached VM fingerprint and the derived custody policy in the fresh ledger bank. Each new stage requires its own protected selection. The operating cases enforce their four-hour custody policy. A previously issued lease uses the policy sealed when it was issued.
+
+The Root watchdog considers the rule once GitHub has confirmed failure of the original execution and the worker has recorded a failed Podman exit. Root saves the original lease, terminal record, and both complete capture streams in an atomic private archive. Root then verifies the drained worker, disabled network access, revoked certificate, exact project and resource ownership, and absence of live instances, volumes, operations, and consumers. An exact private copy of the configured VM image is eligible for removal with the lease resources. Root reads the separately held default image before and after cleanup.
+
+The lease stays open during cleanup. Root records the exact effects and runs a separate readback of the archive, journal, and live resources before closing the lease. A missing, mismatched, or unresolved effect keeps the runner held. Completed effects can be reconciled after interruption. The original GitHub job retains its failure conclusion.
