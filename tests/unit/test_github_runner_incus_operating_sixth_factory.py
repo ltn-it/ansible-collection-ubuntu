@@ -77,10 +77,10 @@ class SixthFactoryTests(unittest.TestCase):
   boot=NS(value={'ledger_path':'/fixture/successor','cells':{}},sha256='1'*64)
   # Stop at catalogue access after both real dispatch calls; no Ledger mutation occurs.
   with patch.object(f,'_revalidate_fifth_retirement')as old,patch.object(f,'_revalidate_sixth_retirement')as new,patch.object(f,'_continuation_catalogue',side_effect=RuntimeError('catalogue-boundary')):
-   with self.assertRaisesRegex(RuntimeError,'catalogue-boundary'):f._continuation_origin_absent(boot,qualified)
+   with self.assertRaisesRegex(RuntimeError,'catalogue-boundary'):f._continuation_origin_observations(boot,qualified)
    old.assert_called_once_with(prev,'/fixture/successor');new.assert_called_once_with(ret,'/fixture/successor')
   ret['catalogues']['native_intake_catalogue']['a']='changed'
-  with patch.object(f,'_revalidate_fifth_retirement'),patch.object(f,'_revalidate_sixth_retirement'),self.assertRaisesRegex(Denied,'previous-catalogue-drift'):f._continuation_origin_absent(boot,qualified)
+  with patch.object(f,'_revalidate_fifth_retirement'),patch.object(f,'_revalidate_sixth_retirement'),self.assertRaisesRegex(Denied,'previous-catalogue-drift'):f._continuation_origin_observations(boot,qualified)
 
  def previous_history_model(self):
   helper=sixth_tests.SixthPartialHistoryTests('runTest');self.addCleanup(helper.doCleanups);helper.setUp()
