@@ -149,9 +149,9 @@ class OperatingCellTests(unittest.TestCase):
                        {"sha": sha, "parents": [{"sha": cells.INITIAL_MAIN}] * 2}):
             with self.assertRaises(Denied): cells.validate_initial_main(commit, sha)
 
-    @patch.object(cells, "TWENTY_THIRD_SUCCESSOR_WORKFLOW", "8" * 64)
-    @patch.object(cells, "TWENTY_THIRD_SUCCESSOR_REUSABLE", "7" * 40)
     def test_closed_native_failure_accepts_only_a_new_exact_successor(self):
+        self.assertNotEqual(cells.TWENTY_THIRD_SUCCESSOR_WORKFLOW, cells.TWENTY_SECOND_SUCCESSOR_WORKFLOW)
+        self.assertNotEqual(cells.TWENTY_THIRD_SUCCESSOR_REUSABLE, cells.TWENTY_SECOND_SUCCESSOR_REUSABLE)
         original = {
             "schema": 23, "reason": cells.TWENTY_THIRD_REASON,
             "qualification": {"path": "/private/qualification.json", "sha256": cells.TWENTY_THIRD_QUALIFICATION},
