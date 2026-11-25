@@ -919,7 +919,15 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
     stack.enter_context(mock.patch.object(network_fence, "_namespace_cookie", return_value=41))
     stack.enter_context(mock.patch.object(network_fence, "_namespace_refs_drained"))
     stack.enter_context(mock.patch.object(cleanup_storage, "_cleanup_limits", return_value=(4096, 20)))
-    stack.enter_context(mock.patch.object(cleanup_storage, "_no_consumers"))
+    mount_returned = False
+    independent_scan = False
+    coordinates = (namespace_info.st_dev, namespace_info.st_ino)
+
+    def consumer_census(*_args, forbidden_namespace=None, retained_namespace_alias=False):
+        if independent_scan and mount_returned and forbidden_namespace == coordinates and not retained_namespace_alias:
+            raise identity.Denied("cleanup-consumers-namespace-mount-reference")
+
+    stack.enter_context(mock.patch.object(cleanup_storage, "_no_consumers", side_effect=consumer_census))
     stack.enter_context(mock.patch.object(storage_quota, "_acquire_paths", side_effect=observed_quota))
 
     runtime, sha = configuration.runtime_config_path, configuration.runtime_config_sha256
@@ -955,9 +963,15 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
         return result
 
     def refresh(session, *args, **kwargs):
-        if kwargs.get("refresh"):
-            independent_sessions.append(session)
-        return original_refresh(session, *args, **kwargs)
+        nonlocal independent_scan
+        if not kwargs.get("refresh"):
+            return original_refresh(session, *args, **kwargs)
+        independent_sessions.append(session)
+        independent_scan = True
+        try:
+            return original_refresh(session, *args, **kwargs)
+        finally:
+            independent_scan = False
 
     with (mock.patch.object(finalization.RootFinalizer, "readback_post_engine_failure", readback),
           mock.patch.object(cleanup_storage, "_reconcile_verified_postchecks", refresh),
@@ -968,12 +982,17 @@ def _post_engine_watchdog_run(stack, configuration, registry, store, lease, io, 
         assert not startup_retirement._post_engine_readback_path(store, lease).exists()
         image_deletes = [(method, path) for method, path, *_ in server.requests if method == "DELETE"]
         assert ("DELETE", private_image) in image_deletes
+        mount_returned = True
+        held = operating_custody.tick_runtime(runtime, sha, configuration.manifest_sha256)
+        assert held["state"] == "HELD" and store.read(lease)["state"] != "closed"
+        assert not startup_retirement._post_engine_readback_path(store, lease).exists()
+        mount_returned = False
         result = operating_custody.tick_runtime(runtime, sha, configuration.manifest_sha256)
     closed = store.read(lease)
     assert result == {"state": "CUSTODY_TICK_COMPLETE", "events": [], "native_acceptance": False}, result
     assert closed["state"] == "closed" and closed["closed_at"] < original["native_terminal"]["completed_at"] + 14400
     assert closed["native_terminal"] == original["native_terminal"]
-    assert len(reads) == 1 and len(independent_sessions) == 2 and independent_sessions[0] is not independent_sessions[1]
+    assert len(reads) == 1 and len({id(session) for session in independent_sessions}) == len(independent_sessions) == 3
     assert "uploaded_evidence" not in closed
     effects = {row["operation"]: row for row in closed["effects"].values()}
     assert all(effects[operation]["cleanup_postcheck_resolution"]["kind"] == "fresh-root-readback"

@@ -838,6 +838,19 @@ def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, re
     record = _fresh(owner, store, config)
     require(not any(e["state"] in {"intent", "unknown"} for e in record["effects"].values()),
             "cleanup-reconciliation-uncertain")
+    namespace_census = {}
+    if private_archive is not None:
+        target = "fence:" + owner.lease_id
+        creator = _effect(record, "fence-create", target)
+        require(creator is not None and creator[0] == owner.creators["fence-create"]["id"],
+                "cleanup-reconciliation-fence-creator")
+        fence = creator[1].get("fence")
+        ledger._validate_fence(fence)
+        require(fence["boot_id"] == kernel.read_boot_id(), "cleanup-reconciliation-fence-boot")
+        alias_retained = _effect(record, "fence-remove", target) is None
+        require(not refresh or not alias_retained, "cleanup-reconciliation-fence-unremoved")
+        namespace_census = {"forbidden_namespace": (fence["netns_device"], fence["netns_inode"]),
+                            "retained_namespace_alias": alias_retained}
     for effect_id, effect in record["effects"].items():
         if "cleanup_postcheck" not in effect:
             continue
@@ -911,7 +924,7 @@ def _reconcile_verified_postchecks(session, owner, store, config, cleanup, *, re
             finally:
                 os.close(group)
             _no_consumers(data, owner.engine_descriptor_path, owner.lease_id, opened, end,
-                          identities, targets, process)
+                          identities, targets, process, **namespace_census)
             with storage_quota.acquire_existing_evidence_quota(config.storage_quota_policy_path,
                     config.storage_quota_policy_sha256, metadata["spool"]):
                 require(cleanup.certificates_absent(), "cleanup-reconciliation-certificate-live")
