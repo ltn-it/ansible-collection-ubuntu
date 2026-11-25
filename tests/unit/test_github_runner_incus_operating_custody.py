@@ -90,6 +90,23 @@ class PostEngineWatchdogTests(unittest.TestCase):
         self.finalizer.finalize.assert_called_once()
         self.allowed.assert_called_once_with(self.store, self.lease)
 
+    def test_immediate_closure_replays_the_same_custody_alarm(self):
+        self.record.update(state="retained", custody={"retain_until": 1000})
+        self.store.read_policy.return_value = {"retention_seconds": 0}
+        self.allowed.side_effect = Denied("model-original-watchdog-tick")
+        with mock.patch.object(custody, "_custody_record") as validate, \
+             mock.patch.object(custody, "_prune_retained_graph"):
+            initial, = self.tick()["events"]
+            self.record["state"] = "closed"
+            recovered, = self.tick()["events"]
+        self.assertEqual(recovered["kind"], "failed-cell-retained")
+        self.assertEqual(recovered["event_id"], initial["event_id"])
+        self.assertEqual(recovered["lease_id"], self.lease)
+        self.assertEqual(validate.call_count, 2)
+        self.finalizer.finalize.assert_not_called()
+        self.store.read_policy.return_value = {"retention_seconds": 14400}
+        self.assertEqual(self.tick()["events"], [])
+
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
 class NativeTerminalTests(unittest.TestCase):

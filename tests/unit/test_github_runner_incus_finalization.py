@@ -400,3 +400,47 @@ class RootOperatingFinalizationTests(unittest.TestCase):
         self.assertFalse(export.called)
         self.assertEqual(helper.store.read(helper.lease)["state"],"retained")
         self.assertFalse(any(row[0]=="DELETE" for row in io.server.requests[len(before):]))
+
+    def test_zero_wait_seals_stop_before_cleanup_and_reads_it_after_closure(self):
+        from contextlib import nullcontext
+
+        import test_github_runner_incus_engine_graph_prune as fixtures
+        from incus_lease_issuer import evidence_export, identity, ledger, operating_custody, runtime_rpc
+
+        helper = fixtures.RootGraphPruneTests()
+        self.addCleanup(helper.doCleanups)
+        archive = ledger.Ledger.archive_policy
+        scope = "a" * 64
+
+        def archive_immediate(store, policy):
+            return archive(store, dict(policy, retention_seconds=0, **{ledger.G06_NO_WAIT_MARKER: scope}))
+
+        def prepare_bound(store, nonce, worker, who, **values):
+            return store._prepare(nonce, worker, who, runtime=None, g06_no_wait_scope_sha256=scope, **values)
+
+        with mock.patch.object(ledger.Ledger, "archive_policy", archive_immediate), \
+             mock.patch.object(ledger.Ledger, "prepare", prepare_bound):
+            helper.setUp()
+        (helper.spool / "preserved.bin").unlink()
+        helper.spool.rmdir()
+        helper.raw.unlink()
+        runtime = runtime_rpc._configuration(str(helper.io.runtime), helper.io.runtime_sha)
+        record = helper.store.read(helper.lease)
+        self.assertEqual(record["custody"]["terminal_at"], record["custody"]["retain_until"])
+        self.assertFalse(operating_custody.require_cleanup_allowed(helper.store, helper.lease))
+        with helper.model(), helper.session() as (owner, _config, session), \
+             mock.patch.object(evidence_export, "_quota", side_effect=lambda *_: nullcontext()):
+            inputs = (runtime, helper.registry, fixtures.ready_fixtures.SELECTOR, helper.store, owner)
+            digest = finalization._operating_evidence(*inputs, record, session=session, released=False)
+            path = helper.spool / "operating-finalization.json"
+            data = identity.decode_json(path.read_bytes())
+            self.assertEqual(ledger.digest(data), digest)
+            self.assertEqual(data["stopped_receipt"]["instance_uuid"], record["owned_instance"]["uuid"])
+            self.assertIs(data["quality_pass"], False)
+            closed = dict(record, state="closed", closed_at=helper.store._now())
+            replay = finalization._operating_evidence(*inputs, closed, session=session, released=True, observation=True)
+            self.assertEqual(replay, data["stopped_receipt"])
+            data["stopped_receipt"]["instance_uuid"] = "00000000-0000-0000-0000-000000000000"
+            path.write_bytes(ledger.canonical(data))
+            with self.assertRaisesRegex(ValueError, "finalization-operating-stopped-receipt-drift"):
+                finalization._operating_evidence(*inputs, closed, session=session, released=True, observation=True)

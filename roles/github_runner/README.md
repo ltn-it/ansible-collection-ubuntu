@@ -777,33 +777,21 @@ member with its retained sanitized export before accepting the upload. A private
 verification intent precedes filesystem staging; uncertain partial stages hold
 and cannot be replayed. No API bearer value or digest, or signed download URL, is stored.
 
-An independent watchdog observes the **original execution job's** actual native
-completion. Only successful execution, complete captured evidence and verified
-native upload contents permit immediate Root destruction. Failure, cancellation
-or expiry stops the owned VM, withdraws its access, and retains its private data
-for four hours measured from that native completion. Jobs cannot waive or extend
-custody; any separate operator retention decision is bounded by 24 hours.
-Known stopped custody retains the full storage reservation. Unknown cleanup or
-unavailable original process proof quarantines it and does not release running
-capacity.
+An independent watchdog verifies the **original execution job's** native
+completion. Successful execution requires complete captured evidence and
+verified native upload contents. For G06 failure, cancellation or expiry, Root
+withdraws access, verifies the stopped VM where present, and preserves the
+original private evidence. Root can then immediately clean up the exact owned
+resources. Unknown effects or unavailable original process evidence keep
+resources and capacity held.
 
-The operating observer returns retained custody only after the original watchdog's
-engine-cache prune has a verified effect and its original graph is independently
-empty, with unchanged captures and exit provenance. Missing or unfinished prune
-proof waits within the existing observation deadline (at most 120 seconds); unknown
-or inconsistent proof holds the chain. The observer performs no pruning or other
-cleanup. Contention while entering the original Root lock waits within that same
-observation deadline; verified graph evidence and the receipt share one active
-Root session. Other errors hold the chain. VM custody remains four hours, and
-the next cell still requires fresh pool and engine capacity admission.
-
-The watchdog visits bounded fair pages and retires bindings only after checking
-the original sealed configuration and closed Root ledger. It uses the producer's
-fixed bindings directory; an empty alternative directory is not supervision.
-After an operating cell's actual custody expires, normal finalization preserves
-Root-verified diagnostic-only evidence before removing its owned resources and
-releasing its reservation. That receipt grants neither business-quality PASS nor
-permission to shorten retention.
+The read-only operating observer verifies durable safety and failure evidence
+for the original native execution, including after resource cleanup. The
+watchdog visits bounded fair pages and retires bindings after it verifies the
+original sealed configuration and the closed Root ledger. Root verifies
+resource absence independently before admitting the next cell against fresh pool
+and engine capacity. Operating evidence records the failure, cancellation or
+expiry that actually occurred.
 Completed owned image-delete tasks must actually leave the native operations
 map before Root records a new project-delete intent. Foreign tasks, failed tasks
 and bounded-wait expiry hold cleanup; unknown writes are never retried.
@@ -1677,11 +1665,11 @@ native terminal/retention and storage-inventory gates; it never retries a prior
 revoke or adopts an unconfirmed pre-publication certificate rotation. The independent watchdog can discover this partial case without an
 `engine_exit` receipt.
 
-For an eligible failure, the archived policy retains private data for four hours
-from the actual original native job completion. A separate opaque partial-retention proof records
-that boundary; it neither invents VM custody nor releases running capacity.
-After retention, exact original inode/context evidence, native ownership and scope
-absence permit only the journaled engine/context/project/network cleanup chain.
+For an eligible G06 failure, Root verifies the native job's actual completion and
+preserves the original private evidence. Exact original inode and context evidence,
+native ownership and scope absence then permit the journaled engine, context,
+project and network cleanup to start immediately. The partial-preparation proof
+records the original creators and the confirmed state of their resources.
 Before either partial storage deletion intent, a bounded process/cgroup/namespace
 scan proves no live reference to the exact original paths or pinned device/inode
 identities, including hardlink descriptors and mappings. Mount checks translate

@@ -499,6 +499,16 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                     if closed:
                         pre_vm = record.get("partial_preparation_custody", {}).get("pre_vm_retirement")
                         if pre_vm is None:
+                            # A zero-wait cleanup can close after the first alarm
+                            # was generated but before its spool write survived.
+                            # Replay the same custody event before retiring the
+                            # binding. The existing mail spool deduplicates it.
+                            retained = record.get("custody")
+                            if retained is not None:
+                                policy = store.read_policy(record["policy_sha256"])
+                                if policy["retention_seconds"] == 0:
+                                    _custody_record(retained, record, policy)
+                                    alarm("failed-cell-retained", lease_id, {"custody": retained})
                             continue
                         from . import startup_retirement
                         try:
@@ -705,18 +715,26 @@ def operating_outcome(root_config_path, expected_sha256, registry, selector, sto
             _custody_record(custody, record, store.read_policy(record["policy_sha256"]))
         else:
             require(record["state"] in {"prepared", "cancelled", "retained"}, "operating-outcome-closed")
-        who = record["identity"]
-        return {"schema": 1, "kind": "operating", "case": case, "selector": selector,
-            "run_id": who["run_id"], "run_attempt": 1, "source_sha": who["caller_sha"],
-            "controller_sha": who["reusable_sha"], "lease_id": lease_id,
-            "instance_uuid": observed_owner["uuid"], "raw_exit": {"code": actual["exit_code"], "signal": actual["signal"]},
-            "vm_state": "stopped", "access": "withdrawn", "retention_seconds": store.read_policy(record["policy_sha256"])["retention_seconds"],
-            "terminal_at": custody["terminal_at"] if retained else None,
-            "retain_until": custody["retain_until"] if retained else None,
-            "cutoff": ({"kind": "authorization" if record["authorizations"][-1]["valid_until"] <= record["expires_at"] else "lease",
-                        "deadline": record["authorization_expired_at"], "observed_at": record["cancelled_at"]}
-                       if case == "expiry-controller-loss" else None),
-            "state": "retained" if retained else "safety-proved-retention-armed"}
+        return _operating_receipt(record, lease_id, selector, case, actual,
+                                  store.read_policy(record["policy_sha256"]), retained=retained)
+
+
+def _operating_receipt(record, lease_id, selector, case, actual, policy, *, retained):
+    """Project the stopped snapshot fields bound to the original ledger."""
+    who = record["identity"]
+    custody = record.get("custody")
+    return {"schema": 1, "kind": "operating", "case": case, "selector": selector,
+        "run_id": who["run_id"], "run_attempt": 1, "source_sha": who["caller_sha"],
+        "controller_sha": who["reusable_sha"], "lease_id": lease_id,
+        "instance_uuid": record["owned_instance"]["uuid"],
+        "raw_exit": {"code": actual["exit_code"], "signal": actual["signal"]},
+        "vm_state": "stopped", "access": "withdrawn", "retention_seconds": policy["retention_seconds"],
+        "terminal_at": custody["terminal_at"] if retained else None,
+        "retain_until": custody["retain_until"] if retained else None,
+        "cutoff": ({"kind": "authorization" if record["authorizations"][-1]["valid_until"] <= record["expires_at"] else "lease",
+                    "deadline": record["authorization_expired_at"], "observed_at": record["cancelled_at"]}
+                   if case == "expiry-controller-loss" else None),
+        "state": "retained" if retained else "safety-proved-retention-armed"}
 
 
 def operating_ready_tick(config_path, config_sha256, registry, selector, store, lease_id, receipt):

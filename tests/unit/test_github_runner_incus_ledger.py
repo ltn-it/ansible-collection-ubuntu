@@ -206,6 +206,17 @@ class IncusLedgerTests(unittest.TestCase):
                     store.lease_ids()
             self.assertEqual((self.path / "state.json").read_bytes(), original)
 
+    def test_zero_wait_policy_is_archived_without_rewriting_the_previous_policy(self):
+        with self.open() as store:
+            old = store.archive_policy(POLICY)
+            immediate = dict(POLICY, retention_seconds=0, **{ledger.G06_NO_WAIT_MARKER: "1" * 64})
+            new = store.archive_policy(immediate)
+            self.assertNotEqual(new, old)
+            self.assertEqual(store.read_policy(new), immediate)
+            self.assertEqual(store.read_policy(old), POLICY)
+            with self.assertRaisesRegex(Denied, "invalid-custody-limits"):
+                store.archive_policy(dict(POLICY, retention_seconds=0))
+
     def test_watchdog_read_and_retired_bank_admission_can_overlap(self):
         bank = self.path.stat()
         entered = threading.Event()

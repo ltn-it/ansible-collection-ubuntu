@@ -34,7 +34,7 @@ class FinalizationReceipt:
     receipt_sha256: str
 
 
-def _operating_evidence(runtime, registry, selector, store, owner, record, *, released):
+def _operating_evidence(runtime, registry, selector, store, owner, record, *, session, released, observation=False):
     """Seal only Root-bound operating diagnostics; never business evidence/PASS.
 
     The original private spool is the publishing intent. A partial spool is
@@ -45,8 +45,11 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
     env = descriptor["environment"]
     require(env.get("QUALITY_INPUT_PROFILE") == "operating", "finalization-operating-kind")
     operating_custody.require_cleanup_allowed(store, owner.lease_id)
-    operating_custody._custody_record(record.get("custody"), record,
-                                     store.read_policy(record["policy_sha256"]))
+    policy = store.read_policy(record["policy_sha256"])
+    operating_custody._custody_record(record.get("custody"), record, policy)
+    immediate = policy["retention_seconds"] == 0
+    require(not observation or immediate and released and record["state"] == "closed",
+            "finalization-operating-spool-observation")
     terminal = record["native_terminal"]
     start_id = owner.creators["engine-start"]["id"]
     start = record["effects"][start_id]
@@ -84,6 +87,8 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
                 record["identity"]["run_id"], record["identity"]["caller_sha"],
                 record["identity"]["reusable_sha"], owner.incus["instance"], record["owned_instance"]["uuid"])
             diagnostic = operating_export.normalize_operating(raw, expected, actual)
+            stopped = operating_custody.operating_outcome(runtime.path, runtime.sha256, registry, selector,
+                store, owner.lease_id, retained=True, session=session) if immediate else None
             with evidence_export._quota(runtime, str(PurePosixPath(directory).parent)):
                 os.mkdir(name, 0o700, dir_fd=parent)
                 os.fsync(parent)
@@ -96,6 +101,8 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
                     "diagnostic": diagnostic.value, "diagnostics_sha256": diagnostics_sha,
                     "spool": {"device": info.st_dev, "inode": info.st_ino},
                     "evidence_policy_complete": False, "quality_pass": False}
+                if immediate:
+                    value["stopped_receipt"] = stopped
                 require(engine_graph_prune._diagnostics(owner, start) == diagnostics_sha,
                         "finalization-operating-diagnostic-drift")
                 evidence_export._create(fd, "operating-finalization.json", ledger.canonical(value))
@@ -106,8 +113,14 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
             raw = evidence_export._read(fd, "operating-finalization.json", engine_policy.MAX_DESCRIPTOR)
             value = identity.decode_json(raw)
             info = os.fstat(fd)
-            require(set(value) == {"schema", "kind", "binding", "diagnostic", "diagnostics_sha256", "spool",
-                                  "evidence_policy_complete", "quality_pass"}
+            fields = {"schema", "kind", "binding", "diagnostic", "diagnostics_sha256", "spool",
+                      "evidence_policy_complete", "quality_pass"}
+            if immediate:
+                fields.add("stopped_receipt")
+                require(value.get("stopped_receipt") == operating_custody._operating_receipt(record, owner.lease_id,
+                    selector, env["QUALITY_OPERATING_CASE"], actual, policy, retained=True),
+                    "finalization-operating-stopped-receipt-drift")
+            require(set(value) == fields
                     and type(value["schema"]) is int and value["schema"] == 1
                     and value["kind"] == "operating-finalization-diagnostic" and value["binding"] == binding
                     and value["evidence_policy_complete"] is False and value["quality_pass"] is False
@@ -117,7 +130,7 @@ def _operating_evidence(runtime, registry, selector, store, owner, record, *, re
                 from . import engine_graph_prune
                 require(value["diagnostics_sha256"] == engine_graph_prune._diagnostics(owner, start),
                         "finalization-operating-diagnostic-drift")
-            return hashlib.sha256(raw).hexdigest()
+            return value["stopped_receipt"] if observation else hashlib.sha256(raw).hexdigest()
     finally:
         if fd is not None:
             os.close(fd)
@@ -734,7 +747,7 @@ class RootFinalizer:
                 descriptor = identity.decode_json(owner.engine_descriptor_bytes)
                 if descriptor["environment"].get("QUALITY_INPUT_PROFILE") == "operating":
                     evidence_sha = _operating_evidence(self._runtime, registry, selector, store, owner, record,
-                                                      released=raw_released is not None)
+                                                      session=session, released=raw_released is not None)
                 else:
                     exported = (evidence_export.read_existing(self._runtime.path, self._runtime.sha256,
                         registry, selector, store, lease_id) if raw_released is not None else
