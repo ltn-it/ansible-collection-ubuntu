@@ -4,6 +4,7 @@ No live kernel collector, socket, credential, Incus executor, custody acceptance
 or test PASS is established by preparing/closing these component fixtures.
 """
 import concurrent.futures
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 import fcntl
 import hashlib
@@ -300,6 +301,24 @@ class IncusLedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "continuation-original-or-unknown-lease"):
             read_current(origin | {"run_id": who.run_id + 1})
         self.assertEqual(state.read_bytes(), original)
+
+    def test_active_continuation_can_read_real_host_gate_claimants(self):
+        from incus_lease_issuer import host_api_fence
+
+        before = (self.path / "state.json").read_bytes()
+        bank = self.path.stat()
+        config = SimpleNamespace(host_api_fence_policy_path="/root/model", host_api_fence_policy_sha256="a" * 64)
+        policy = SimpleNamespace(sha256="a" * 64)
+        baseline = {"baseline_sha256": "b" * 64, "nft_table_handle": 7}
+        with ledger._observe_active_continuation_bank(self.path, bank.st_dev, bank.st_ino), \
+             mock.patch.object(host_api_fence, "_bound", return_value=policy), \
+             mock.patch.object(host_api_fence, "_host", return_value=nullcontext()), \
+             mock.patch.object(host_api_fence, "_baseline", return_value=baseline), \
+             mock.patch.object(host_api_fence, "_readback", return_value=(7, None, 0, 0)):
+            run_factory._twelfth_host_fence(config, 40, str(self.path), {})
+            with self.open() as store, self.assertRaisesRegex(Denied, "ledger-history-read-only"):
+                store.challenge(self.worker)
+        self.assertEqual((self.path / "state.json").read_bytes(), before)
 
     def test_retired_bank_reader_denies_replaced_lock_entry(self):
         bank = self.path.stat()

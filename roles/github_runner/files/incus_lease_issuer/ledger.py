@@ -1776,7 +1776,7 @@ class Ledger:
         """
         require(all(type(value) is str and HEX.fullmatch(value) for value in (policy_sha256, baseline_sha256)),
                 "invalid-host-api-query")
-        with self._transaction() as state:
+        with self._transaction(read_only=True) as state:
             return self._host_api_claimants(state, policy_sha256, baseline_sha256)
 
     def bind_host_api_fence(self, identifier, effect_id, *, policy_sha256, baseline_sha256, boot_id,
