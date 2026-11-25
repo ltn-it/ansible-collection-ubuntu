@@ -316,6 +316,9 @@ class IncusLedgerTests(unittest.TestCase):
              mock.patch.object(host_api_fence, "_baseline", return_value=baseline), \
              mock.patch.object(host_api_fence, "_readback", return_value=(7, None, 0, 0)):
             run_factory._twelfth_host_fence(config, 40, str(self.path), {})
+            with self.assertRaisesRegex(Denied, "ledger-active-continuation-already-active"):
+                with ledger._observe_active_continuation_bank(self.path, bank.st_dev, bank.st_ino):
+                    self.fail("nested active observation")
             with self.open() as store, self.assertRaisesRegex(Denied, "ledger-history-read-only"):
                 store.challenge(self.worker)
         self.assertEqual((self.path / "state.json").read_bytes(), before)

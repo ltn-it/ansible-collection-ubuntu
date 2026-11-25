@@ -88,6 +88,7 @@ _DIAGNOSTIC_REASONS = frozenset({
     "intake-snapshot-held", "intake-stage-held", "run-configuration-held",
     "run-config-lookup-unique", "run-config-observer", "run-configuration-lookup-held", "runtime-observer-original-lease",
     "runtime-observer-original-invocation", "runtime-bootstrap-selector", "ledger-busy", "ledger-busy-active-continuation",
+    "ledger-active-continuation-already-active",
     "engine-cidfile", "engine-container-inspect", "engine-container-not-owned",
     "engine-supervisor-exited-before-tracking", "engine-capture-limit-before-tracking", "engine-tracking-timeout",
 })

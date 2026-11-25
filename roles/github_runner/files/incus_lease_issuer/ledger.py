@@ -313,7 +313,7 @@ class _CleanupPostcheck:
 
 
 @dataclass
-class _ContinuationBankRead:
+class _BankReadObservation:
     path: Path
     device: int
     inode: int
@@ -353,7 +353,7 @@ _ACTIVE_CONTINUATION_READ = ContextVar("ledger_active_continuation_read", defaul
 def _observe_historical_bank(path, device, inode):
     """Permit bounded shared reads of the pinned historical bank."""
     require(_HISTORICAL_READ.get() is None, "ledger-history-already-active")
-    token = _HISTORICAL_READ.set(_ContinuationBankRead(Path(path), device, inode))
+    token = _HISTORICAL_READ.set(_BankReadObservation(Path(path), device, inode))
     try:
         yield
     finally:
@@ -363,8 +363,8 @@ def _observe_historical_bank(path, device, inode):
 @contextlib.contextmanager
 def _observe_active_continuation_bank(path, device, inode):
     """Share a short active-bank wait budget across the continuation census."""
-    require(_ACTIVE_CONTINUATION_READ.get() is None, "ledger-history-already-active")
-    observation = _ContinuationBankRead(Path(path), device, inode, busy_reason="ledger-busy-active-continuation")
+    require(_ACTIVE_CONTINUATION_READ.get() is None, "ledger-active-continuation-already-active")
+    observation = _BankReadObservation(Path(path), device, inode, busy_reason="ledger-busy-active-continuation")
     token = _ACTIVE_CONTINUATION_READ.set(observation)
     try:
         yield
