@@ -313,10 +313,11 @@ class _CleanupPostcheck:
 
 
 @dataclass
-class _HistoricalBankRead:
+class _BankReadObservation:
     path: Path
     device: int
     inode: int
+    busy_reason: str = "ledger-busy"
     # Shared by both projections; other work never replenishes this allowance.
     remaining: float = 0.25
 
@@ -339,23 +340,36 @@ class _HistoricalBankRead:
                     return
                 except BlockingIOError:
                     continue
-            raise Denied("ledger-busy")
+            raise Denied(self.busy_reason)
         finally:
             self.remaining = max(0, self.remaining - (time.monotonic() - started))
 
 
 _HISTORICAL_READ = ContextVar("ledger_historical_read", default=None)
+_ACTIVE_CONTINUATION_READ = ContextVar("ledger_active_continuation_read", default=None)
 
 
 @contextlib.contextmanager
 def _observe_historical_bank(path, device, inode):
     """Permit bounded shared reads of the pinned historical bank."""
     require(_HISTORICAL_READ.get() is None, "ledger-history-already-active")
-    token = _HISTORICAL_READ.set(_HistoricalBankRead(Path(path), device, inode))
+    token = _HISTORICAL_READ.set(_BankReadObservation(Path(path), device, inode))
     try:
         yield
     finally:
         _HISTORICAL_READ.reset(token)
+
+
+@contextlib.contextmanager
+def _observe_active_continuation_bank(path, device, inode):
+    """Share a short active-bank wait budget across the continuation census."""
+    require(_ACTIVE_CONTINUATION_READ.get() is None, "ledger-active-continuation-already-active")
+    observation = _BankReadObservation(Path(path), device, inode, busy_reason="ledger-busy-active-continuation")
+    token = _ACTIVE_CONTINUATION_READ.set(observation)
+    try:
+        yield
+    finally:
+        _ACTIVE_CONTINUATION_READ.reset(token)
 
 
 class Ledger:
@@ -523,15 +537,17 @@ class Ledger:
         require(self.fd >= 0, "ledger-closed")
         info = os.fstat(self.fd)
         self._private(info, directory=True)
-        historical = _HISTORICAL_READ.get()
-        observing = historical is not None and self.path == historical.path
+        observation = _ACTIVE_CONTINUATION_READ.get()
+        if observation is None or self.path != observation.path:
+            observation = _HISTORICAL_READ.get()
+        observing = observation is not None and self.path == observation.path
         if observing:
-            require((info.st_dev, info.st_ino) == (historical.device, historical.inode), "ledger-history-bank-drift")
+            require((info.st_dev, info.st_ino) == (observation.device, observation.inode), "ledger-history-bank-drift")
             require(read_only, "ledger-history-read-only")
         fd = self._open("lock", os.O_RDONLY if read_only else os.O_RDWR)
         try:
             if observing:
-                historical.acquire(fd)
+                observation.acquire(fd)
                 lock = os.fstat(fd)
                 require(os.path.samestat(lock, os.stat("lock", dir_fd=self.fd, follow_symlinks=False)),
                         "ledger-history-lock-drift")
@@ -1248,6 +1264,13 @@ class Ledger:
             require(len(state["leases"]) <= 4096, "custody-ledger-inventory-limit")
             return tuple(sorted(state["leases"]))
 
+    def continuation_identities(self):
+        """Project the three source bindings from one validated bank snapshot."""
+        with self._transaction(read_only=True) as state:
+            require(len(state["leases"]) <= 4096, "custody-ledger-inventory-limit")
+            return tuple((who["run_id"], who["caller_sha"], who["reusable_sha"])
+                         for who in (record["identity"] for record in state["leases"].values()))
+
     @staticmethod
     def _require_exclusive_preparation(state, identifier=None):
         from . import operating_custody
@@ -1753,7 +1776,7 @@ class Ledger:
         """
         require(all(type(value) is str and HEX.fullmatch(value) for value in (policy_sha256, baseline_sha256)),
                 "invalid-host-api-query")
-        with self._transaction() as state:
+        with self._transaction(read_only=True) as state:
             return self._host_api_claimants(state, policy_sha256, baseline_sha256)
 
     def bind_host_api_fence(self, identifier, effect_id, *, policy_sha256, baseline_sha256, boot_id,

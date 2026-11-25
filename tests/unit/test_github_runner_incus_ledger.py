@@ -4,6 +4,7 @@ No live kernel collector, socket, credential, Incus executor, custody acceptance
 or test PASS is established by preparing/closing these component fixtures.
 """
 import concurrent.futures
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 import fcntl
 import hashlib
@@ -15,13 +16,14 @@ import stat
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 from unittest import mock
 import unittest
 
 
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
-from incus_lease_issuer import ledger  # noqa: E402
+from incus_lease_issuer import ledger, run_factory  # noqa: E402
 from incus_lease_issuer.identity import Identity, Denied  # noqa: E402
 
 
@@ -259,6 +261,67 @@ class IncusLedgerTests(unittest.TestCase):
                 seen.set()
                 child.join(5)
             self.assertFalse(child.is_alive())
+
+    @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
+    def test_current_continuation_bank_waits_for_writer_and_rejects_foreign_lease(self):
+        with self.open() as store:
+            _, _, who, _ = self.prepare(store)
+        origin = {"run_id": who.run_id, "source_sha": who.caller_sha, "reusable_sha": who.reusable_sha}
+        state = self.path / "state.json"
+        original = state.read_bytes()
+        missed = threading.Event()
+        native_flock = fcntl.flock
+        bootstrap = SimpleNamespace(value={"ledger_path": str(self.path)})
+
+        def read_current(source):
+            def verify(_bootstrap, _qualified):
+                run_factory._require_continuation_bank(str(self.path), source)
+            with mock.patch.object(run_factory, "_continuation_origin_observations", side_effect=verify):
+                run_factory._continuation_origin_absent(bootstrap, None)
+
+        def observe(fd, mode):
+            try:
+                return native_flock(fd, mode)
+            except BlockingIOError:
+                missed.set()
+                raise
+
+        with (self.path / "lock").open("rb") as lock, concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            native_flock(lock, fcntl.LOCK_EX)
+            with mock.patch.object(fcntl, "flock", side_effect=observe):
+                result = pool.submit(read_current, origin)
+                try:
+                    self.assertTrue(missed.wait(1))
+                finally:
+                    native_flock(lock, fcntl.LOCK_UN)
+                result.result(timeout=1)
+            native_flock(lock, fcntl.LOCK_EX)
+            with self.assertRaisesRegex(Denied, "ledger-busy-active-continuation"):
+                read_current(origin)
+        with self.assertRaisesRegex(Denied, "continuation-original-or-unknown-lease"):
+            read_current(origin | {"run_id": who.run_id + 1})
+        self.assertEqual(state.read_bytes(), original)
+
+    def test_active_continuation_can_read_real_host_gate_claimants(self):
+        from incus_lease_issuer import host_api_fence
+
+        before = (self.path / "state.json").read_bytes()
+        bank = self.path.stat()
+        config = SimpleNamespace(host_api_fence_policy_path="/root/model", host_api_fence_policy_sha256="a" * 64)
+        policy = SimpleNamespace(sha256="a" * 64)
+        baseline = {"baseline_sha256": "b" * 64, "nft_table_handle": 7}
+        with ledger._observe_active_continuation_bank(self.path, bank.st_dev, bank.st_ino), \
+             mock.patch.object(host_api_fence, "_bound", return_value=policy), \
+             mock.patch.object(host_api_fence, "_host", return_value=nullcontext()), \
+             mock.patch.object(host_api_fence, "_baseline", return_value=baseline), \
+             mock.patch.object(host_api_fence, "_readback", return_value=(7, None, 0, 0)):
+            run_factory._twelfth_host_fence(config, 40, str(self.path), {})
+            with self.assertRaisesRegex(Denied, "ledger-active-continuation-already-active"):
+                with ledger._observe_active_continuation_bank(self.path, bank.st_dev, bank.st_ino):
+                    self.fail("nested active observation")
+            with self.open() as store, self.assertRaisesRegex(Denied, "ledger-history-read-only"):
+                store.challenge(self.worker)
+        self.assertEqual((self.path / "state.json").read_bytes(), before)
 
     def test_retired_bank_reader_denies_replaced_lock_entry(self):
         bank = self.path.stat()
