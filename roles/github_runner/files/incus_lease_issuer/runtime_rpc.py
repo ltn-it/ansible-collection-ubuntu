@@ -9,7 +9,9 @@ export and whole cleanup acceptance are not supplied by a process exit or this p
 """
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+import errno
 import hashlib
 import math
 import base64
@@ -247,9 +249,14 @@ def _stream(connected, lease_id, exported):
 
 class RuntimeRPC:
     """Root-fixed factory; no transport/command/Worker/policy request hooks."""
-    def __init__(self, root_config_path, expected_config_sha256, *, derived_configuration=None):
+    def __init__(self, root_config_path, expected_config_sha256, *, derived_configuration=None,
+                 g06_no_wait_scope_sha256=None):
         _root()
         self._derived_configuration = derived_configuration
+        require(g06_no_wait_scope_sha256 is None or (derived_configuration is not None
+                and type(g06_no_wait_scope_sha256) is str and ledger.HEX.fullmatch(g06_no_wait_scope_sha256)),
+                "runtime-g06-no-minimum-wait-scope")
+        self._g06_no_wait_scope_sha256 = g06_no_wait_scope_sha256
         self._origin = None
         if derived_configuration is not None:
             from . import run_factory
@@ -419,7 +426,8 @@ class RuntimeRPC:
                     require(who.valid_until <= selected.deadline, "runtime-initial-authorization-budget")
                     lease_id = store.runtime_prepare(native.nonce, current_worker, who,
                         policy_sha256=selected.custody_policy_sha256, cell_sha256=selected.cell_sha256,
-                        deadline=selected.deadline, identity_policy_sha256=identity.policy_digest(selected.identity))
+                        deadline=selected.deadline, identity_policy_sha256=identity.policy_digest(selected.identity),
+                        g06_no_wait_scope_sha256=self._g06_no_wait_scope_sha256)
                     record = store.read(lease_id)
                     writing = True
                     _write(connected, {"schema": 2, "type": "accepted", "operation": "run", "sequence": 0,
@@ -584,10 +592,27 @@ OBSERVER_OPERATIONS = frozenset({"observe-profile", "observe-operating"})
 BOOTSTRAP_BINDINGS = "/var/lib/lightning-it/incus-operating-bindings"
 
 
+@contextmanager
+def _operating_observer_session(configuration):
+    from . import operating_custody, root_session
+
+    reference = operating_custody._preparation_reference(
+        configuration.runtime_config_path, configuration.runtime_config_sha256)
+    with ExitStack() as stack:
+        try:
+            session = stack.enter_context(root_session._session(*reference))
+        except BlockingIOError as error:
+            # A failed entry means there is no Root session and no effect.
+            # Errors from the receipt body must propagate rather than retry.
+            if type(error) is not BlockingIOError or error.errno not in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise
+            yield None
+        else:
+            yield session
+
+
 def _operating_retained_receipt(configuration, registry, selector, store, lease_id):
     """Await only pre-entry lock contention; verify and report in one Root session."""
-    from contextlib import ExitStack
-    import errno
     from . import capacity, cell_contract, cleanup_storage, operating_custody, root_session
     record = store.read(lease_id)
     require(record["state"] == "retained", "runtime-observer-prune-not-retained")
@@ -598,17 +623,9 @@ def _operating_retained_receipt(configuration, registry, selector, store, lease_
             and rows[0]["state"] in {"intent", "verified"}, "runtime-observer-prune-held")
     if rows[0]["state"] == "intent":
         return None
-    reference = operating_custody._preparation_reference(
-        configuration.runtime_config_path, configuration.runtime_config_sha256)
-    with ExitStack() as stack:
-        try:
-            session = stack.enter_context(root_session._session(*reference))
-        except BlockingIOError as error:
-            # ONLY a failed context ENTER can be a known no-effect lock wait.
-            # Errors after entry (including from receipt reads) remain HOLD.
-            if type(error) is BlockingIOError and error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
-                return None
-            raise
+    with _operating_observer_session(configuration) as session:
+        if session is None:
+            return None
         config = root_session._require_session(session)
         owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
         require(store.read(lease_id) == record, "runtime-observer-prune-drift")
@@ -619,6 +636,26 @@ def _operating_retained_receipt(configuration, registry, selector, store, lease_
             configuration.runtime_config_sha256, registry, selector, store, lease_id, retained=True, session=session)
         root_session._require_session(session)
         return receipt
+
+
+def _operating_closed_receipt(configuration, registry, selector, store, lease_id):
+    """Read the stopped observation sealed before immediate cleanup."""
+    from . import cell_contract, finalization
+
+    runtime = _configuration(configuration.runtime_config_path, configuration.runtime_config_sha256)
+    with _operating_observer_session(configuration) as session:
+        if session is None:
+            return None
+        record = store.read(lease_id)
+        require(record["state"] == "closed" and store.read_policy(record["policy_sha256"])["retention_seconds"] == 0,
+                "runtime-observer-immediate-cleanup-required")
+        ledger.Ledger._cleanup_complete(list(record["effects"].values()))
+        ledger.Ledger._owned_instance_deleted(record)
+        owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
+        receipt = finalization._operating_evidence(runtime, registry, selector, store, owner, record,
+                                                   session=session, released=True, observation=True)
+        require(store.read(lease_id) == record, "runtime-observer-closed-record-drift")
+        return receipt | {"state": "closed"}
 
 
 class BootstrapRuntimeRPC:
@@ -680,8 +717,15 @@ class BootstrapRuntimeRPC:
             while True:
                 require(time.monotonic() < end, "runtime-observer-wait-held")
                 record = store.read(lease_id)
-                if operation == "observe-operating" and record["state"] == "retained":
+                if (operation == "observe-operating" and record["state"] == "retained"
+                        and store.read_policy(record["policy_sha256"])["retention_seconds"] != 0):
                     receipt = _operating_retained_receipt(configuration, runtime._registry, selector, store, lease_id)
+                    if receipt is not None:
+                        require(time.monotonic() < end, "runtime-observer-wait-held")
+                        kind = "operating-receipt"
+                        break
+                if operation == "observe-operating" and record["state"] == "closed":
+                    receipt = _operating_closed_receipt(configuration, runtime._registry, selector, store, lease_id)
                     if receipt is not None:
                         require(time.monotonic() < end, "runtime-observer-wait-held")
                         kind = "operating-receipt"
@@ -730,9 +774,14 @@ class BootstrapRuntimeRPC:
             if "configuration" in message:
                 run_factory._worker(connected, bootstrap)  # Cheap managed-peer proof before fixed-catalogue reads.
                 configuration = run_factory.resolve_configuration(bootstrap, selector, message["configuration"])
+                from . import startup_retirement
+
+                g06_scope = (startup_retirement._g06_no_wait_scope(bootstrap.value)
+                             if startup_retirement.G06_NO_WAIT_POLICY_FIELD in bootstrap.value else None)
                 handed_off = True
                 return RuntimeRPC(configuration.runtime_config_path, configuration.runtime_config_sha256,
-                    derived_configuration=configuration)._handle_selected(connected, (selector, operation))
+                    derived_configuration=configuration, g06_no_wait_scope_sha256=g06_scope)._handle_selected(
+                        connected, (selector, operation))
             challenge = run_factory.challenge_bootstrap(connected, bootstrap, selector,
                                                          snapshot_receipt_sha256=snapshot)
             _write(connected, {"schema": 2, "type": "challenge", "operation": operation,

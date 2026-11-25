@@ -261,8 +261,7 @@ def bootstrap_custody_policies(runtime, state):
     field = "post_engine_failure_policy_sha256"
     require(type(runtime["cells"]) is dict and all(type(template) is dict for template in runtime["cells"].values()))
     opted_in = [(name, template) for name, template in runtime["cells"].items() if field in template]
-    if "business_startup_policy_sha256" not in runtime and not opted_in:
-        return
+    g06_field = "g06_no_minimum_wait_policy_sha256"
     require(type(state.get("policies")) is dict)
 
     def exact_row(digest, expected):
@@ -284,8 +283,21 @@ def bootstrap_custody_policies(runtime, state):
                     for key in ("custodian_ref", "storage_ref", "approval_ref")))
     exact_row(base, original)
     business = original
+    if g06_field in runtime:
+        source, workflow, bank = runtime["source_identity"], runtime["source_workflow_sha256"], runtime["ledger_path"]
+        require(type(source) is dict and (source.get("repository"), source.get("repository_id"), source.get("owner_id"),
+                source.get("workflow_id"), source.get("workflow_path"), source.get("reusable_repository"),
+                source.get("reusable_path")) == ("ltn-it/ansible-collection-supplementary", 1103407173, 54334171,
+                214182490, ".github/workflows/collection-ci.yml", "ltn-it/modulix-validation",
+                ".github/workflows/collection-quality-profile-isolated.yml")
+                and type(workflow) is str and SHA.fullmatch(workflow)
+                and type(bank) is str and 1 < len(bank) <= 4096 and re.fullmatch(r"/[A-Za-z0-9_./@-]+", bank)
+                and str(PurePosixPath(bank)) == bank and ".." not in PurePosixPath(bank).parts)
+        scope = hashlib.sha256(canonical([source, workflow, bank])).hexdigest()
+        business = original | {"retention_seconds": 0, "g06_no_minimum_wait": scope}
+        exact_row(runtime[g06_field], business)
     if "business_startup_policy_sha256" in runtime:
-        business = original | {"startup_retirement": "protected-pre-vm-journal-v1"}
+        business = business | {"startup_retirement": "protected-pre-vm-journal-v1"}
         exact_row(runtime["business_startup_policy_sha256"], business)
     for selector, template in opted_in:
         matrix = template.get("matrix")
@@ -521,7 +533,8 @@ def configurations(path, digest, group, public_pin=None, retired_reference=None,
     if bootstrap:
         require(set(runtime) == {"schema", "source_identity", "source_workflow_sha256", "collector", "ledger_path",
                 "custody_policy_sha256", "controller", "preparation", "runtime", "capacity", "cells"}
-                | ({"operating_continuation", "business_startup_policy_sha256"} & runtime.keys()))
+                | ({"operating_continuation", "business_startup_policy_sha256",
+                    "g06_no_minimum_wait_policy_sha256"} & runtime.keys()))
         prep, collector, store = runtime["preparation"], runtime["collector"], runtime["ledger_path"]
         require(type(public_pin) is str and SHA.fullmatch(public_pin)
                 and public_pin == prep["signing_public_key_hex"])

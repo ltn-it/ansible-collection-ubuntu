@@ -1061,7 +1061,8 @@ def _operating_receipt(value, case, *, retained, lease=None, uuid=None):
             and LEASE.fullmatch(value["lease_id"]) and (lease is None or value["lease_id"] == lease)
             and type(value["instance_uuid"]) is str and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value["instance_uuid"])
             and (uuid is None or value["instance_uuid"] == uuid) and value["vm_state"] == "stopped"
-            and value["access"] == "withdrawn" and type(value["retention_seconds"]) is int and value["retention_seconds"] == 14400)
+            and value["access"] == "withdrawn" and type(value["retention_seconds"]) is int
+            and value["retention_seconds"] in {0, 14400})
     actual = value["raw_exit"]
     require(type(actual) is dict and set(actual) == {"code", "signal"}
             and ((actual["signal"] is None and _integer(actual["code"], 0, 255))
@@ -1076,8 +1077,10 @@ def _operating_receipt(value, case, *, retained, lease=None, uuid=None):
     else:
         require(cutoff is None)
     if retained:
-        require(value["state"] == "retained" and _integer(value["terminal_at"], 1, int(time.time()))
-                and _integer(value["retain_until"], value["terminal_at"] + 14400, value["terminal_at"] + 86400))
+        require(value["state"] == ("retained" if value["retention_seconds"] else "closed")
+                and _integer(value["terminal_at"], 1, int(time.time()))
+                and _integer(value["retain_until"], value["terminal_at"] + value["retention_seconds"],
+                             value["terminal_at"] + (86400 if value["retention_seconds"] else 0)))
     else:
         require(value["state"] == "safety-proved-retention-armed" and value["terminal_at"] is None and value["retain_until"] is None)
     return value

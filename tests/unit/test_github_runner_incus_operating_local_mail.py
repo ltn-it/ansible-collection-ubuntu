@@ -416,13 +416,15 @@ class RootMailTests(unittest.TestCase):
     def test_concurrent_same_event_recreation_after_archive_does_not_resend_or_stall(self):
         receipt = self.deliver()
         fd = watchdog._private_directory(str(self.spool))
-        original_save = watchdog._save_once
-        def archive_between_observation_and_create(directory, name, value):
+        original_publish = mail._publish_once
+
+        def archive_between_observation_and_create(spool, destination, name, value):
             if name == self.alarm.name:
                 self.assertTrue(mail._archive_confirmed(fd, self.config, self.event_id))
-            return original_save(directory, name, value)
+            return original_publish(spool, destination, name, value)
+
         try:
-            with mock.patch.object(watchdog, "_save_once", side_effect=archive_between_observation_and_create):
+            with mock.patch.object(mail, "_publish_once", side_effect=archive_between_observation_and_create):
                 watchdog._record(fd, {**self.event, "observed_at": self.event["observed_at"] + 1})
         finally:
             os.close(fd)

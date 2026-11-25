@@ -90,6 +90,46 @@ class PostEngineWatchdogTests(unittest.TestCase):
         self.finalizer.finalize.assert_called_once()
         self.allowed.assert_called_once_with(self.store, self.lease)
 
+    def test_immediate_closure_replays_the_same_custody_alarm(self):
+        self.record.update(state="retained", custody={"retain_until": 1000})
+        self.store.read_policy.return_value = {"retention_seconds": 0}
+        self.allowed.side_effect = [Denied("model-original-watchdog-tick"), False]
+
+        def finalize(*_):
+            self.record["state"] = "closed"
+
+        self.finalizer.finalize.side_effect = finalize
+        with mock.patch.object(custody, "_custody_record") as validate, \
+             mock.patch.object(custody, "_prune_retained_graph"):
+            # The first event does not reach the spool. The next tick closes
+            # the already retained lease and must return the event before the
+            # watchdog can retire its binding.
+            initial, = self.tick()["events"]
+            during_cleanup, = self.tick()["events"]
+            self.assertEqual(self.record["state"], "closed")
+            recovered, = self.tick()["events"]
+        self.assertEqual(recovered["kind"], "failed-cell-retained")
+        self.assertEqual(recovered["event_id"], during_cleanup["event_id"])
+        self.assertEqual(during_cleanup["event_id"], initial["event_id"])
+        self.assertEqual(recovered["lease_id"], self.lease)
+        self.assertEqual(validate.call_count, 4)
+        self.finalizer.finalize.assert_called_once_with(self.registry, self.selector, self.store, self.lease)
+        self.store.read_policy.return_value = {"retention_seconds": 14400}
+        self.assertEqual(self.tick()["events"], [])
+
+    def test_vm_backed_failure_resumes_after_its_custody_archive_was_published(self):
+        self.record.update(state="retained", owned_instance={"uuid": "bound-original-vm"},
+                           custody={"retain_until": 1000})
+        self.store.read_policy.return_value = {"retention_seconds": 0, custody.ledger.G06_NO_WAIT_MARKER: "d" * 64}
+        self.finalizer.prepare_post_engine_permit.side_effect = Denied("post-engine-archive-manifest-binding")
+        self.allowed.return_value = False
+        with mock.patch.object(custody, "_custody_record"):
+            result = self.tick()
+        self.assertEqual(result["state"], "CUSTODY_TICK_COMPLETE")
+        self.assertEqual([event["kind"] for event in result["events"]], ["failed-cell-retained"])
+        self.finalizer.prepare_post_engine_permit.assert_not_called()
+        self.finalizer.finalize.assert_called_once_with(self.registry, self.selector, self.store, self.lease)
+
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
 class NativeTerminalTests(unittest.TestCase):

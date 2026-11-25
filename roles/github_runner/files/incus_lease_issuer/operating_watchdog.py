@@ -131,6 +131,8 @@ def _lock(directory, name):
 
 
 def _record(spool, value):
+    from . import operating_local_mail
+
     event_fields(value)
     try:
         archive = os.open("mail-archive", installation.DIR_FLAGS, dir_fd=spool)
@@ -164,16 +166,18 @@ def _record(spool, value):
                             "dispatch_at": receipt["dispatch_at"], "phase": "MAILBOX_CONFIRMED",
                             "local_mailbox_confirmed": True, "personal_acknowledged": False,
                             "capacity_released": False}, "watchdog-mail-archive-receipt")
+                os.fsync(archive)
                 return original["event_id"]
         finally:
             os.close(archive)
     name = "alarm-" + value["event_id"] + ".json"
     try:
-        _save_once(spool, name, value)
+        operating_local_mail._publish_once(spool, spool, name, value)
     except FileExistsError:
         previous = event_fields(_read(spool, name)[0])
         require(previous == {**value, "observed_at": previous["observed_at"]}
                 and previous["observed_at"] <= value["observed_at"], "watchdog-event-drift")
+        os.fsync(spool)
     return value["event_id"]
 
 
@@ -325,7 +329,9 @@ def tick(root_config_path, expected_sha256):
                             and event["observed_at"] <= int(time.time()), "watchdog-result-binding")
                     events.append(_record(spool, event))
                 require(_read(bindings, name)[2] == before, "watchdog-binding-changed")
-                if _closed_binding(value):
+                # A later closure read can succeed after the custody read was
+                # held. Keep the route available to publish its specific alarm.
+                if result["state"] == "CUSTODY_TICK_COMPLETE" and _closed_binding(value):
                     require(_read(bindings, name)[2] == before, "watchdog-binding-changed")
                     os.unlink(name, dir_fd=bindings)
                     os.fsync(bindings)
