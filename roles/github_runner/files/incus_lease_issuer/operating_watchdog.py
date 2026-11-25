@@ -329,7 +329,9 @@ def tick(root_config_path, expected_sha256):
                             and event["observed_at"] <= int(time.time()), "watchdog-result-binding")
                     events.append(_record(spool, event))
                 require(_read(bindings, name)[2] == before, "watchdog-binding-changed")
-                if _closed_binding(value):
+                # A later closure read can succeed after the custody read was
+                # held. Keep the route available to publish its specific alarm.
+                if result["state"] == "CUSTODY_TICK_COMPLETE" and _closed_binding(value):
                     require(_read(bindings, name)[2] == before, "watchdog-binding-changed")
                     os.unlink(name, dir_fd=bindings)
                     os.fsync(bindings)

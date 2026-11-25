@@ -103,6 +103,12 @@ class RootWatchdogTests(unittest.TestCase):
         import errno
 
         self.closed.return_value = True
+        self.event = watchdog.alarm_envelope(
+            source_machine_id=MACHINE, source_boot_id=BOOT, runtime_config_sha256=self.runtime_sha,
+            snapshot_manifest_sha256="b" * 64, lease_id="c" * 32, kind="failed-cell-retained",
+            state_sha256="d" * 64, observed_at=int(time.time()))
+        complete = {"state": "CUSTODY_TICK_COMPLETE", "events": [self.event], "native_acceptance": False}
+        self.native.return_value = complete
         alarm = self.spool / ("alarm-" + self.event["event_id"] + ".json")
         write = os.write
 
@@ -119,6 +125,17 @@ class RootWatchdogTests(unittest.TestCase):
         self.assertTrue(self.binding_path.exists())
         self.assertEqual(len(list((self.spool / "mail-staging").iterdir())), 1)
 
+        generic = watchdog.alarm_envelope(
+            source_machine_id=MACHINE, source_boot_id=BOOT, runtime_config_sha256=self.runtime_sha,
+            snapshot_manifest_sha256="b" * 64, lease_id=None, kind="supervisor-observation-held",
+            state_sha256="e" * 64, observed_at=int(time.time()))
+        self.native.return_value = {"state": "HELD", "events": [generic], "native_acceptance": False}
+        self.tick()
+        self.assertTrue(self.binding_path.exists())
+        self.assertFalse(alarm.exists())
+        self.closed.assert_not_called()
+
+        self.native.return_value = complete
         self.tick()
         self.assertFalse(self.binding_path.exists())
         self.assertEqual(alarm.read_bytes(), ledger.canonical(self.event))
