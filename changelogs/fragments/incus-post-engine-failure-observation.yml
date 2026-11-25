@@ -1,0 +1,6 @@
+---
+minor_changes:
+  - >-
+    github_runner - Allow an explicitly opted-in POC Heavy lease to retire after a failed engine exit once Root
+    has archived the complete failure and independently verified resource absence. Planned operating cases and
+    existing leases continue to enforce their sealed custody policies.

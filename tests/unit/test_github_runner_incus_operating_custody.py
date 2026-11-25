@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -13,6 +14,81 @@ FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
 from incus_lease_issuer import identity, operating_custody as custody
 from incus_lease_issuer.identity import Denied
+
+
+class PostEngineWatchdogTests(unittest.TestCase):
+    def setUp(self):
+        from incus_lease_issuer import finalization, operating_watchdog, runtime_rpc
+
+        self.lease = "a" * 32
+        self.selector = "cell-" + "b" * 32
+        self.record = {"state": "prepared", "cell_sha256": "c" * 64, "policy_sha256": "d" * 64,
+                       "effects": {"start": {"operation": "engine-start", "state": "verified",
+                                              "engine_exit": {"exit_code": 1}}},
+                       "native_terminal": {"conclusion": "failure"}}
+        self.store = mock.MagicMock()
+        self.store.__enter__.return_value = self.store
+        self.store.lease_ids.return_value = [self.lease]
+        self.store.read.return_value = self.record
+        self.store.read_policy.return_value = {"retention_seconds": 14400,
+            "post_engine_failure_retirement": {"schema": 1, "selector": self.selector}}
+        row = SimpleNamespace(ledger_path="/private/ledger", cell_sha256=self.record["cell_sha256"],
+                              custody_policy_sha256=self.record["policy_sha256"])
+        self.registry = SimpleNamespace(policies={self.selector: row})
+        self.finalizer = mock.Mock()
+        self.finalizer.prepare_post_engine_permit.return_value = {"permit_sha256": "e" * 64}
+        self.finalizer.readback_post_engine_failure.return_value = {"readback_sha256": "f" * 64}
+        self.allowed = mock.Mock()
+        for patch in (
+            mock.patch.object(custody.os, "geteuid", return_value=0),
+            mock.patch.object(custody.ledger, "Ledger", return_value=self.store),
+            mock.patch.object(runtime_rpc, "_configuration"),
+            mock.patch.object(runtime_rpc, "RuntimeRPC", return_value=SimpleNamespace(_registry=self.registry)),
+            mock.patch.object(operating_watchdog, "_machine_boot",
+                              return_value=("1" * 32, "12345678-1234-1234-1234-123456789abc")),
+            mock.patch.object(finalization, "RootFinalizer", return_value=self.finalizer),
+            mock.patch.object(custody, "require_cleanup_allowed", self.allowed),
+        ):
+            self.addCleanup(patch.stop)
+            patch.start()
+
+    def tick(self):
+        return custody.tick_runtime("/private/runtime.json", "0" * 64, "1" * 64)
+
+    def test_opted_in_failure_closes_only_after_separate_readback(self):
+        result = self.tick()
+        binding = (self.registry, self.selector, self.store, self.lease)
+        self.assertEqual(self.finalizer.method_calls, [
+            mock.call.prepare_post_engine_permit(*binding),
+            mock.call.finalize_post_engine_failure(*binding, "e" * 64),
+            mock.call.readback_post_engine_failure(*binding, "e" * 64),
+            mock.call.close_post_engine_failure(*binding, "e" * 64, "f" * 64),
+        ])
+        self.assertFalse(result["native_acceptance"])
+        self.allowed.assert_not_called()
+
+    def test_failed_readback_keeps_lease_held_without_ordinary_fallback(self):
+        self.finalizer.readback_post_engine_failure.side_effect = Denied("still-present")
+        result = self.tick()
+        self.assertEqual(result["state"], "HELD")
+        self.assertEqual([row["kind"] for row in result["events"]], ["cleanup-unknown"])
+        self.assertFalse(result["native_acceptance"])
+        self.finalizer.close_post_engine_failure.assert_not_called()
+        self.allowed.assert_not_called()
+
+    def test_ordinary_custody_remains_for_non_opted_in_or_ineligible_leases(self):
+        self.finalizer.prepare_post_engine_permit.return_value = None
+        self.assertFalse(self.tick()["native_acceptance"])
+        self.finalizer.prepare_post_engine_permit.assert_called_once()
+        self.allowed.assert_called_once_with(self.store, self.lease)
+        self.finalizer.reset_mock()
+        self.allowed.reset_mock()
+
+        self.store.read_policy.return_value = {"retention_seconds": 14400}
+        self.assertFalse(self.tick()["native_acceptance"])
+        self.finalizer.prepare_post_engine_permit.assert_not_called()
+        self.finalizer.finalize.assert_called_once()
+        self.allowed.assert_called_once_with(self.store, self.lease)
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")

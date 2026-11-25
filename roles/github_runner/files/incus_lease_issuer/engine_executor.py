@@ -1170,6 +1170,18 @@ def _signal_owned(process, manifest):
         os.close(fd)
 
 
+def _bound_capture_file(runroot, effect, stream, *, keep=False):
+    """Read one original capture by the inode, length and SHA bound to the actual exit."""
+    require(stream in {"stdout", "stderr"}, "engine-capture-stream")
+    actual, capture = effect["engine_exit"], effect["engine_capture"]
+    size = actual[stream + "_bytes"]
+    proof, raw, stamp = installation._file(runroot + "/" + stream + ".log", max(1, size), private=True, keep=keep)
+    require(proof.size == size and proof.sha256 == actual[stream + "_sha256"]
+            and (proof.device, proof.inode) == (capture[stream + "_device"], capture[stream + "_inode"]),
+            "engine-capture-file-drift")
+    return proof, raw, stamp
+
+
 def _drained(manifest, capture):
     """Kernel subtree population, not merely original PID/CID disappearance."""
     details = identity.decode_json(manifest.canonical_bytes)

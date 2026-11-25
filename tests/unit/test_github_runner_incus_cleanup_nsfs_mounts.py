@@ -60,15 +60,72 @@ class NamespaceMountConsumerWalk(unittest.TestCase):
         self.data = {"engine": {"storage_root": str(self.root / "graph"), "runroot": str(self.root / "run")},
                      "output_path": str(self.root / "output"), "context_path": str(self.root / "context")}
 
-    def observe(self, forbidden=None):
+    def observe(self, forbidden=None, *, retained_alias=False):
         subject._no_consumers(self.data, str(self.root / "descriptor"), "fixture-unowned",
-                              [], time.monotonic() + 10, set(), [], forbidden_namespace=forbidden)
+                              [], time.monotonic() + 10, set(), [], forbidden_namespace=forbidden,
+                              retained_namespace_alias=retained_alias)
 
-    def append_namespace(self, raw):
+    def append_namespace(self, raw, point="/unrelated/ns-alias"):
         # Only the mountinfo input is modeled; the process/task/FD/map walk
         # still observes real private-container proc resources.
         identifier = max(int(row.split()[0]) for row in raw.splitlines()) + 1
-        return raw + f"{identifier} 1 0:4 net:[4026532529] /unrelated/ns-alias rw - nsfs nsfs rw\n".encode()
+        return raw + f"{identifier} 1 0:4 net:[4026532529] {point} rw - nsfs nsfs rw\n".encode()
+
+    def test_retained_namespace_exception_allows_only_its_exact_host_mount(self):
+        actual_read = subject._consumer_read
+        coordinates = (4, 4026532529)
+        alias = "/run/netns/lit-lease-fixture-unowned"
+
+        def read(path, limit, end):
+            raw = actual_read(path, limit, end)
+            return self.append_namespace(raw, alias) if path.name == "mountinfo" else raw
+
+        with mock.patch.object(subject, "_consumer_read", side_effect=read):
+            self.observe(coordinates, retained_alias=True)
+            with self.assertRaisesRegex(Denied, "namespace-mount-reference"):
+                self.observe(coordinates)
+            with self.assertRaisesRegex(Denied, "namespace-alias"):
+                self.observe(retained_alias=True)
+
+        def second_alias(path, limit, end):
+            raw = read(path, limit, end)
+            return self.append_namespace(raw) if path.name == "mountinfo" else raw
+
+        with mock.patch.object(subject, "_consumer_read", side_effect=second_alias), \
+             self.assertRaisesRegex(Denied, "namespace-mount-reference"):
+            self.observe(coordinates, retained_alias=True)
+
+    def test_same_retained_alias_in_foreign_mount_namespace_still_holds(self):
+        readfd, writefd = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(writefd)
+            os.read(readfd, 1)
+            os._exit(0)
+        os.close(readfd)
+        actual_read, actual_stat = subject._consumer_read, Path.stat
+        target = Path(f"/proc/{child}/task/{child}/ns/mnt")
+        native = target.stat()
+        common = self.append_namespace(Path("/proc/self/mountinfo").read_bytes(),
+                                       "/run/netns/lit-lease-fixture-unowned")
+
+        def stat(path, *args, **kwargs):
+            if path == target:
+                return SimpleNamespace(st_dev=native.st_dev, st_ino=native.st_ino + 10000000)
+            return actual_stat(path, *args, **kwargs)
+
+        def read(path, limit, end):
+            return common if path.name == "mountinfo" else actual_read(path, limit, end)
+
+        try:
+            with mock.patch.object(subject, "_consumer_read", side_effect=read):
+                self.observe((4, 4026532529), retained_alias=True)
+                with mock.patch.object(Path, "stat", stat), \
+                     self.assertRaisesRegex(Denied, "namespace-mount-reference"):
+                    self.observe((4, 4026532529), retained_alias=True)
+        finally:
+            os.close(writefd)
+            os.waitpid(child, 0)
 
     def test_exact_namespace_identity_holds_despite_unrelated_mountpoint_and_storage_device(self):
         actual = subject._consumer_read
