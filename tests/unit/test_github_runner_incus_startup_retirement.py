@@ -481,6 +481,14 @@ class PostEngineArchiveTests(unittest.TestCase):
             census.assert_not_called()
             publish.assert_not_called()
 
+            # A VM that was already observed follows stopped custody, including
+            # when its archive exists and the shared permit directory is present.
+            self.record["owned_instance"] = {"uuid": "original-vm"}
+            with mock.patch.object(startup_retirement, "_locate_post_engine_permit",
+                                   side_effect=identity.Denied("post-engine-archive-manifest-binding")) as locate:
+                self.assertIsNone(finalizer.prepare_post_engine_permit(*args))
+            locate.assert_not_called()
+
     def test_consumer_census_pins_the_created_storage_and_the_exact_disabled_namespace(self):
         from contextlib import nullcontext
         from dataclasses import replace

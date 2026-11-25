@@ -117,6 +117,19 @@ class PostEngineWatchdogTests(unittest.TestCase):
         self.store.read_policy.return_value = {"retention_seconds": 14400}
         self.assertEqual(self.tick()["events"], [])
 
+    def test_vm_backed_failure_resumes_after_its_custody_archive_was_published(self):
+        self.record.update(state="retained", owned_instance={"uuid": "bound-original-vm"},
+                           custody={"retain_until": 1000})
+        self.store.read_policy.return_value = {"retention_seconds": 0, custody.ledger.G06_NO_WAIT_MARKER: "d" * 64}
+        self.finalizer.prepare_post_engine_permit.side_effect = Denied("post-engine-archive-manifest-binding")
+        self.allowed.return_value = False
+        with mock.patch.object(custody, "_custody_record"):
+            result = self.tick()
+        self.assertEqual(result["state"], "CUSTODY_TICK_COMPLETE")
+        self.assertEqual([event["kind"] for event in result["events"]], ["failed-cell-retained"])
+        self.finalizer.prepare_post_engine_permit.assert_not_called()
+        self.finalizer.finalize.assert_called_once_with(self.registry, self.selector, self.store, self.lease)
+
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")
 class NativeTerminalTests(unittest.TestCase):

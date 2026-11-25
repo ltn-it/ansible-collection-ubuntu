@@ -610,6 +610,7 @@ def tick_runtime(root_config_path, expected_sha256, snapshot_manifest_sha256):
                     policy = store.read_policy(record["policy_sha256"])
                     failures = startup_retirement.FAILURES if ledger.G06_NO_WAIT_MARKER in policy else {"failure"}
                     if (record["native_terminal"]["conclusion"] in failures
+                            and not {"owned_instance", "custody"} & record.keys()
                             and startup_retirement._post_engine_enabled(policy, selector)):
                         try:
                             finalizer = finalization.RootFinalizer(root_config_path, expected_sha256)

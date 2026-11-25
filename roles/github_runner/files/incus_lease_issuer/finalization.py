@@ -520,9 +520,11 @@ class RootFinalizer:
                 "post-engine-permit-root")
         with root_session._session(self._runtime.preparation_config_path,
                                    self._runtime.preparation_config_sha256) as session:
+            record = store.read(lease_id)
+            if {"owned_instance", "custody"} & record.keys():
+                return None
             owner = cell_contract.owned_cell_for_cleanup(registry, selector, store, lease_id)
             config = self._fresh(session, registry, selector, store, owner)
-            record = store.read(lease_id)
             startup_retirement._post_engine_opt_in(store, record, selector)
             archive = startup_retirement._post_engine_archive_path(owner)
             quota_directory = archive if os.path.lexists(archive) else archive.parent
@@ -533,8 +535,6 @@ class RootFinalizer:
                             and existing["scope_sha256"] == ledger.digest(owner.incus), "post-engine-permit-resume-scope")
                     require(quota_directory == archive, "post-engine-permit-archive-missing")
                     return startup_retirement._confirm_durable_post_engine_permit(store, lease_id, existing, archive)
-            if {"owned_instance", "custody"} & record.keys():
-                return None
             admin, cleanup = self._post_engine_transport(config, owner, store)
             if admin.instances():
                 project = cleanup.readback("project")
