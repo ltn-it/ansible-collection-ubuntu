@@ -173,7 +173,7 @@ class SeventhPreleaseHistoryTests(unittest.TestCase):
                 (factory.collector, "finish_worker_acquisition", finish),
                 (factory.collector, "discard_worker_acquisition", discard),
                 (factory.identity, "verify_github_workflow_assignment", lambda *a, **k: (who, json.loads(get("/contents/.github/workflows/collection-ci.yml?ref=" + who.caller_sha)))),
-                (factory.identity, "HTTPSReader", lambda: NS(read=get)),
+                (factory.identity, "HTTPSReader", lambda **_: NS(read=get)),
                 (factory, "_continuation_receipt", lambda _: qualified),
                 (factory, "_continuation_original_native", older),
                 (factory, "_continuation_third_native", historical("third", three["native_third"])),
