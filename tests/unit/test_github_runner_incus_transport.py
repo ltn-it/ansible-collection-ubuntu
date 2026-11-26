@@ -4,6 +4,7 @@ The fake reader is a daemon-owned dependency, not caller-supplied native facts.
 These tests establish no live token, API latency, issuer or Incus authority.
 """
 import copy
+import http.client
 import inspect
 import ssl
 import threading
@@ -269,6 +270,46 @@ class HTTPSReaderBoundaryTests(unittest.TestCase):
                 identity.HTTPSReader().read(RUN_URL, bearer=FAKE_ACCESS_TOKEN)
         self.assertEqual(str(error.exception), "https-read-failed")
         opener.open.assert_called_once()
+
+    def test_history_retries_one_identical_get_and_shares_the_budget(self):
+        budget = threading.BoundedSemaphore()
+        reader = identity.HTTPSReader(claim_transport_retry=lambda: budget.acquire(blocking=False))
+        opener = mock.MagicMock()
+        response = mock.MagicMock(status=200)
+        response.read.return_value = b"{}"
+        handle = mock.MagicMock()
+        handle.__enter__.return_value = response
+        opener.open.side_effect = [
+            urllib.error.URLError(http.client.RemoteDisconnected()),
+            handle,
+            TimeoutError(),
+        ]
+        with mock.patch.object(identity.urllib.request, "build_opener", return_value=opener):
+            self.assertEqual(reader.read(RUN_URL, bearer=FAKE_ACCESS_TOKEN), b"{}")
+            with self.assertRaisesRegex(identity.Denied, "^https-read-failed$"):
+                reader.read(JOB_URL, bearer=FAKE_ACCESS_TOKEN)
+        self.assertEqual(opener.open.call_count, 3)
+        first, retry, later = [call.args[0] for call in opener.open.call_args_list]
+        self.assertIs(first, retry)
+        self.assertEqual((first.full_url, first.get_method(), later.full_url), (RUN_URL, "GET", JOB_URL))
+
+    def test_history_fails_closed_on_permission_tls_and_repeated_transport_errors(self):
+        cases = (
+            (urllib.error.HTTPError(RUN_URL, 403, "private-sentinel", {}, None), "https-status", 1),
+            (urllib.error.URLError(ssl.SSLCertVerificationError("private-sentinel")), "https-read-failed", 1),
+            (ConnectionResetError("private-sentinel"), "https-read-failed", 2),
+        )
+        for failure, code, calls in cases:
+            with self.subTest(kind=type(failure).__name__):
+                opener = mock.Mock()
+                opener.open.side_effect = failure
+                claim = mock.Mock(return_value=True)
+                reader = identity.HTTPSReader(claim_transport_retry=claim)
+                with mock.patch.object(identity.urllib.request, "build_opener", return_value=opener):
+                    with self.assertRaisesRegex(identity.Denied, f"^{code}$"):
+                        reader.read(RUN_URL, bearer=FAKE_ACCESS_TOKEN)
+                self.assertEqual(opener.open.call_count, calls)
+                self.assertEqual(claim.call_count, calls - 1)
 
     def test_status_and_body_limits_deny_without_retry(self):
         for status, body in ((503, b"private-error-body"), (200, b"x" * 8388609)):

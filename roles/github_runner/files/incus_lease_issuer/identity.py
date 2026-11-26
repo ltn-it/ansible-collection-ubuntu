@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -495,7 +496,21 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class HTTPSReader:
-    """Fixed-origin reads, verified TLS, bounded bodies, no redirects or retries."""
+    """Fixed-origin GETs with verified TLS, bounded bodies, and no redirects."""
+
+    def __init__(self, *, claim_transport_retry=None):
+        self._claim_transport_retry = claim_transport_retry
+
+    @staticmethod
+    def _transient_transport(error):
+        if isinstance(error, urllib.error.HTTPError):
+            return False
+        if isinstance(error, urllib.error.URLError):
+            error = error.reason
+        return (
+            isinstance(error, (TimeoutError, ConnectionError, http.client.IncompleteRead))
+            or isinstance(error, socket.gaierror) and error.errno == socket.EAI_AGAIN
+        )
 
     def read(self, url, *, bearer=None):
         require(url == JWKS_URL or url.startswith(API + "/repos/"), "https-origin-denied")
@@ -509,14 +524,20 @@ class HTTPSReader:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                             urllib.request.HTTPSHandler(context=ssl.create_default_context()),
                                             NoRedirect())
-        try:
-            with opener.open(urllib.request.Request(url, headers=headers), timeout=10) as response:
-                require(response.status == 200, "https-status")
-                raw = response.read(8388609)
-        except (OSError, urllib.error.URLError):
-            raise Denied("https-read-failed") from None
-        require(len(raw) <= 8388608, "https-body-limit")
-        return raw
+        request = urllib.request.Request(url, headers=headers)
+        for attempt in range(2):
+            try:
+                with opener.open(request, timeout=10) as response:
+                    require(response.status == 200, "https-status")
+                    raw = response.read(8388609)
+                    require(len(raw) <= 8388608, "https-body-limit")
+                    return raw
+            except (OSError, http.client.IncompleteRead) as error:
+                if (attempt == 0 and self._claim_transport_retry is not None
+                        and self._transient_transport(error) and self._claim_transport_retry()):
+                    continue
+                code = "https-status" if isinstance(error, urllib.error.HTTPError) else "https-read-failed"
+                raise Denied(code) from None
 
 
 @_diagnostic_step("native-assignment")

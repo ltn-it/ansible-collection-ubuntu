@@ -119,6 +119,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 27:
+        return _validate_twenty_seventh_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 26:
         return _validate_twenty_sixth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 25:
@@ -202,7 +204,8 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
                     15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
                     19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN, 21: TWENTY_FIRST_MAIN, 22: TWENTY_SECOND_MAIN,
-                    23: TWENTY_THIRD_MAIN, 24: TWENTY_FOURTH_MAIN, 25: TWENTY_FIFTH_MAIN, 26: TWENTY_SIXTH_MAIN}
+                    23: TWENTY_THIRD_MAIN, 24: TWENTY_FOURTH_MAIN, 25: TWENTY_FIFTH_MAIN, 26: TWENTY_SIXTH_MAIN,
+                    27: TWENTY_SEVENTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -260,6 +263,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 27:
+        return _validate_twenty_seventh_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 26:
         return _validate_twenty_sixth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 25:
@@ -2866,3 +2871,58 @@ def _validate_twenty_sixth_qualification(value):
             "continuation-twenty-sixth-original-locators")
     _validate_closed_vm_catalogues(retired, previous["retirement"]["catalogues"])
     return identities
+
+
+# Exact terminal source and unchanged, empty C26 bank, independently read on Runner01.
+TWENTY_SEVENTH_MAIN = "462614f6c6f236383e51220828ee0b2d6af7d9c7"
+TWENTY_SEVENTH_RUN = 45902045944
+TWENTY_SEVENTH_CHECKS = (140194040525, 140194788856)
+TWENTY_SEVENTH_GRAPH = "4ea2fae3d93b65fd85c98ba453c7a291cea8fff06ed19a52adb36652231cb37e"
+TWENTY_SEVENTH_BOOTSTRAP = "44f416dc10660600813a172f41924071db07446e45378cd08031fea046afd000"
+TWENTY_SEVENTH_QUALIFICATION = "0b604cb09cf45bf575686b74ea3ace157518e6dbd1cad11865f8b1a6c95f753d"
+TWENTY_SEVENTH_REASON = "terminal-original-push-before-test-cell-configuration"
+
+TWENTY_SEVENTH_SUCCESSOR_WORKFLOW = "ab4594da428e076f8ec74c318c79b60d9412a2c7683cc9442d5eb178eb09d908"
+TWENTY_SEVENTH_SUCCESSOR_REUSABLE = "50f69a7c7705878eb84831516b9a3308faa6a3d3"
+
+
+def twenty_seventh_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, TWENTY_SIXTH_SUCCESSOR_REUSABLE,
+                                       TWENTY_SEVENTH_GRAPH, TWENTY_SEVENTH_CHECKS, TWENTY_SEVENTH_MAIN)
+
+
+def _validate_twenty_seventh_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    engine_policy._hash(TWENTY_SEVENTH_SUCCESSOR_WORKFLOW)
+    cell_contract._commit(TWENTY_SEVENTH_SUCCESSOR_REUSABLE)
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == TWENTY_SEVENTH_REASON and ref["sha256"] == TWENTY_SEVENTH_QUALIFICATION,
+            "continuation-twenty-seventh-qualification")
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=TWENTY_SEVENTH_MAIN, expected_workflow=TWENTY_SEVENTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=TWENTY_SEVENTH_SUCCESSOR_REUSABLE, reason="continuation-twenty-seventh-successor")
+    require(successor["source_sha"] != TWENTY_SEVENTH_MAIN and successor["run_id"] > TWENTY_SEVENTH_RUN,
+            "continuation-twenty-seventh-replay")
+    return value
+
+
+def _validate_twenty_seventh_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_twenty_seventh", "previous_qualification",
+                                "previous_bootstrap", "previous_bank"})
+    require(value["purpose"] == TWENTY_SEVENTH_REASON and ledger.digest(value) == TWENTY_SEVENTH_QUALIFICATION
+            and ledger.digest(value["native_twenty_seventh"]) == TWENTY_SEVENTH_GRAPH,
+            "continuation-twenty-seventh-history")
+    for field, digest in (("previous_bootstrap", "sha256"), ("previous_bank", "state_file_sha256")):
+        pin = engine_policy._keys(value[field], {"path", "device", "inode", digest})
+        engine_policy._path(pin["path"])
+        engine_policy._hash(pin[digest])
+        for coordinate in ("device", "inode"):
+            engine_policy._integer(pin[coordinate], 1, 2**63 - 1)
+    bootstrap, bank = value["previous_bootstrap"], value["previous_bank"]
+    require(bootstrap["sha256"] == TWENTY_SEVENTH_BOOTSTRAP
+            and PurePosixPath(bootstrap["path"]).parent == PurePosixPath(bank["path"]).parent
+            and value["previous_qualification"]["schema"] == 26,
+            "continuation-twenty-seventh-original-locators")
+    return _validate_twenty_sixth_qualification(value["previous_qualification"])

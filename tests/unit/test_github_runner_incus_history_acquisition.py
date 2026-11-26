@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
@@ -232,6 +233,9 @@ class HistoryAcquisitionTests(unittest.TestCase):
             self.assert_continuation_native_family_drift_rejected(25, (*phases, "twenty_fifth"))
         with self.subTest(schema=26):
             self.assert_continuation_native_family_drift_rejected(26, (*phases, "twenty_fifth", "twenty_sixth"))
+        with self.subTest(schema=27):
+            self.assert_continuation_native_family_drift_rejected(
+                27, (*phases, "twenty_fifth", "twenty_sixth", "twenty_seventh"))
 
     def assert_continuation_native_family_drift_rejected(self, schema, phases):
         receipt = self.receipt
@@ -303,6 +307,7 @@ class HistoryAcquisitionTests(unittest.TestCase):
         raw = b'explicit native model workflow'
         worker = ledger.Worker(995, 78, 1234, 5678, '12345678-1234-4234-8234-123456789abc')
         main = threading.get_ident()
+        started_at = datetime.fromtimestamp(int(time.time()) - 1, timezone.utc).isoformat().replace('+00:00', 'Z')
         effects = []
         successor = {'source_sha': 'e' * 40, 'run_id': cells.SEVENTH_RUN + 1, 'reusable_sha': 'f' * 40}
         descriptor = {**self.descriptor, 'successor': successor}
@@ -337,7 +342,7 @@ class HistoryAcquisitionTests(unittest.TestCase):
                 if path.startswith('/contents/'):
                     return ledger.canonical({'type': 'file', 'path': '.github/workflows/collection-ci.yml', 'encoding': 'base64', 'content': base64.b64encode(raw).decode(), 'size': len(raw)})
                 if path == '/actions/jobs/123':
-                    return ledger.canonical({'id': 123, 'run_id': who.run_id, 'head_sha': who.caller_sha, 'status': 'in_progress', 'conclusion': None, 'name': 'modeled-current-job', 'started_at': '2026-11-16T23:18:15Z'})
+                    return ledger.canonical({'id': 123, 'run_id': who.run_id, 'head_sha': who.caller_sha, 'status': 'in_progress', 'conclusion': None, 'name': 'modeled-current-job', 'started_at': started_at})
                 if path == '/git/commits/' + who.caller_sha:
                     return ledger.canonical({'sha': who.caller_sha})
                 return ledger.canonical(self.get(path))
@@ -346,7 +351,7 @@ class HistoryAcquisitionTests(unittest.TestCase):
                 url = f.identity.API + '/repos/' + f.SOURCE + '/contents/.github/workflows/collection-ci.yml?ref=' + result.caller_sha
                 return result, f.identity.decode_json(read(url))
 
-            for obj, name, value in [(f.admission, '_secret', main_only('secret', None)), (f, '_controls', main_only('controls', 'same')), (f.collector, 'begin_worker_acquisition', main_only('begin', (worker, object()))), (f.collector, 'finish_worker_acquisition', after('finish', worker)), (f.collector, 'discard_worker_acquisition', main_only('discard', None)), (f.identity, 'verify_github_workflow_assignment', workflow_assignment), (f.identity, 'HTTPSReader', lambda: NS(read=read)), (f, '_continuation_receipt', lambda _: (descriptor, self.receipt, {}, None)), (f, '_continuation_origin_absent', after('absence')), (cells, 'validate_continuation_commit', after('commit'))]:
+            for obj, name, value in [(f.admission, '_secret', main_only('secret', None)), (f, '_controls', main_only('controls', 'same')), (f.collector, 'begin_worker_acquisition', main_only('begin', (worker, object()))), (f.collector, 'finish_worker_acquisition', after('finish', worker)), (f.collector, 'discard_worker_acquisition', main_only('discard', None)), (f.identity, 'verify_github_workflow_assignment', workflow_assignment), (f.identity, 'HTTPSReader', lambda **_: NS(read=read)), (f, '_continuation_receipt', lambda _: (descriptor, self.receipt, {}, None)), (f, '_continuation_origin_absent', after('absence')), (cells, 'validate_continuation_commit', after('commit'))]:
                 stack.enter_context(patch.object(obj, name, value))
             f._native(connected, selected, 'nonce', 'worker-proof-main-only', 'modeled-api')
             self.assertLess(effects.index('absence'), effects.index('commit'))
