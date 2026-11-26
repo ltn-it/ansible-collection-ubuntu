@@ -48,7 +48,8 @@ _DIAGNOSTIC_STAGES = frozenset({
     "native-current", "native-histories", "intake-stage", "intake-discovery",
     "snapshot-acquisition", "snapshot-readback", "observer", "observer-lookup",
     "observer-native", "runtime-selected", "continuation-origin", "continuation-commit",
-    "namespace-census", "collector-finish", "engine-spawn",
+    "namespace-census", "collector-finish", "engine-spawn", "runtime-native-heartbeat",
+    "runtime-native-heartbeat-finish", "runtime-native-heartbeat-consume", "runtime-heartbeat-refresh",
 })
 _DIAGNOSTIC_REASONS = frozenset({
     "fence-proc-acquire-unstable", "bootstrap-challenge-expired", "bootstrap-native-denied", "bootstrap-native-drift",
@@ -89,6 +90,11 @@ _DIAGNOSTIC_REASONS = frozenset({
     "run-config-lookup-unique", "run-config-observer", "run-configuration-lookup-held", "runtime-observer-original-lease",
     "runtime-observer-original-invocation", "runtime-bootstrap-selector", "ledger-busy", "ledger-busy-active-continuation",
     "ledger-active-continuation-already-active", "host-api-tuple-timer",
+    "runtime-native-proof", "runtime-native-proof-expired", "runtime-native-provenance-drift",
+    "runtime-native-denied", "runtime-peer-drift", "runtime-derived-invocation", "runtime-renewal-budget",
+    "runtime-heartbeat-challenge-expired",
+    "runtime-previous-authorization-expired", "refresh-native-worker", "challenge-replay-or-worker",
+    "expired-admission", "lease-not-active",
     "engine-cidfile", "engine-container-inspect", "engine-container-not-owned",
     "engine-supervisor-exited-before-tracking", "engine-capture-limit-before-tracking", "engine-tracking-timeout",
 })
@@ -102,6 +108,7 @@ class _Diagnostic:
     counts: tuple[tuple[str, int, int], ...] = ()
     stage: str | None = None
     reason: str = "unclassified"
+    heartbeat_timings: tuple[tuple[str, int, int], ...] = ()
 
 
 _DIAGNOSTIC: ContextVar[_Diagnostic | None] = ContextVar("lit_root_runtime_diagnostic", default=None)
@@ -156,6 +163,26 @@ def _diagnostic_step(stage):
 
 
 @contextmanager
+def _diagnostic_heartbeat_timing(phase):
+    """Record only fixed phase names and relative monotonic times."""
+    require(phase in {"native-observation", "final-census"}, "runtime-diagnostic-phase")
+    if _DIAGNOSTIC.get() is None:
+        yield
+        return
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        current = _DIAGNOSTIC.get()
+        offset = min(86400000, max(0, int((start - current.wall) * 1000)))
+        duration = min(86400000, max(0, int((time.monotonic() - start) * 1000)))
+        rows = {name: (at, elapsed) for name, at, elapsed in current.heartbeat_timings}
+        rows[phase] = (offset, duration)
+        _DIAGNOSTIC.set(replace(current, heartbeat_timings=tuple(
+            (name, at, elapsed) for name, (at, elapsed) in sorted(rows.items()))))
+
+
+@contextmanager
 def _diagnostic_request(*, reuse=False):
     """One Root AUTHPRIV terminal record; no public framing or policy change.
 
@@ -179,6 +206,8 @@ def _diagnostic_request(*, reuse=False):
                 message = {"schema": 1, "component": "incus-runtime-v2", "stage": current.stage,
                     "reason": current.reason, "wall_ms": elapsed(current.wall, time.monotonic()),
                     "cpu_ms": elapsed(current.cpu, time.process_time()), "counts": current.counts}
+                if current.heartbeat_timings:
+                    message["heartbeat_timings_ms"] = current.heartbeat_timings
                 # One nonblocking datagram to the existing local journal socket.
                 # syslog.syslog() may block on a full queue; diagnostics must not
                 # extend a request's native deadline or hold its cleanup open.

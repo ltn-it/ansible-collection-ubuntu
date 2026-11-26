@@ -1070,13 +1070,30 @@ class Ledger:
             self._refresh_authorization(state, identifier, nonce, worker, identity, now)
 
     def runtime_refresh_identity(self, identifier, nonce, worker, identity, *, cell_sha256, identity_policy_sha256):
-        now = self._now()
-        self._refresh_input(nonce, worker, identity, now)
-        scope = _runtime_scope("heartbeat", cell_sha256, identity_policy_sha256)
-        require(identity.policy_sha256 == identity_policy_sha256, "runtime-identity-policy")
         with self._transaction() as state:
-            require(self._lease(state, identifier)["cell_sha256"] == cell_sha256, "runtime-root-binding")
-            self._refresh_authorization(state, identifier, nonce, worker, identity, now, scope)
+            self._append_runtime_heartbeat(state, identifier, nonce, worker, identity, self._now(),
+                                           cell_sha256, identity_policy_sha256)
+
+    def _commit_runtime_heartbeat(self, identifier, proof, connected, selected, minimum_validity):
+        """Consume the same-socket proof inside the original ledger transaction."""
+        from . import admission, identity
+
+        with self._transaction() as state:
+            worker, who = admission._consume_runtime_heartbeat(proof, connected, selected)
+            now = self._now()
+            require(minimum_validity < who.valid_until - now, "runtime-renewal-budget")
+            self._append_runtime_heartbeat(state, identifier, proof.nonce, worker, who, now,
+                                           selected.cell_sha256, identity.policy_digest(selected.identity))
+
+    def _append_runtime_heartbeat(self, state, identifier, nonce, worker, identity, now,
+                                  cell_sha256, identity_policy_sha256):
+        scope = _runtime_scope("heartbeat", cell_sha256, identity_policy_sha256)
+        self._refresh_input(nonce, worker, identity, now)
+        require(identity.policy_sha256 == identity_policy_sha256, "runtime-identity-policy")
+        lease = self._lease(state, identifier)
+        require(lease["cell_sha256"] == cell_sha256, "runtime-root-binding")
+        require(now < lease["authorizations"][-1]["valid_until"], "runtime-previous-authorization-expired")
+        self._refresh_authorization(state, identifier, nonce, worker, identity, now, scope)
 
     def consume_runtime_proof(self, nonce, worker, identity, operation, *, cell_sha256,
                               identity_policy_sha256, policy_sha256, deadline, lease_id=None):

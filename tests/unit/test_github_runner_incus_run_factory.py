@@ -768,6 +768,19 @@ class RootConfigurationTests(unittest.TestCase):
             challenge["nonce"], token, "synthetic-job-token", purpose="observer")
         factory.require_bootstrap_native(observer, self.helper.server, observer.policy, token, "synthetic-job-token")
         self.assertEqual(factory.find_existing_configuration(self.bootstrap, self.selector, observer), result)
+        with mock.patch.object(factory, "_native", wraps=factory._native) as native:
+            _, current, _ = factory.require_bootstrap_observer_reader(
+                observer, self.helper.server, observer.policy, token, "synthetic-job-token")
+            self.assertEqual(current, observer.identity)
+            self.assertIs(native.call_args.kwargs["check_host_resources"], False)
+            with self.assertRaisesRegex(Denied, "bootstrap-native-proof"):
+                factory.require_bootstrap_observer_reader(
+                    self.proof, self.helper.server, self.proof.policy, token, "synthetic-job-token")
+        self.helper.native.job["status"] = "completed"
+        with self.assertRaises(Denied):
+            factory.require_bootstrap_observer_reader(
+                observer, self.helper.server, observer.policy, token, "synthetic-job-token")
+        self.helper.native.job["status"] = "in_progress"
         self.assertEqual(factory._inventory(Path(result.directory)), inventory)
         with self.assertRaises(Denied):
             factory.create_run_configuration(observer, self.helper.server, self.bootstrap, self.selector,
