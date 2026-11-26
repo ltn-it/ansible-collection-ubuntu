@@ -1,0 +1,4 @@
+---
+bugfixes:
+  - Reuse one worker acquisition across the derived Incus configuration lookup and bound the pre-challenge wait separately from authentication and lease deadlines.
+  - Give final observers a separate bounded read wait for authoritative cleanup receipts without changing Root proof or frame deadlines.

@@ -50,6 +50,8 @@ MAX_EVIDENCE_FILE_BYTES = 256 * 1024 ** 2
 MAX_EVIDENCE_TOTAL_BYTES = 512 * 1024 ** 2
 FRAME_SECONDS = 5
 AUTHENTICATION_IDLE_SECONDS = 60
+DERIVED_PRE_CHALLENGE_SECONDS = 90
+FINAL_OBSERVATION_IDLE_SECONDS = 240
 INITIAL_AUTH_CAPABILITY = "initial-auth-idle-v1"
 # Keep the derived runtime's preparation reserve in sync with this lead.
 DERIVED_HEARTBEAT_LEAD_SECONDS = 90
@@ -184,11 +186,11 @@ def _receive(connected):
     return _object(_exact(connected, length, deadline))
 
 
-def _authenticated_reply(connected):
+def _authenticated_reply(connected, *, idle_seconds=AUTHENTICATION_IDLE_SECONDS):
     # Native GitHub/Root authentication may occupy its sealed <=60s allowance.
     # Idle wait is distinct from the five-second bounded frame-read deadline;
     # neither extends authorization, the lease or a Root transition budget.
-    ready, _, _ = select.select([connected], [], [], AUTHENTICATION_IDLE_SECONDS)
+    ready, _, _ = select.select([connected], [], [], idle_seconds)
     require(ready)
     return _receive(connected)
 
@@ -281,7 +283,12 @@ def _authenticate(selector, operation, lease_id=None, *, artifact=None, snapshot
         connected.sendall(_frame(message, 1024))
         # Root collects complete installed/process evidence before issuing its
         # nonce. Reuse the existing auth idle wait; frame/nonce deadlines stay fixed.
-        challenge = _authenticated_reply(connected)
+        if locator is None:
+            challenge = _authenticated_reply(connected)
+        else:
+            # The derived lookup rechecks retained host resources before
+            # issuing a nonce. No OIDC token has been requested at this point.
+            challenge = _authenticated_reply(connected, idle_seconds=DERIVED_PRE_CHALLENGE_SECONDS)
         _failure(challenge, operation)
         intake = challenge.get("phase") == "intake"
         observer = challenge.get("phase") == "observer"
@@ -1031,8 +1038,8 @@ def observe_profile(profile, scenario, target):
     connection = None
     try:
         connection = _authenticate(selector, "observe-profile")
-        require(select.select([connection[0]], [], [], 180)[0])
-        outcome = _receive(connection[0])
+        # Root still requires the original live observer proof before it replies.
+        outcome = _authenticated_reply(connection[0], idle_seconds=FINAL_OBSERVATION_IDLE_SECONDS)
         _failure(outcome, "observe-profile")
         require(set(outcome) == {"schema", "type", "operation", "cell", "receipt"}
                 and type(outcome["schema"]) is int and outcome["schema"] == 2 and outcome["type"] == "final-receipt"
@@ -1166,8 +1173,8 @@ def observe_operating(case):
     connection = None
     try:
         connection = _authenticate(selector, "observe-operating")
-        require(select.select([connection[0]], [], [], 180)[0])
-        reply = _receive(connection[0])
+        # Root still requires the original live observer proof before it replies.
+        reply = _authenticated_reply(connection[0], idle_seconds=FINAL_OBSERVATION_IDLE_SECONDS)
         _failure(reply, "observe-operating")
         require(set(reply) == {"schema", "type", "operation", "cell", "receipt"}
                 and type(reply["schema"]) is int and reply["schema"] == 2 and reply["type"] == "operating-receipt"
