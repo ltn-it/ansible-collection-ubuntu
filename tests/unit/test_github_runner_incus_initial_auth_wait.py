@@ -16,7 +16,7 @@ client = fixture.client
 
 
 class InitialChallengeTests(unittest.TestCase):
-    def exchange(self, operation, delay):
+    def exchange(self, operation, delay, *, derived=False):
         connected, server = socket.socketpair()
         self.addCleanup(connected.close)
         self.addCleanup(server.close)
@@ -35,23 +35,39 @@ class InitialChallengeTests(unittest.TestCase):
         thread.start()
         authentication = SimpleNamespace(AUDIENCE="urn:test:", _secret=lambda value: value,
                                           _oidc=lambda audience: fixture.TOKEN)
-        connection = (connected, None, None, None, None)
+        connection = (connected, (None, None, None, False), None, None, None)
+        configurations = {"registered-cell": "a" * 64} if derived else {}
+        original_select = client.select.select
+
+        def wait_for_challenge(readable, writable, exceptional, timeout):
+            # Model C23's observed 62.514-second pre-challenge work without
+            # waiting a full minute on every test run.
+            if derived and 5 < timeout < 62.514:
+                return [], [], []
+            return original_select(readable, writable, exceptional, timeout)
+
         with patch.object(client, "_authentication", return_value=authentication), \
                 patch.object(client, "_connect", return_value=connection), \
                 patch.object(client, "_stable"), patch.object(client, "_close"), \
+                patch.object(client.select, "select", side_effect=wait_for_challenge), \
+                patch.object(client, "_authenticated_reply", wraps=client._authenticated_reply) as wait, \
                 patch.dict(client.os.environ, {"GITHUB_TOKEN": fixture.API}), \
-                patch.dict(client._CONFIGURATIONS, {}, clear=True):
+                patch.dict(client._CONFIGURATIONS, configurations, clear=True):
             result = client._authenticate("registered-cell", operation)
         thread.join(timeout=2)
         self.assertIs(result, connection)
         self.assertFalse(failures)
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0]["nonce"], fixture.NONCE)
+        self.assertEqual(wait.call_args.kwargs, {"idle_seconds": 90} if derived else {})
 
     def test_execution_and_observer_wait_for_real_challenge_after_five_second_frame_budget(self):
         for operation in ("run", "observe-profile"):
             with self.subTest(operation=operation):
                 self.exchange(operation, client.FRAME_SECONDS + 0.2)
+
+    def test_derived_locator_survives_observed_pre_challenge_delay(self):
+        self.exchange("run", 0.01, derived=True)
 
     def test_auth_wait_timeout_denies_without_reading_a_frame_or_sending_auth(self):
         connected, server = socket.socketpair()
@@ -63,6 +79,31 @@ class InitialChallengeTests(unittest.TestCase):
                 client._authenticated_reply(connected)
         self.assertEqual(wait.call_args.args[-1], 60)
         self.assertEqual(client.FRAME_SECONDS, 5)
+
+
+    def test_final_observers_await_the_original_root_result_with_bounded_idle(self):
+        connection, peer = socket.socketpair()
+        self.addCleanup(connection.close)
+        self.addCleanup(peer.close)
+
+        def measured_readiness(readable, writable, exceptional, timeout):
+            # Six retained-history scans plus the controller reads can pass
+            # the former 180-second client ceiling while the Root proof is live.
+            return (readable, writable, exceptional) if timeout > 192 else ([], [], [])
+
+        for observe, arguments in ((client.observe_profile, ("heavy", "keycloak-heavy", "ubuntu-24.04")),
+                                   (client.observe_operating, ("failure",))):
+            with self.subTest(operation=observe.__name__), \
+                    patch.object(client, "_authenticate", return_value=(connection,)) as authenticate, \
+                    patch.object(client, "_close"), \
+                    patch.object(client.select, "select", side_effect=measured_readiness) as wait, \
+                    patch.object(client, "_receive", return_value={"type": "unrecognized"}) as read_frame:
+                with self.assertRaises(client.ClientDenied):
+                    observe(*arguments)
+            self.assertEqual(authenticate.call_count, 1)
+            self.assertEqual(wait.call_args.args[-1], 240)
+            read_frame.assert_called_once_with(connection)
+            self.assertEqual(client.FRAME_SECONDS, 5)
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root proper EE only")

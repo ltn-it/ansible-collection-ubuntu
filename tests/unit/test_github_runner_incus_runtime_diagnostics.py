@@ -226,7 +226,10 @@ class DiagnosticsTests(unittest.TestCase):
     def bootstrap(self):
         obj = runtime_rpc.BootstrapRuntimeRPC.__new__(runtime_rpc.BootstrapRuntimeRPC)
         obj._bootstrap = SimpleNamespace(path="/fixed-private-bootstrap", sha256="a" * 64)
-        bootstrap = SimpleNamespace(value={"runtime": {"authentication_timeout_seconds": 60}})
+        bootstrap = SimpleNamespace(collector=object(), value={
+            "runtime": {"authentication_timeout_seconds": 60},
+            "source_identity": {"runner_id": 78, "service_uid": 2101},
+        })
         self.enterContext(mock.patch.object(runtime_rpc.admission, "_socket"))
         self.enterContext(mock.patch.object(run_factory, "load_bootstrap", return_value=bootstrap))
         self.enterContext(mock.patch.object(runtime_rpc, "_read", return_value={
@@ -302,17 +305,25 @@ class DiagnosticsTests(unittest.TestCase):
         obj, writes = self.bootstrap()
         message = {"schema": 2, "cell": "approved-heavy", "operation": "run", "configuration": "b" * 64}
         self.enterContext(mock.patch.object(runtime_rpc, "_read", return_value=message))
-        self.enterContext(mock.patch.object(run_factory, "_worker"))
+        worker = runtime_rpc.ledger.Worker(2101, 78, 23456, 777, "12345678-1234-4234-8234-123456789abc")
+        acquisition = object()
+        begin = self.enterContext(mock.patch.object(runtime_rpc.collector, "begin_worker_acquisition",
+                                                   return_value=(worker, acquisition)))
+        discard = self.enterContext(mock.patch.object(runtime_rpc.collector, "discard_worker_acquisition"))
         self.enterContext(mock.patch.object(run_factory, "resolve_configuration", return_value=SimpleNamespace(
             runtime_config_path="/fixed-private-runtime", runtime_config_sha256="d" * 64)))
-        def fail(connected, selected):
+        def fail(connected, selected, *, worker_acquisition):
+            self.assertEqual(worker_acquisition, (worker, acquisition))
             identity._diagnostic_failed("runtime-selected", identity.Denied("stale-observation"))
             runtime_rpc._write(connected, {"schema": 2, "type": "failure", "operation": "run",
                                           "disposition": "unknown-hold"})
             raise identity.Denied("runtime-delivery-unknown")
         inner = self.enterContext(mock.patch.object(runtime_rpc, "RuntimeRPC"))
         inner.return_value._handle_selected.side_effect = fail
-        self.assertEqual(obj.handle(object()), {"type": "failure"})
+        connected = object()
+        self.assertEqual(obj.handle(connected), {"type": "failure"})
+        self.assertIs(begin.call_args.args[0], connected)
+        discard.assert_called_once_with(acquisition)
         self.assertEqual(writes.call_count, 1)
         self.log.assert_called_once()
         self.assertEqual(self.record()["stage"], "runtime-selected")

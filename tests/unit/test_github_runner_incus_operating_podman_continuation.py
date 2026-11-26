@@ -749,6 +749,82 @@ class SixteenthBankPreservationTests(unittest.TestCase):
             run_factory._revalidate_sixteenth_prelease(self.receipt, str(self.new))
 
 
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root Linux preservation fixture")
+class TwentyFourthBankPreservationTests(unittest.TestCase):
+    def setUp(self):
+        parent = Path("/run/proof")
+        if not parent.is_dir() or parent.stat().st_uid != 0 or parent.stat().st_mode & 0o077:
+            self.skipTest("private Root fixture directory /run/proof required")
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=parent, prefix="c24-preservation-")))
+        self.old, self.new = root / "original", root / "successor"
+        for bank in (self.old, self.new):
+            bank.mkdir(mode=0o700)
+            ledger.Ledger.initialize(str(bank))
+        self.state = self.old / "state.json"
+        bootstrap = root / "bootstrap.json"
+        bootstrap.touch(mode=0o600)
+        stamp = bootstrap.stat()
+        previous = {"schema": 23}
+        self.original = SimpleNamespace(path=str(bootstrap), sha256="a" * 64,
+                                       value={"ledger_path": str(self.old)}, file_stamp=(stamp.st_dev, stamp.st_ino))
+        self.entries = {"intake": {"receipt_sha256": "b" * 64}, "configuration": {"receipt_sha256": "c" * 64}}
+        self.bank = {"path": str(self.old), "device": self.old.stat().st_dev, "inode": self.old.stat().st_ino,
+                     "state_file_sha256": hashlib.sha256(self.state.read_bytes()).hexdigest()}
+        self.receipt = {"previous_qualification": previous, "retirement": {
+            "original_bootstrap": {"path": str(bootstrap), "sha256": self.original.sha256,
+                                   "device": stamp.st_dev, "inode": stamp.st_ino},
+            "original_bank": self.bank, "entries": self.entries}}
+        self.enterContext(patch.object(run_factory, "load_bootstrap", return_value=self.original))
+        self.enterContext(patch.object(run_factory, "_continuation_receipt", return_value=(
+            {"schema": 23, "successor": {"run_id": cells.TWENTY_FOURTH_RUN, "source_sha": cells.TWENTY_FOURTH_MAIN}},
+            previous)))
+        self.seals = self.enterContext(patch.object(run_factory, "_retired_original_entries"))
+
+    def verify(self, successor=None):
+        run_factory._revalidate_twenty_fourth_prelease(self.receipt, str(self.new if successor is None else successor))
+
+    def test_unchanged_bank_is_verified_with_both_seals_without_writing(self):
+        before = self.state.read_bytes(), self.state.stat().st_mtime_ns
+        self.verify()
+        self.seals.assert_called_once_with(self.original, self.entries, cells.TWENTY_FOURTH_MAIN,
+                cells.TWENTY_THIRD_SUCCESSOR_REUSABLE, cells.TWENTY_FOURTH_RUN, cells.TWENTY_FOURTH_CHECKS[0],
+                revalidating=True)
+        self.assertEqual((self.state.read_bytes(), self.state.stat().st_mtime_ns), before)
+
+    def test_bank_reuse_alias_inode_and_hash_drift_are_denied(self):
+        with self.assertRaisesRegex(identity.Denied, "continuation-tenth-bank-reuse"):
+            self.verify(self.old)
+        with (patch.object(run_factory.installation, "_open_directory", return_value=os.open(self.old, os.O_RDONLY)),
+              self.assertRaisesRegex(identity.Denied, "continuation-tenth-bank-alias")):
+            self.verify()
+        with (patch.dict(self.bank, inode=self.bank["inode"] + 1),
+              self.assertRaisesRegex(identity.Denied, "ledger-history-bank-drift")):
+            self.verify()
+        with (patch.dict(self.bank, state_file_sha256="f" * 64),
+              self.assertRaisesRegex(identity.Denied, "continuation-twenty-fourth-original-prelease-state")):
+            self.verify()
+
+    def test_original_requires_empty_leases_and_tokens(self):
+        for changed, reason in (("leases", "continuation-tenth-original-lease"),
+                                ("tokens", "continuation-twenty-fourth-original-prelease-state")):
+            state = {"leases": {}, "tokens": {}, changed: {"synthetic": {}}}
+            with (self.subTest(changed=changed), patch.object(ledger.Ledger, "_load", return_value=state),
+                  self.assertRaisesRegex(identity.Denied, reason)):
+                self.verify()
+
+    def test_each_seal_failure_and_bank_drift_during_seal_verification_hold(self):
+        for kind in self.entries:
+            self.seals.side_effect = identity.Denied("modeled-" + kind + "-seal-drift")
+            with self.subTest(kind=kind), self.assertRaisesRegex(identity.Denied, "modeled-" + kind + "-seal-drift"):
+                self.verify()
+
+        def replace_state(*args, **kwargs):
+            self.state.write_bytes(self.state.read_bytes() + b" ")
+        self.seals.side_effect = replace_state
+        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-fourth-original-prelease-state"):
+            self.verify()
+
+
 class PodmanContinuationTests(unittest.TestCase):
     def setUp(self):
         self.lookup = {"path": "/unit/qualification.json", "sha256": "b" * 64}

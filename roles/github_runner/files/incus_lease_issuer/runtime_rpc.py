@@ -23,7 +23,7 @@ import struct
 import time
 from types import MappingProxyType
 
-from . import (admission, cell_contract, engine_executor, engine_policy, identity, installation,
+from . import (admission, cell_contract, collector, engine_executor, engine_policy, identity, installation,
                ledger, network_fence, policy_registry, preparation, refresh, signed_context)
 from .identity import Denied, require
 
@@ -343,7 +343,7 @@ class RuntimeRPC:
         return self._handle_selected(connected, None)
 
     @identity._diagnostic_step("runtime-selected")
-    def _handle_selected(self, connected, selection):
+    def _handle_selected(self, connected, selection, *, worker_acquisition=None):
         # Selection is only a locator parsed by the fixed bootstrap entry.
         # Fresh normal native authentication below grants all actual authority.
         _root()
@@ -363,7 +363,13 @@ class RuntimeRPC:
             require(capture == {key: self._config.capture[key]
                     for key in ("stdout_limit", "stderr_limit", "total_limit")}, "runtime-capture-policy")
             controls = admission._controls(selected)[0]
-            worker = admission._worker(connected, selected)
+            if worker_acquisition is None:
+                worker = admission._worker(connected, selected)
+            else:
+                first_worker, acquisition = worker_acquisition
+                worker = admission._validate_worker(
+                    collector.finish_worker_acquisition(acquisition, connected, selected.collector), selected)
+                require(worker == first_worker, "runtime-peer-drift")
             store = ledger.Ledger(selected.ledger_path, clock=time.time)
             challenge = store.runtime_challenge(worker, operation, selected.cell_sha256,
                 identity.policy_digest(selected.identity), ttl=self._config.authentication_timeout_seconds)
@@ -772,16 +778,25 @@ class BootstrapRuntimeRPC:
                 staging = True  # Native terminal readback may be durably recorded.
                 return self._observe(connected, bootstrap, selector, operation)
             if "configuration" in message:
-                run_factory._worker(connected, bootstrap)  # Cheap managed-peer proof before fixed-catalogue reads.
-                configuration = run_factory.resolve_configuration(bootstrap, selector, message["configuration"])
                 from . import startup_retirement
 
-                g06_scope = (startup_retirement._g06_no_wait_scope(bootstrap.value)
-                             if startup_retirement.G06_NO_WAIT_POLICY_FIELD in bootstrap.value else None)
-                handed_off = True
-                return RuntimeRPC(configuration.runtime_config_path, configuration.runtime_config_sha256,
-                    derived_configuration=configuration, g06_no_wait_scope_sha256=g06_scope)._handle_selected(
-                        connected, (selector, operation))
+                worker, acquisition = collector.begin_worker_acquisition(connected, bootstrap.collector)
+                try:
+                    base = bootstrap.value["source_identity"]
+                    require(type(worker) is ledger.Worker and worker.runner_id == base["runner_id"]
+                            and worker.uid == base["service_uid"], "bootstrap-native-worker")
+                    worker.validate()
+                    configuration = run_factory.resolve_configuration(bootstrap, selector, message["configuration"])
+                    g06_scope = (startup_retirement._g06_no_wait_scope(bootstrap.value)
+                                 if startup_retirement.G06_NO_WAIT_POLICY_FIELD in bootstrap.value else None)
+                    # The collector brackets the lookup on this socket. The
+                    # derived policy must finish the same one-use acquisition.
+                    handed_off = True
+                    return RuntimeRPC(configuration.runtime_config_path, configuration.runtime_config_sha256,
+                        derived_configuration=configuration, g06_no_wait_scope_sha256=g06_scope)._handle_selected(
+                            connected, (selector, operation), worker_acquisition=(worker, acquisition))
+                finally:
+                    collector.discard_worker_acquisition(acquisition)
             challenge = run_factory.challenge_bootstrap(connected, bootstrap, selector,
                                                          snapshot_receipt_sha256=snapshot)
             _write(connected, {"schema": 2, "type": "challenge", "operation": operation,

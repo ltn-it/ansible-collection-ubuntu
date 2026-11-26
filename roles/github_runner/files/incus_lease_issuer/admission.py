@@ -162,7 +162,10 @@ def _request(connected, job_api_token):
 def _worker(connected, policy):
     # collect_worker itself acquires SO_PEERCRED and revalidates boot/lineage,
     # exact service, installation, loaded-code closure and anti-injection state.
-    result = collector.collect_worker(connected, policy.collector)
+    return _validate_worker(collector.collect_worker(connected, policy.collector), policy)
+
+
+def _validate_worker(result, policy):
     require(type(result) is ledger.Worker, "admission-collected-worker")
     result.validate()
     require(result.runner_id == policy.identity.runner_id and result.uid == policy.identity.service_uid,
