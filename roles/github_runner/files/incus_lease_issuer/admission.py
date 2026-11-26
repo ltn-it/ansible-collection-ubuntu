@@ -187,6 +187,16 @@ class _NativeProof:
     until: float
 
 
+@dataclass(frozen=True, eq=False)
+class _NativeHeartbeatObservation(_NativeProof):
+    """An authenticated assignment bound to its challenge, with no effect authority."""
+
+
+@dataclass(frozen=True, eq=False)
+class _NativeHeartbeatProof(_NativeProof):
+    """One-use authorization minted after the final worker census."""
+
+
 _NATIVE_PROOFS = weakref.WeakSet()
 _NATIVE_GUARD = threading.Lock()
 
@@ -212,6 +222,20 @@ def verify_runtime_native(connected_socket, selected, nonce, token, api_token):
     JWT/API bearers are used only during this call and never retained in the
     resulting process-local capability. Ledger consumes its nonce/JTI later.
     """
+    return _verify_runtime_native(connected_socket, selected, nonce, token, api_token)
+
+
+@identity._diagnostic_step("runtime-native-heartbeat")
+def _observe_runtime_heartbeat(connected_socket, selected, nonce, token, api_token, *, challenge_expires_at):
+    """Authenticate the exact challenge before acquiring the Root preparation lock."""
+    with identity._diagnostic_heartbeat_timing("native-observation"):
+        remaining = challenge_expires_at - time.time()
+        require(remaining > 0, "runtime-heartbeat-challenge-expired")
+        return _verify_runtime_native(connected_socket, selected, nonce, token, api_token,
+                                      heartbeat_until=time.monotonic() + remaining)
+
+
+def _verify_runtime_native(connected_socket, selected, nonce, token, api_token, *, heartbeat_until=None):
     _root()
     try:
         _validate_policy(selected)
@@ -234,31 +258,77 @@ def verify_runtime_native(connected_socket, selected, nonce, token, api_token):
         _receiver_run(selected, who)
         require(_worker(connected_socket, selected) == before
                 and _controls(selected)[0] == controls, "runtime-native-provenance-drift")
-        proof = _NativeProof(before, who, nonce, selected, controls, weakref.ref(connected_socket),
-                             connected_socket.fileno(), os.getpid(), threading.get_ident(),
-                             time.monotonic() + FRAME_TIMEOUT_SECONDS)
-        with _NATIVE_GUARD:
-            _NATIVE_PROOFS.add(proof)
-        return proof
-    except Exception:
+        if heartbeat_until is not None:
+            require(time.monotonic() < heartbeat_until, "runtime-heartbeat-challenge-expired")
+            require(int(time.time()) < who.valid_until, "runtime-native-proof-expired")
+            return _mint_runtime_proof(_NativeHeartbeatObservation, connected_socket, selected, nonce,
+                                       before, who, controls, heartbeat_until)
+        return _mint_runtime_proof(_NativeProof, connected_socket, selected, nonce, before, who, controls,
+                                   time.monotonic() + FRAME_TIMEOUT_SECONDS)
+    except Exception as error:
+        if heartbeat_until is not None:
+            identity._diagnostic_failed("runtime-native-heartbeat", error)
         raise Denied("runtime-native-denied") from None
 
 
-def _require_native(proof, connected_socket, selected):
-    """Reacquire provenance for the same live socket and minted native proof."""
+def _mint_runtime_proof(proof_type, connected, selected, nonce, worker, who, controls, until):
+    proof = proof_type(worker, who, nonce, selected, controls, weakref.ref(connected), connected.fileno(),
+                       os.getpid(), threading.get_ident(), until)
+    with _NATIVE_GUARD:
+        _NATIVE_PROOFS.add(proof)
+    return proof
+
+
+def _require_native_binding(proof, connected_socket, selected):
     _root()
-    require(type(proof) is _NativeProof, "runtime-native-proof")
     with _NATIVE_GUARD:
         require(proof in _NATIVE_PROOFS, "runtime-native-proof")
     require(proof.pid == os.getpid() and proof.thread == threading.get_ident()
             and proof.connected() is connected_socket and proof.fd == connected_socket.fileno()
             and proof.policy == selected and time.monotonic() < proof.until
             and int(time.time()) < proof.identity.valid_until, "runtime-native-proof-expired")
+
+
+def _require_native(proof, connected_socket, selected):
+    """Reacquire provenance for the same live socket and minted native proof."""
+    require(type(proof) is _NativeProof, "runtime-native-proof")
+    _require_native_binding(proof, connected_socket, selected)
     _socket(connected_socket)
     require(_controls(selected)[0] == proof.controls
             and _worker(connected_socket, selected) == proof.worker, "runtime-native-provenance-drift")
     require(time.monotonic() < proof.until and int(time.time()) < proof.identity.valid_until,
             "runtime-native-proof-expired")
+    return proof.worker, proof.identity
+
+
+@identity._diagnostic_step("runtime-native-heartbeat-finish")
+def _finish_runtime_heartbeat(observation, connected_socket, selected):
+    """Mint the short authority only after a third matching full worker census."""
+    require(type(observation) is _NativeHeartbeatObservation, "runtime-native-proof")
+    _require_native_binding(observation, connected_socket, selected)
+    _socket(connected_socket)
+    with identity._diagnostic_heartbeat_timing("final-census"):
+        worker = _worker(connected_socket, selected)
+    require(worker == observation.worker
+            and _controls(selected)[0] == observation.controls, "runtime-native-provenance-drift")
+    _require_native_binding(observation, connected_socket, selected)
+    with _NATIVE_GUARD:
+        _NATIVE_PROOFS.remove(observation)
+    return _mint_runtime_proof(_NativeHeartbeatProof, connected_socket, selected, observation.nonce,
+                               observation.worker, observation.identity, observation.controls,
+                               min(observation.until, time.monotonic() + FRAME_TIMEOUT_SECONDS))
+
+
+@identity._diagnostic_step("runtime-native-heartbeat-consume")
+def _consume_runtime_heartbeat(proof, connected_socket, selected):
+    """Use the fresh locked census once, immediately before the ledger write."""
+    require(type(proof) is _NativeHeartbeatProof, "runtime-native-proof")
+    _require_native_binding(proof, connected_socket, selected)
+    _socket(connected_socket)
+    require(_controls(selected)[0] == proof.controls, "runtime-native-provenance-drift")
+    _require_native_binding(proof, connected_socket, selected)
+    with _NATIVE_GUARD:
+        _NATIVE_PROOFS.remove(proof)
     return proof.worker, proof.identity
 
 

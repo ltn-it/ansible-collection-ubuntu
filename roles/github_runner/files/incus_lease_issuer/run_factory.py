@@ -145,7 +145,7 @@ def load_bootstrap(path, expected_sha256):
                         runtime["initial_transition_timeout_seconds"])
     runtime_rpc._validate_early_renewal(runtime)
     continuation = value.get("operating_continuation")
-    if type(continuation) is dict and continuation.get("schema") == 25:
+    if type(continuation) is dict and continuation.get("schema") in {25, 26}:
         require(runtime.get("renewal_lead_seconds") == runtime_rpc.EARLY_RENEWAL_LEAD_SECONDS,
                 "bootstrap-twenty-fifth-renewal-policy")
     require(type(runtime["capture"]) is dict, "bootstrap-runtime-capture")
@@ -282,7 +282,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 25 or receipt.get("schema") == 25:
+    if descriptor["schema"] == 26 or receipt.get("schema") == 26:
+        require(descriptor["schema"] == receipt.get("schema") == 26, "continuation-twenty-sixth-receipt-kind")
+    elif descriptor["schema"] == 25 or receipt.get("schema") == 25:
         require(descriptor["schema"] == receipt.get("schema") == 25, "continuation-twenty-fifth-receipt-kind")
     elif descriptor["schema"] == 24 or receipt.get("schema") == 24:
         require(descriptor["schema"] == receipt.get("schema") == 24, "continuation-twenty-fourth-receipt-kind")
@@ -819,6 +821,7 @@ def _continuation_origin_observations(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    twenty_sixth_catalogues = None
     twenty_fifth_catalogues = None
     twenty_fourth_catalogues = None
     twenty_third_catalogues = None
@@ -832,6 +835,12 @@ def _continuation_origin_observations(bootstrap, qualified):
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 26:
+        _revalidate_closed_vm(receipt["retirement"], receipt["previous_qualification"],
+                              bootstrap.value["ledger_path"], descriptor["successor"], native_cleanup=True)
+        twenty_sixth_catalogues = receipt["retirement"]["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 25
     if schema == 25:
         _revalidate_closed_vm(receipt["retirement"], receipt["previous_qualification"],
                               bootstrap.value["ledger_path"], descriptor["successor"], native_cleanup=True)
@@ -930,7 +939,7 @@ def _continuation_origin_observations(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = (twenty_fifth_catalogues or twenty_fourth_catalogues or twenty_third_catalogues
+        retired = (twenty_sixth_catalogues or twenty_fifth_catalogues or twenty_fourth_catalogues or twenty_third_catalogues
                    or twenty_second_catalogues or twenty_first_catalogues
                    or twentieth_catalogues or nineteenth_catalogues
                    or eighteenth_catalogues or seventeenth_catalogues
@@ -988,7 +997,14 @@ def _revalidate_closed_vm(retirement, previous, successor_bank, successor, *, na
     from . import cleanup_storage, engine_executor, incus_admin, incus_mutation, network_fence, startup_retirement
 
     constants = operating_cells
-    if native_cleanup and previous["schema"] == 24:
+    if native_cleanup and previous["schema"] == 25:
+        bootstrap_sha, generation = constants.TWENTY_SIXTH_BOOTSTRAP, 25
+        source, run_id, reusable, job = (
+            constants.TWENTY_SIXTH_MAIN, constants.TWENTY_SIXTH_RUN,
+            constants.TWENTY_FIFTH_SUCCESSOR_REUSABLE, constants.TWENTY_SIXTH_CHECKS[0])
+        lease_id, archive_sha = constants.TWENTY_SIXTH_LEASE, constants.TWENTY_SIXTH_ARCHIVE
+        native_terminal_sha = constants.TWENTY_SIXTH_TERMINAL
+    elif native_cleanup and previous["schema"] == 24:
         bootstrap_sha, generation = constants.TWENTY_FIFTH_BOOTSTRAP, 24
         source, run_id, reusable, job = (constants.TWENTY_FIFTH_MAIN, constants.TWENTY_FIFTH_RUN,
                                         constants.TWENTY_FOURTH_SUCCESSOR_REUSABLE, constants.TWENTY_FIFTH_CHECKS[0])
@@ -2216,6 +2232,10 @@ def _revalidate_twenty_fourth_prelease(receipt, successor_bank):
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
     generation = descriptor["schema"]
+    twenty_sixth = receipt if generation == 26 else None
+    if twenty_sixth is not None:
+        receipt = twenty_sixth["previous_qualification"]
+        generation = 25
     twenty_fifth = receipt if generation == 25 else None
     if twenty_fifth is not None:
         receipt = twenty_fifth["previous_qualification"]
@@ -2359,6 +2379,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if twenty_fifth is not None:
         families.append((_continuation_twenty_fifth_native, {}, twenty_fifth["native_twenty_fifth"],
                          "continuation-twenty-fifth-native-drift"))
+    if twenty_sixth is not None:
+        families.append((_continuation_twenty_sixth_native, {}, twenty_sixth["native_twenty_sixth"],
+                         "continuation-twenty-sixth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -2471,6 +2494,13 @@ def require_bootstrap_native(proof, connected, selected, token, api_token):
 def require_bootstrap_intake_reader(proof, connected, selected, token, api_token):
     """Revalidate the current job while reading or validating private intake bytes."""
     require(type(proof) is BootstrapNativeProof and proof.policy.purpose == "execution",
+            "bootstrap-native-proof")
+    return _require_bootstrap_native(proof, connected, selected, token, api_token, check_host_resources=False)
+
+
+def require_bootstrap_observer_reader(proof, connected, selected, token, api_token):
+    """Revalidate an observer between its full catalogue and final host checks."""
+    require(type(proof) is BootstrapNativeProof and proof.policy.purpose == "observer",
             "bootstrap-native-proof")
     return _require_bootstrap_native(proof, connected, selected, token, api_token, check_host_resources=False)
 
@@ -2713,7 +2743,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 16:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
@@ -3709,3 +3739,8 @@ def _continuation_twenty_fourth_native(get):
 def _continuation_twenty_fifth_native(get):
     return _terminal_family(get, operating_cells.TWENTY_FIFTH_RUN, operating_cells.TWENTY_FIFTH_CHECKS,
                             operating_cells.twenty_fifth_native_projection)
+
+
+def _continuation_twenty_sixth_native(get):
+    return _terminal_family(get, operating_cells.TWENTY_SIXTH_RUN, operating_cells.TWENTY_SIXTH_CHECKS,
+                            operating_cells.twenty_sixth_native_projection)

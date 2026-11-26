@@ -442,6 +442,71 @@ class RootAdmissionBridgeTests(unittest.TestCase):
                     admission._require_native(proof, server, self.policy)
             self.assertEqual(self.collected.call_count, before + 1)
 
+    def test_heartbeat_proof_is_minted_after_the_third_worker_read_and_consumed_once(self):
+        body = self.admit_body(self.challenge())
+        worker_reads = []
+        initial = 100.0
+        diagnostic = identity._DIAGNOSTIC.set(identity._Diagnostic(initial, 0, os.getpid()))
+        self.addCleanup(identity._DIAGNOSTIC.reset, diagnostic)
+
+        def collect(*_):
+            worker_reads.append(self.worker)
+            return self.worker
+
+        def monotonic():
+            return initial + (admission.FRAME_TIMEOUT_SECONDS + 1 if len(worker_reads) == 3 else 0)
+
+        before = (self.store_path / "state.json").read_bytes()
+        with _pair() as (server, _), _pair() as (other, _), \
+             mock.patch.object(admission, "_worker", side_effect=collect), \
+             mock.patch.object(admission.time, "monotonic", side_effect=monotonic):
+            observed = admission._observe_runtime_heartbeat(server, self.policy, body["nonce"], body["token"],
+                body["api_token"], challenge_expires_at=fixtures.NOW + 60)
+            with self.assertRaisesRegex(Denied, "runtime-native-proof"):
+                admission._consume_runtime_heartbeat(observed, server, self.policy)
+            proof = admission._finish_runtime_heartbeat(observed, server, self.policy)
+            self.assertEqual(proof.until, monotonic() + admission.FRAME_TIMEOUT_SECONDS)
+            self.assertEqual(worker_reads, [self.worker] * 3)
+            self.assertEqual(dict((phase, (offset, length)) for phase, offset, length
+                                  in identity._DIAGNOSTIC.get().heartbeat_timings),
+                             {"native-observation": (0, 0), "final-census": (0, 6000)})
+            with self.assertRaisesRegex(Denied, "runtime-native-proof"):
+                admission._finish_runtime_heartbeat(observed, server, self.policy)
+            with self.assertRaisesRegex(Denied, "runtime-native-proof"):
+                admission._require_native(proof, server, self.policy)
+            with self.assertRaises(Denied):
+                admission._consume_runtime_heartbeat(proof, other, self.policy)
+            with mock.patch.object(admission.time, "monotonic", return_value=proof.until):
+                with self.assertRaisesRegex(Denied, "runtime-native-proof-expired"):
+                    admission._consume_runtime_heartbeat(proof, server, self.policy)
+            self.assertEqual(admission._consume_runtime_heartbeat(proof, server, self.policy),
+                             (self.worker, proof.identity))
+            with self.assertRaisesRegex(Denied, "runtime-native-proof"):
+                admission._consume_runtime_heartbeat(proof, server, self.policy)
+        self.assertEqual((self.store_path / "state.json").read_bytes(), before)
+
+    def test_heartbeat_third_worker_drift_records_only_a_fixed_private_reason(self):
+        body = self.admit_body(self.challenge())
+        other = replace(self.worker, start_ticks=self.worker.start_ticks + 1)
+        diagnostic = identity._DIAGNOSTIC.set(identity._Diagnostic(0, 0, os.getpid()))
+        try:
+            with _pair() as (server, _), mock.patch.object(
+                    admission, "_worker", side_effect=[self.worker, self.worker, other]):
+                observed = admission._observe_runtime_heartbeat(server, self.policy, body["nonce"], body["token"],
+                    body["api_token"], challenge_expires_at=fixtures.NOW + 60)
+                with self.assertRaisesRegex(Denied, "^runtime-native-provenance-drift$"):
+                    admission._finish_runtime_heartbeat(observed, server, self.policy)
+            status = identity._DIAGNOSTIC.get()
+            self.assertEqual(status.stage, "runtime-native-heartbeat-finish")
+            self.assertEqual(status.reason, "runtime-native-provenance-drift")
+            self.assertEqual({row[0] for row in status.heartbeat_timings}, {"native-observation", "final-census"})
+            self.assertTrue(all(type(number) is int and number >= 0
+                                for _, start, duration in status.heartbeat_timings for number in (start, duration)))
+            self.assertNotIn(body["token"], repr(status))
+            self.assertNotIn(body["api_token"], repr(status))
+        finally:
+            identity._DIAGNOSTIC.reset(diagnostic)
+
     def test_v2_native_proof_reacquires_worker_and_rejects_policy_or_control_drift(self):
         body = self.admit_body(self.challenge())
         with _pair() as (server, client):

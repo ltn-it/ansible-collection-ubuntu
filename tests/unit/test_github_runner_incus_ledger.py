@@ -1903,6 +1903,37 @@ class IncusLedgerTests(unittest.TestCase):
             self.deny(store.runtime_refresh_identity, lease, challenge["nonce"], self.worker, who,
                       cell_sha256=CELL, identity_policy_sha256="d" * 64)
 
+    def test_runtime_heartbeat_cannot_revive_expired_authorization_or_consume_expired_challenge(self):
+        with self.open() as store:
+            policy = store.archive_policy(dict(POLICY))
+            challenge, who = self.runtime_identity(store, "run", token="a" * 64, valid_until=NOW + 90)
+            lease = store.runtime_prepare(challenge["nonce"], self.worker, who, policy_sha256=policy,
+                                          cell_sha256=CELL, deadline=NOW + 120, identity_policy_sha256="d" * 64)
+            short = store.runtime_challenge(self.worker, "heartbeat", CELL, "d" * 64, ttl=10)
+            short_who = synthetic_identity(short["audience"], policy_sha256="d" * 64, valid_until=NOW + 300)
+            args = {"cell_sha256": CELL, "identity_policy_sha256": "d" * 64}
+            load = store._load
+
+            def load_at(timestamp):
+                state = load()
+                self.now = timestamp
+                return state
+
+            # Model scheduler/IO latency after kernel lock entry. The runtime
+            # must take its wall-clock decision inside the ledger transaction.
+            self.now = NOW + 9
+            with mock.patch.object(store, "_load", side_effect=lambda: load_at(NOW + 10)), \
+                 self.assertRaisesRegex(Denied, "challenge-replay-or-worker"):
+                store.runtime_refresh_identity(lease, short["nonce"], self.worker, short_who, **args)
+
+            fresh, fresh_who = self.runtime_identity(store, "heartbeat", token="e" * 64, valid_until=NOW + 300)
+            self.now = NOW + 89
+            raw = (self.path / "state.json").read_bytes()
+            with mock.patch.object(store, "_load", side_effect=lambda: load_at(NOW + 90)), \
+                 self.assertRaisesRegex(Denied, "runtime-previous-authorization-expired"):
+                store.runtime_refresh_identity(lease, fresh["nonce"], self.worker, fresh_who, **args)
+            self.assertEqual((self.path / "state.json").read_bytes(), raw)
+
     def test_runtime_proof_rejects_borrowed_scope_locator_worker_and_native_identity(self):
         with self.open() as store:
             lease, policy = self.runtime_lease(store)
