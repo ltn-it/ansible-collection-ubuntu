@@ -1,0 +1,8 @@
+---
+bugfixes:
+  - >-
+    github_runner - Classify GitHub HTTP and transport failures separately and allow one retry
+    of an identical read after a transient transport failure in a native history acquisition.
+  - >-
+    github_runner - Bind a fresh protected Incus test run to the verified terminal predecessor
+    and its unchanged empty lease, intake, and configuration state.

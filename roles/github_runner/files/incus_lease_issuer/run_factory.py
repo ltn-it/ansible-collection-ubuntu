@@ -145,7 +145,7 @@ def load_bootstrap(path, expected_sha256):
                         runtime["initial_transition_timeout_seconds"])
     runtime_rpc._validate_early_renewal(runtime)
     continuation = value.get("operating_continuation")
-    if type(continuation) is dict and continuation.get("schema") in {25, 26}:
+    if type(continuation) is dict and continuation.get("schema") in {25, 26, 27}:
         require(runtime.get("renewal_lead_seconds") == runtime_rpc.EARLY_RENEWAL_LEAD_SECONDS,
                 "bootstrap-twenty-fifth-renewal-policy")
     require(type(runtime["capture"]) is dict, "bootstrap-runtime-capture")
@@ -282,7 +282,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 26 or receipt.get("schema") == 26:
+    if descriptor["schema"] == 27 or receipt.get("schema") == 27:
+        require(descriptor["schema"] == receipt.get("schema") == 27, "continuation-twenty-seventh-receipt-kind")
+    elif descriptor["schema"] == 26 or receipt.get("schema") == 26:
         require(descriptor["schema"] == receipt.get("schema") == 26, "continuation-twenty-sixth-receipt-kind")
     elif descriptor["schema"] == 25 or receipt.get("schema") == 25:
         require(descriptor["schema"] == receipt.get("schema") == 25, "continuation-twenty-fifth-receipt-kind")
@@ -835,6 +837,12 @@ def _continuation_origin_observations(bootstrap, qualified):
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 27:
+        _revalidate_prelease_origin(receipt, bootstrap.value["ledger_path"], 26,
+                                    operating_cells.TWENTY_SEVENTH_RUN, operating_cells.TWENTY_SEVENTH_MAIN,
+                                    "continuation-twenty-seventh")
+        receipt = receipt["previous_qualification"]
+        schema = 26
     if schema == 26:
         _revalidate_closed_vm(receipt["retirement"], receipt["previous_qualification"],
                               bootstrap.value["ledger_path"], descriptor["successor"], native_cleanup=True)
@@ -2139,25 +2147,30 @@ def _check_empty_previous_bank(bank, current_path):
 
 
 def _revalidate_sixteenth_prelease(retirement, successor_bank):
+    _revalidate_prelease_origin(retirement, successor_bank, 15, operating_cells.SIXTEENTH_RUN,
+                                operating_cells.SIXTEENTH_MAIN, "continuation-sixteenth")
+
+
+def _revalidate_prelease_origin(retirement, successor_bank, schema, run_id, source, reason):
     """Preserve the failed start's bootstrap and bank before the first lease."""
     ref = retirement["previous_bootstrap"]
     bank = retirement["previous_bank"]
     original = load_bootstrap(ref["path"], ref["sha256"])
     qualified = _continuation_receipt(original.value)
     require(original.file_stamp[:2] == (ref["device"], ref["inode"])
-            and qualified is not None and qualified[0]["schema"] == 15
+            and qualified is not None and qualified[0]["schema"] == schema
             and qualified[1] == retirement["previous_qualification"]
-            and qualified[0]["successor"]["run_id"] == operating_cells.SIXTEENTH_RUN
-            and qualified[0]["successor"]["source_sha"] == operating_cells.SIXTEENTH_MAIN
-            and original.value["ledger_path"] == bank["path"], "continuation-sixteenth-original-bootstrap")
+            and qualified[0]["successor"]["run_id"] == run_id
+            and qualified[0]["successor"]["source_sha"] == source
+            and original.value["ledger_path"] == bank["path"], reason + "-original-bootstrap")
     _check_empty_previous_bank(bank, successor_bank)
     path = str(Path(bank["path"]) / "state.json")
     with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
         with ledger.Ledger(bank["path"]) as store, store._transaction(read_only=True) as state:
             proof, _, _ = installation._file(path, MAX_POLICY, private=True)
             require(proof.sha256 == bank["state_file_sha256"] and not state["leases"] and not state["tokens"],
-                    "continuation-sixteenth-original-prelease-state")
-    require(load_bootstrap(original.path, original.sha256) == original, "continuation-sixteenth-original-drift")
+                    reason + "-original-prelease-state")
+    require(load_bootstrap(original.path, original.sha256) == original, reason + "-original-drift")
 
 
 def _revalidate_twentieth_prelease(receipt, successor_bank):
@@ -2232,6 +2245,10 @@ def _revalidate_twenty_fourth_prelease(receipt, successor_bank):
 def _continuation_native_histories(get, descriptor, receipt):
     """Overlap only independent terminal families; join before any proof escapes."""
     generation = descriptor["schema"]
+    twenty_seventh = receipt if generation == 27 else None
+    if twenty_seventh is not None:
+        receipt = twenty_seventh["previous_qualification"]
+        generation = 26
     twenty_sixth = receipt if generation == 26 else None
     if twenty_sixth is not None:
         receipt = twenty_sixth["previous_qualification"]
@@ -2382,6 +2399,9 @@ def _continuation_native_histories(get, descriptor, receipt):
     if twenty_sixth is not None:
         families.append((_continuation_twenty_sixth_native, {}, twenty_sixth["native_twenty_sixth"],
                          "continuation-twenty-sixth-native-drift"))
+    if twenty_seventh is not None:
+        families.append((_continuation_twenty_seventh_native, {}, twenty_seventh["native_twenty_seventh"],
+                         "continuation-twenty-seventh-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -2435,7 +2455,13 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True, 
             # Historical terminal qualification is minted once into this
             # request's opaque proof. There is no shared cache.
             if check_origin:
-                _continuation_native_histories(get, descriptor, receipt)
+                retry = threading.BoundedSemaphore()
+                history_reader = identity.HTTPSReader(claim_transport_retry=lambda: retry.acquire(blocking=False))
+
+                def get_history(path):
+                    return identity.decode_json(history_reader.read(prefix + path, bearer=api_token))
+
+                _continuation_native_histories(get_history, descriptor, receipt)
             # Origin validation may read a network namespace cookie. Its observer
             # needs the process to be single-threaded after the history reads.
             if check_host_resources:
@@ -2745,6 +2771,8 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
+        elif descriptor["schema"] == 27:
+            retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 16:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
     directory_identity = run_intake._directory_identity(root)
@@ -3744,3 +3772,9 @@ def _continuation_twenty_fifth_native(get):
 def _continuation_twenty_sixth_native(get):
     return _terminal_family(get, operating_cells.TWENTY_SIXTH_RUN, operating_cells.TWENTY_SIXTH_CHECKS,
                             operating_cells.twenty_sixth_native_projection)
+
+
+
+def _continuation_twenty_seventh_native(get):
+    return _terminal_family(get, operating_cells.TWENTY_SEVENTH_RUN, operating_cells.TWENTY_SEVENTH_CHECKS,
+                            operating_cells.twenty_seventh_native_projection)
