@@ -32,6 +32,7 @@ SELECTOR = re.compile(r"[a-z][a-z0-9_.-]{0,127}\Z")
 MAX_AUTH = 40960
 MAX_REPLY = 8192
 IO_SECONDS = 5
+EARLY_RENEWAL_LEAD_SECONDS = 150
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class _Configuration:
     capture: MappingProxyType
     capacity: MappingProxyType | None = None
     initial_transition_minimum_seconds: int | None = None
+    renewal_lead_seconds: int | None = None
 
 
 def _root():
@@ -68,6 +70,14 @@ def _capacity_policy(value):
     return MappingProxyType(dict(value))
 
 
+def _validate_early_renewal(runtime):
+    if "renewal_lead_seconds" in runtime:
+        require(type(runtime["renewal_lead_seconds"]) is int
+                and runtime["renewal_lead_seconds"] == EARLY_RENEWAL_LEAD_SECONDS
+                and runtime.get("initial_transition_minimum_seconds") == 120,
+                "runtime-early-renewal-policy")
+
+
 def _configuration(path, sha):
     _root()
     engine_policy._path(path)
@@ -78,7 +88,7 @@ def _configuration(path, sha):
     required = {"schema", "registry_path", "registry_sha256", "preparation_config_path",
         "preparation_config_sha256", "authentication_timeout_seconds", "initial_transition_timeout_seconds",
         "heartbeat_lead_seconds", "cleanup_timeout_seconds", "capture"}
-    optional = {"capacity", "initial_transition_minimum_seconds"} & set(data)
+    optional = {"capacity", "initial_transition_minimum_seconds", "renewal_lead_seconds"} & set(data)
     engine_policy._keys(data, required | optional)
     capacity = _capacity_policy(data["capacity"]) if "capacity" in data else None
     require(type(data["schema"]) is int and data["schema"] == 2, "runtime-config-schema")
@@ -92,6 +102,7 @@ def _configuration(path, sha):
     if "initial_transition_minimum_seconds" in data:
         engine_policy._integer(data["initial_transition_minimum_seconds"], 1,
                                data["initial_transition_timeout_seconds"])
+    _validate_early_renewal(data)
     capture = engine_policy._keys(data["capture"], {"stdout_limit", "stderr_limit", "total_limit",
                                                    "max_total_evidence_bytes", "max_members", "max_member_bytes"})
     for key in ("stdout_limit", "stderr_limit"):
@@ -121,7 +132,7 @@ def _initial_transition_budget(config, valid_until, now, *, derived=False):
     engine_policy._integer(minimum, 1, maximum)
     # Derived requests verify the retained catalogue around locator resolution.
     # Reserve the client's renewal lead, a clock tick and an unwind second.
-    reserve = (91 if derived else 31)
+    reserve = ((config.renewal_lead_seconds or 90) + 1) if derived else 31
     effective = min(maximum, math.floor(valid_until - now - reserve - 1))
     require(effective >= minimum, "runtime-initial-authorization-budget")
     return effective, valid_until - reserve
@@ -828,6 +839,8 @@ class BootstrapRuntimeRPC:
             result = {"schema": 2, "type": "intake-ready", "operation": operation, "cell": selector,
                 "configuration": configuration.manifest_sha256, "deadline": configuration.deadline,
                 "lease_created": False}
+            if "renewal_lead_seconds" in bootstrap.value["runtime"]:
+                result["renewal_lead_seconds"] = bootstrap.value["runtime"]["renewal_lead_seconds"]
             _write(connected, result)
             return result
         except Exception as error:
