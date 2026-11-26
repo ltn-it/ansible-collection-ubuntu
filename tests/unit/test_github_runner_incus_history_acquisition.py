@@ -198,8 +198,19 @@ class HistoryAcquisitionTests(unittest.TestCase):
                "started_at": datetime.fromtimestamp(now - 1, timezone.utc).isoformat().replace("+00:00", "Z")}
         left, right = socket.socketpair()
         with left, right:
-            for case in ("recovered", "job-completed", "anchor-changed", "expired"):
+            for case in ("recovered", "job-completed", "anchor-changed", "expired", "expires-during-final-anchor"):
                 with self.subTest(case=case), ExitStack() as updates:
+                    clock = unittest.mock.Mock(return_value=now)
+                    anchor_reads = 0
+
+                    def read_anchor():
+                        nonlocal anchor_reads
+                        anchor_reads += 1
+                        if anchor_reads == 2 and case == "expires-during-final-anchor":
+                            clock.return_value = now + 90
+                        value = anchor if case != "anchor-changed" else anchor | {"bootstrap_sha256": "e" * 64}
+                        return value, None, None
+
                     late_job = job if case != "job-completed" else job | {"status": "completed"}
                     reader = NS(read=unittest.mock.Mock(side_effect=[
                         ledger.canonical(job), ledger.canonical(late_job), ledger.canonical({"sha": who.caller_sha})]))
@@ -215,8 +226,8 @@ class HistoryAcquisitionTests(unittest.TestCase):
                         (f, "_continuation_native_histories", unittest.mock.Mock(return_value=True)),
                         (f, "_continuation_origin_absent", unittest.mock.Mock()),
                         (cells, "validate_continuation_commit", unittest.mock.Mock()),
-                        (runtime_entry, "_anchor", unittest.mock.Mock(return_value=(
-                            anchor if case != "anchor-changed" else anchor | {"bootstrap_sha256": "e" * 64}, None, None))),
+                        (runtime_entry, "_anchor", unittest.mock.Mock(side_effect=read_anchor)),
+                        (f.time, "time", clock),
                     ]
                     for obj, name, value in changes:
                         updates.enter_context(patch.object(obj, name, value))
@@ -230,6 +241,11 @@ class HistoryAcquisitionTests(unittest.TestCase):
                         f._continuation_origin_absent.assert_called_once()
                         self.assertEqual(f.identity.verify_github_workflow_assignment.call_count, 2)
                         self.assertEqual(runtime_entry._anchor.call_count, 2)
+                    elif case == "expires-during-final-anchor":
+                        with self.assertRaisesRegex(Denied, "^bootstrap-native-expired$"):
+                            acquire()
+                        self.assertEqual(runtime_entry._anchor.call_count, 2)
+                        f.collector.discard_worker_acquisition.assert_called_once()
                     else:
                         with self.assertRaises(Denied):
                             acquire()

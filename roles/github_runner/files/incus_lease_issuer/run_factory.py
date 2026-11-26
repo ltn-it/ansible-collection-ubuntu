@@ -2521,11 +2521,11 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True, 
                 and _controls(selected.bootstrap) == controls,
                 "bootstrap-native-drift")
         if resumed:
-            require(allow_resume(), "bootstrap-native-expired")
             require(runtime_entry._anchor()[0] == {
                 "schema": 2, "bootstrap_path": selected.bootstrap.path,
                 "bootstrap_sha256": selected.bootstrap.sha256,
             }, "bootstrap-policy-changed")
+            require(allow_resume(), "bootstrap-native-expired")
         return worker, who, controls, stamp
     finally:
         collector.discard_worker_acquisition(acquisition)
