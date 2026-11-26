@@ -209,8 +209,12 @@ class RootRuntimeClientTests(unittest.TestCase):
         self.heartbeat_seen = threading.Event()
         self.requests, self.errors, self.connections = [], [], []
         self.mode, self.payload = "normal", evidence()
+        self.renewal_lead = None
         cache = mock.patch.dict(client._CONFIGURATIONS, {}, clear=True)
         cache.start(); self.addCleanup(cache.stop)
+        renewals = mock.patch.dict(client._RENEWAL_LEADS, {}, clear=True)
+        renewals.start()
+        self.addCleanup(renewals.stop)
         self.cleanup_state = "hold"
         self.worker = threading.Thread(target=self.accept, daemon=True)
         self.worker.start()
@@ -284,7 +288,8 @@ class RootRuntimeClientTests(unittest.TestCase):
             if intake:
                 connected.sendall(frame({"schema": 2, "type": "intake-ready", "operation": operation,
                     "cell": selector["cell"], "configuration": "f" * 64, "deadline": int(time.time()) + 300,
-                    "lease_created": False}))
+                    "lease_created": False,
+                    **({"renewal_lead_seconds": self.renewal_lead} if self.renewal_lead is not None else {})}))
                 return
             if self.mode in {"intake", "split-intake"}:
                 self.assertEqual(selector["configuration"], "f" * 64)
@@ -441,6 +446,23 @@ class RootRuntimeClientTests(unittest.TestCase):
         self.assertEqual(self.auth._oidc.call_args_list,
             [mock.call(self.auth.AUDIENCE + "a" * 64), mock.call(self.auth.AUDIENCE + NONCE)])
         self.assertFalse(self.errors)
+
+    def test_verified_intake_receipt_selects_early_renewal_for_the_same_cell(self):
+        self.mode = "intake"
+        self.renewal_lead = 150
+        self.assertTrue(client.run_cell("registered-cell")["transport_only"])
+        self.assertEqual(client._RENEWAL_LEADS, {"registered-cell": 150})
+        self.assertEqual(self.requests[1][0]["configuration"], "f" * 64)
+        self.assertFalse(self.errors)
+
+    def test_intake_with_an_unknown_renewal_bound_never_requests_a_worker(self):
+        self.mode = "intake"
+        self.renewal_lead = 151
+        with self.assertRaises(client.ClientUnknown):
+            client.run_cell("registered-cell")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(client._CONFIGURATIONS, {})
+        self.assertEqual(client._RENEWAL_LEADS, {})
 
     def test_sealed_split_intake_restarts_authorization_only_after_each_verified_reply(self):
         self.config.write_text(json.dumps({"schema": 2, "socket_path": str(self.path),

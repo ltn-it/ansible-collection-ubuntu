@@ -16,7 +16,7 @@ client = fixture.client
 
 
 class InitialChallengeTests(unittest.TestCase):
-    def exchange(self, operation, delay, *, derived=False):
+    def exchange(self, operation, delay, *, derived=False, early_renewal=False):
         connected, server = socket.socketpair()
         self.addCleanup(connected.close)
         self.addCleanup(server.close)
@@ -37,12 +37,14 @@ class InitialChallengeTests(unittest.TestCase):
                                           _oidc=lambda audience: fixture.TOKEN)
         connection = (connected, (None, None, None, False), None, None, None)
         configurations = {"registered-cell": "a" * 64} if derived else {}
+        renewals = {"registered-cell": 150} if early_renewal else {}
         original_select = client.select.select
 
         def wait_for_challenge(readable, writable, exceptional, timeout):
             # Model C23's observed 62.514-second pre-challenge work without
             # waiting a full minute on every test run.
-            if derived and 5 < timeout < 62.514:
+            observed = 92.119 if operation == "heartbeat" and early_renewal else 62.514
+            if derived and 5 < timeout < observed:
                 return [], [], []
             return original_select(readable, writable, exceptional, timeout)
 
@@ -52,14 +54,16 @@ class InitialChallengeTests(unittest.TestCase):
                 patch.object(client.select, "select", side_effect=wait_for_challenge), \
                 patch.object(client, "_authenticated_reply", wraps=client._authenticated_reply) as wait, \
                 patch.dict(client.os.environ, {"GITHUB_TOKEN": fixture.API}), \
-                patch.dict(client._CONFIGURATIONS, configurations, clear=True):
-            result = client._authenticate("registered-cell", operation)
+                patch.dict(client._CONFIGURATIONS, configurations, clear=True), \
+                patch.dict(client._RENEWAL_LEADS, renewals, clear=True):
+            result = client._authenticate("registered-cell", operation, fixture.LEASE if operation == "heartbeat" else None)
         thread.join(timeout=2)
         self.assertIs(result, connection)
         self.assertFalse(failures)
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0]["nonce"], fixture.NONCE)
-        self.assertEqual(wait.call_args.kwargs, {"idle_seconds": 90} if derived else {})
+        expected_idle = 120 if operation == "heartbeat" and early_renewal else 90
+        self.assertEqual(wait.call_args.kwargs, {"idle_seconds": expected_idle} if derived else {})
 
     def test_execution_and_observer_wait_for_real_challenge_after_five_second_frame_budget(self):
         for operation in ("run", "observe-profile"):
@@ -68,6 +72,10 @@ class InitialChallengeTests(unittest.TestCase):
 
     def test_derived_locator_survives_observed_pre_challenge_delay(self):
         self.exchange("run", 0.01, derived=True)
+
+    def test_early_renewal_allows_observed_heartbeat_delay_only_for_heartbeat(self):
+        self.exchange("heartbeat", 0.01, derived=True, early_renewal=True)
+        self.exchange("run", 0.01, derived=True, early_renewal=True)
 
     def test_auth_wait_timeout_denies_without_reading_a_frame_or_sending_auth(self):
         connected, server = socket.socketpair()
@@ -189,6 +197,29 @@ class InitialBudgetTests(unittest.TestCase):
         for expiry, now in ((True, 1000), (1600, float("nan")), (1600, float("inf")), (1600, True)):
             with self.subTest(expiry=expiry, now=now), self.assertRaises(Denied):
                 runtime_rpc._initial_transition_budget(self.config(), expiry, now)
+
+    def test_early_renewal_reserves_time_before_the_original_authorization_expires(self):
+        from dataclasses import replace
+        from incus_lease_issuer import runtime_rpc
+        from incus_lease_issuer.identity import Denied
+        config = replace(self.config(120), renewal_lead_seconds=150)
+        # C24's original native authorization had 286 s left at lease creation.
+        self.assertEqual(runtime_rpc._initial_transition_budget(config, 1286, 1000, derived=True), (134, 1135))
+        with patch.object(client.time, "time", return_value=1000), \
+             patch.dict(client._CONFIGURATIONS, {"test-cell": "a" * 64}, clear=True), \
+             patch.dict(client._RENEWAL_LEADS, {"test-cell": 150}, clear=True):
+            renewal = client._heartbeat_at("test-cell", 1286)
+            self.assertEqual(renewal, 1143)
+            self.assertLess(renewal + client.EARLY_RENEWAL_PRE_CHALLENGE_SECONDS, 1286)
+            self.assertGreater(1286 - (renewal + 92.119), 50)
+        with self.assertRaisesRegex(Denied, "runtime-initial-authorization-budget"):
+            runtime_rpc._initial_transition_budget(config, 1271, 1000, derived=True)
+        for policy in ({"renewal_lead_seconds": 149, "initial_transition_minimum_seconds": 120},
+                       {"renewal_lead_seconds": 150, "initial_transition_minimum_seconds": 180},
+                       {"renewal_lead_seconds": 150}):
+            with self.subTest(policy=policy), self.assertRaisesRegex(Denied, "runtime-early-renewal-policy"):
+                runtime_rpc._validate_early_renewal(policy)
+        runtime_rpc._validate_early_renewal({"renewal_lead_seconds": 150, "initial_transition_minimum_seconds": 120})
 
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "private Root Linux EE only")

@@ -39,6 +39,7 @@ SELECTOR = re.compile(r"[a-z][a-z0-9_.-]{0,127}\Z")
 OBSERVER_OPS = frozenset({"observe-profile", "observe-operating"})
 OPS = frozenset({"run", "heartbeat", "status", "cancel", "recover", "record-upload"}) | OBSERVER_OPS
 _CONFIGURATIONS = {}  # Public Root-sealed locators only; never credentials.
+_RENEWAL_LEADS = {}  # Bounds declared by the verified Root intake receipt.
 STATES = frozenset({"preparing", "running", "execution-complete", "cancelling", "cleanup-hold", "closed", "unknown", "awaiting-native-end"})
 MAX_EVIDENCE = 2 * 1024 ** 3  # Wire ceiling, not an assigned operating quota.
 MAX_MEMBERS = 20000
@@ -55,6 +56,8 @@ FINAL_OBSERVATION_IDLE_SECONDS = 240
 INITIAL_AUTH_CAPABILITY = "initial-auth-idle-v1"
 # Keep the derived runtime's preparation reserve in sync with this lead.
 DERIVED_HEARTBEAT_LEAD_SECONDS = 90
+EARLY_RENEWAL_LEAD_SECONDS = 150
+EARLY_RENEWAL_PRE_CHALLENGE_SECONDS = 120
 sys.dont_write_bytecode = True
 
 
@@ -288,7 +291,10 @@ def _authenticate(selector, operation, lease_id=None, *, artifact=None, snapshot
         else:
             # The derived lookup rechecks retained host resources before
             # issuing a nonce. No OIDC token has been requested at this point.
-            challenge = _authenticated_reply(connected, idle_seconds=DERIVED_PRE_CHALLENGE_SECONDS)
+            idle_seconds = DERIVED_PRE_CHALLENGE_SECONDS
+            if operation == "heartbeat" and selector in _RENEWAL_LEADS:
+                idle_seconds = EARLY_RENEWAL_PRE_CHALLENGE_SECONDS
+            challenge = _authenticated_reply(connected, idle_seconds=idle_seconds)
         _failure(challenge, operation)
         intake = challenge.get("phase") == "intake"
         observer = challenge.get("phase") == "observer"
@@ -332,14 +338,20 @@ def _authenticate(selector, operation, lease_id=None, *, artifact=None, snapshot
                 # The snapshot is a locator. A separately scoped nonce and
                 # authenticated connection are required to configure the job.
                 return _authenticate(selector, operation, snapshot=ready["snapshot"])
-            require(set(ready) == {"schema", "type", "operation", "cell", "configuration", "deadline", "lease_created"}
+            renewal_fields = {"renewal_lead_seconds"} & ready.keys()
+            require(set(ready) == {"schema", "type", "operation", "cell", "configuration", "deadline", "lease_created"} | renewal_fields
                     and type(ready["schema"]) is int and ready["schema"] == 2 and ready["type"] == "intake-ready"
                     and ready["operation"] == operation and ready["cell"] == selector and ready["lease_created"] is False
                     and type(ready["configuration"]) is str and HEX.fullmatch(ready["configuration"])
                     and _integer(ready["deadline"], int(time.time()) + 1 if operation == "run" else 1) and connected.recv(1) == b""
                     and len(_CONFIGURATIONS) < 16)
+            if renewal_fields:
+                require(type(ready["renewal_lead_seconds"]) is int
+                        and ready["renewal_lead_seconds"] == EARLY_RENEWAL_LEAD_SECONDS)
             _stable(connection)
             _CONFIGURATIONS[selector] = ready["configuration"]
+            if renewal_fields:
+                _RENEWAL_LEADS[selector] = ready["renewal_lead_seconds"]
             _close(connection)
             connection = None
             # Separate connection + newly minted nonce/OIDC/native assignment.
@@ -763,7 +775,7 @@ def _capture(connection, terminal):
 
 
 def _heartbeat_at(selector, authorization):
-    lead = DERIVED_HEARTBEAT_LEAD_SECONDS if selector in _CONFIGURATIONS else 30
+    lead = _RENEWAL_LEADS.get(selector, DERIVED_HEARTBEAT_LEAD_SECONDS) if selector in _CONFIGURATIONS else 30
     remaining = authorization - int(time.time())
     return authorization - min(lead, max(1, remaining // 2))
 
