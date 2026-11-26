@@ -2175,16 +2175,19 @@ def _revalidate_twenty_fourth_prelease(receipt, successor_bank):
             and qualified[0]["successor"]["source_sha"] == constants.TWENTY_FOURTH_MAIN
             and original.value["ledger_path"] == bank["path"], "continuation-twenty-fourth-original-bootstrap")
     _check_empty_previous_bank(bank, successor_bank)
+    path = str(Path(bank["path"]) / "state.json")
     with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
         with ledger.Ledger(bank["path"]) as store, store._transaction(read_only=True) as state:
-            proof, _, _ = installation._file(str(Path(bank["path"]) / "state.json"), MAX_POLICY, private=True)
+            proof, _, _ = installation._file(path, MAX_POLICY, private=True)
             require(proof.sha256 == bank["state_file_sha256"] and not state["leases"] and not state["tokens"],
                     "continuation-twenty-fourth-original-prelease-state")
-    _retired_original_entries(original, retired["entries"], constants.TWENTY_FOURTH_MAIN,
-        constants.TWENTY_THIRD_SUCCESSOR_REUSABLE, constants.TWENTY_FOURTH_RUN,
-        constants.TWENTY_FOURTH_CHECKS[0], revalidating=True)
-    require(load_bootstrap(original.path, original.sha256) == original,
-            "continuation-twenty-fourth-original-drift")
+            _retired_original_entries(original, retired["entries"], constants.TWENTY_FOURTH_MAIN,
+                constants.TWENTY_THIRD_SUCCESSOR_REUSABLE, constants.TWENTY_FOURTH_RUN,
+                constants.TWENTY_FOURTH_CHECKS[0], revalidating=True)
+            require(load_bootstrap(original.path, original.sha256) == original,
+                    "continuation-twenty-fourth-original-drift")
+            final, _, _ = installation._file(path, MAX_POLICY, private=True)
+            require(final == proof, "continuation-twenty-fourth-original-prelease-state")
 
 
 @identity._diagnostic_step("native-histories")
