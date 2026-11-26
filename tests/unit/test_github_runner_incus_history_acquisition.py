@@ -222,11 +222,17 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             f._continuation_native_histories(self.get, self.descriptor, broken)
 
-    def test_twenty_fourth_route_requires_every_native_family_and_rejects_projection_drift(self):
-        receipt = self.receipt
+    def test_twenty_fourth_and_fifth_require_every_native_family_and_reject_projection_drift(self):
         phases = ("eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
                   "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth", "twentieth",
                   "twenty_first", "twenty_second", "twenty_third", "twenty_fourth")
+        with self.subTest(schema=24):
+            self.assert_continuation_native_family_drift_rejected(24, phases)
+        with self.subTest(schema=25):
+            self.assert_continuation_native_family_drift_rejected(25, (*phases, "twenty_fifth"))
+
+    def assert_continuation_native_family_drift_rejected(self, schema, phases):
+        receipt = self.receipt
         with ExitStack() as stack:
             legacy = self.wrapped(stack)
             checks = {}
@@ -234,7 +240,7 @@ class HistoryAcquisitionTests(unittest.TestCase):
                 graph = {"fixture": phase}
                 receipt = {"previous_qualification": receipt, f"native_{phase}": graph}
                 checks[phase] = stack.enter_context(patch.object(f, f"_continuation_{phase}_native", return_value=graph))
-            f._continuation_native_histories(self.get, {"schema": 24}, receipt)
+            f._continuation_native_histories(self.get, {"schema": schema}, receipt)
             self.assertCountEqual(legacy["finished"], NAMES)
             for check in checks.values():
                 check.assert_called_once_with(self.get)
@@ -246,7 +252,7 @@ class HistoryAcquisitionTests(unittest.TestCase):
                 family[f"native_{phase}"] = {"fixture": "different"}
                 reason = f"continuation-{phase.replace('_', '-')}-native-drift"
                 with self.subTest(phase=phase), self.assertRaisesRegex(Denied, reason):
-                    f._continuation_native_histories(self.get, {"schema": 24}, broken)
+                    f._continuation_native_histories(self.get, {"schema": schema}, broken)
 
     def test_twenty_fourth_provider_readback_rejects_inventory_drift(self):
         original = {"total_count": 24, "jobs": [{"id": 7}]}
