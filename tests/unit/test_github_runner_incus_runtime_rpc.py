@@ -8,6 +8,7 @@ import io
 import tarfile
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import socket
 import struct
@@ -251,6 +252,20 @@ class RootRuntimeTests(unittest.TestCase):
         with mock.patch.object(ledger.Ledger, "runtime_challenge", side_effect=AssertionError("no native challenge")):
             result, _ = self.invoke("status")
         self.assertEqual(result["type"], "failure")
+
+    def test_derived_acquisition_rejects_worker_change_before_challenge(self):
+        worker = self.fixture.worker
+        acquisition = object()
+        with admission_fixtures._pair() as (server, client), \
+                mock.patch.object(runtime_rpc.collector, "finish_worker_acquisition",
+                                  return_value=replace(worker, start_ticks=worker.start_ticks + 1)) as finish, \
+                mock.patch.object(ledger.Ledger, "runtime_challenge") as challenge:
+            result = self.rpc._handle_selected(server, ("approved", "status"),
+                                               worker_acquisition=(worker, acquisition))
+            self.assertEqual(receive(client), result)
+        self.assertEqual(result["disposition"], "denied-before-intent")
+        finish.assert_called_once_with(acquisition, server, self.fixture.registry.select("approved").collector)
+        challenge.assert_not_called()
 
     def test_locked_cores_reject_forged_or_closed_sessions_before_effects(self):
         for core, args in ((preparation._prepare_locked, (self.fixture.registry, "approved", self.store, self.lease)),

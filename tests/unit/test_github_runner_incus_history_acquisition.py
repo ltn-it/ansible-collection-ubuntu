@@ -222,10 +222,11 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             f._continuation_native_histories(self.get, self.descriptor, broken)
 
-    def test_nineteenth_route_requires_every_native_family_and_rejects_projection_drift(self):
+    def test_twenty_fourth_route_requires_every_native_family_and_rejects_projection_drift(self):
         receipt = self.receipt
         phases = ("eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
-                  "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth")
+                  "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth", "twentieth",
+                  "twenty_first", "twenty_second", "twenty_third", "twenty_fourth")
         with ExitStack() as stack:
             legacy = self.wrapped(stack)
             checks = {}
@@ -233,7 +234,7 @@ class HistoryAcquisitionTests(unittest.TestCase):
                 graph = {"fixture": phase}
                 receipt = {"previous_qualification": receipt, f"native_{phase}": graph}
                 checks[phase] = stack.enter_context(patch.object(f, f"_continuation_{phase}_native", return_value=graph))
-            f._continuation_native_histories(self.get, {"schema": 19}, receipt)
+            f._continuation_native_histories(self.get, {"schema": 24}, receipt)
             self.assertCountEqual(legacy["finished"], NAMES)
             for check in checks.values():
                 check.assert_called_once_with(self.get)
@@ -243,8 +244,27 @@ class HistoryAcquisitionTests(unittest.TestCase):
                 for _ in range(depth):
                     family = family["previous_qualification"]
                 family[f"native_{phase}"] = {"fixture": "different"}
-                with self.subTest(phase=phase), self.assertRaisesRegex(Denied, f"continuation-{phase}-native-drift"):
-                    f._continuation_native_histories(self.get, {"schema": 19}, broken)
+                reason = f"continuation-{phase.replace('_', '-')}-native-drift"
+                with self.subTest(phase=phase), self.assertRaisesRegex(Denied, reason):
+                    f._continuation_native_histories(self.get, {"schema": 24}, broken)
+
+    def test_twenty_fourth_provider_readback_rejects_inventory_drift(self):
+        original = {"total_count": 24, "jobs": [{"id": 7}]}
+        changed = {"total_count": 24, "jobs": [{"id": 8}]}
+        run = {"id": cells.TWENTY_FOURTH_RUN}
+        checks = [{"id": value} for value in cells.TWENTY_FOURTH_CHECKS]
+        prefix = f"/actions/runs/{cells.TWENTY_FOURTH_RUN}"
+        jobs = prefix + "/attempts/1/jobs?per_page=100&page=1"
+        responses = {prefix: run, **{f"/check-runs/{row['id']}": row for row in checks}}
+        inventories = iter((original, changed))
+
+        def get(path):
+            return next(inventories) if path == jobs else responses[path]
+
+        with patch.object(cells, "twenty_fourth_native_projection", return_value={"fixture": "exact"}) as project:
+            with self.assertRaises(Denied):
+                f._continuation_twenty_fourth_native(get)
+        project.assert_called_once_with(run, original, checks)
 
     def test_data_missing_pagination_and_second_readback_still_deny(self):
         origin = '/actions/runs/' + str(self.args[0][0]['id']) + '/attempts/1/jobs?per_page=100&page='

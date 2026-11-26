@@ -191,6 +191,43 @@ class OperatingCellTests(unittest.TestCase):
             cells.validate_continuation_commit(previous_commit, previous, cells.TWENTY_THIRD_MAIN,
                                                cells.TWENTY_THIRD_RUN, controller)
 
+    def test_sealed_prelease_failure_accepts_only_the_bound_c24_successor(self):
+        caller = "8" * 40
+        run = cells.TWENTY_FOURTH_RUN + 1
+        controller = cells.TWENTY_FOURTH_SUCCESSOR_REUSABLE
+        original = {
+            "schema": 24,
+            "reason": cells.TWENTY_FOURTH_REASON,
+            "qualification": {"path": "/private/qualification.json", "sha256": cells.TWENTY_FOURTH_QUALIFICATION},
+            "successor": {
+                "source_sha": caller,
+                "run_id": run,
+                "run_attempt": 1,
+                "first_parent": cells.TWENTY_FOURTH_MAIN,
+                "source_workflow_sha256": cells.TWENTY_FOURTH_SUCCESSOR_WORKFLOW,
+                "reusable_sha": controller,
+            },
+        }
+        commit = {"sha": caller, "parents": [{"sha": cells.TWENTY_FOURTH_MAIN}]}
+        cells.validate_continuation_commit(commit, original, caller, run, controller)
+
+        for field, bad in (
+            ("first_parent", cells.TWENTY_THIRD_MAIN),
+            ("source_workflow_sha256", cells.TWENTY_THIRD_SUCCESSOR_WORKFLOW),
+            ("reusable_sha", cells.TWENTY_THIRD_SUCCESSOR_REUSABLE),
+            ("run_attempt", 2),
+            ("source_sha", cells.TWENTY_FOURTH_MAIN),
+            ("run_id", cells.TWENTY_FOURTH_RUN),
+        ):
+            changed = deepcopy(original)
+            changed["successor"][field] = bad
+            with self.subTest(field=field), self.assertRaises(Denied):
+                cells.validate_continuation_commit(commit, changed, caller, run, controller)
+        changed = deepcopy(original)
+        changed["qualification"]["sha256"] = cells.TWENTY_THIRD_QUALIFICATION
+        with self.assertRaisesRegex(Denied, "continuation-twenty-fourth-qualification"):
+            cells.validate_continuation_commit(commit, changed, caller, run, controller)
+
     def test_business_roles_guard_remains_required_in_existing_parser(self):
         _, native, who = fixture()
         matrix = {key: "supported" for key in cell_contract.MATRIX_KEYS}
