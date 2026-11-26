@@ -269,6 +269,49 @@ class OperatingCellTests(unittest.TestCase):
         with self.assertRaises(Denied):
             cells.validate_continuation_commit(changed_commit, original, caller, run, controller)
 
+    def test_closed_c25_accepts_only_the_bound_c26_successor(self):
+        caller = "a" * 40
+        run = cells.TWENTY_SIXTH_RUN + 1
+        controller = cells.TWENTY_SIXTH_SUCCESSOR_REUSABLE
+        workflow = cells.TWENTY_SIXTH_SUCCESSOR_WORKFLOW
+        original = {
+            "schema": 26,
+            "reason": cells.TWENTY_SIXTH_REASON,
+            "qualification": {"path": "/private/qualification.json", "sha256": cells.TWENTY_SIXTH_QUALIFICATION},
+            "successor": {
+                "source_sha": caller,
+                "run_id": run,
+                "run_attempt": 1,
+                "first_parent": cells.TWENTY_SIXTH_MAIN,
+                "source_workflow_sha256": workflow,
+                "reusable_sha": controller,
+            },
+        }
+        commit = {"sha": caller, "parents": [{"sha": cells.TWENTY_SIXTH_MAIN}]}
+        cells.validate_continuation_descriptor(original, workflow, controller)
+        cells.validate_continuation_commit(commit, original, caller, run, controller)
+
+        for field, value, reason in (
+            ("first_parent", cells.TWENTY_FIFTH_MAIN, "continuation-twenty-sixth-successor"),
+            ("source_workflow_sha256", cells.TWENTY_FIFTH_SUCCESSOR_WORKFLOW, "continuation-twenty-sixth-successor"),
+            ("reusable_sha", cells.TWENTY_FIFTH_SUCCESSOR_REUSABLE, "continuation-twenty-sixth-successor"),
+            ("run_attempt", 2, "continuation-twenty-sixth-successor"),
+            ("source_sha", cells.TWENTY_SIXTH_MAIN, "continuation-twenty-sixth-replay"),
+            ("run_id", cells.TWENTY_SIXTH_RUN, "continuation-twenty-sixth-replay"),
+        ):
+            changed = deepcopy(original)
+            changed["successor"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(Denied, reason):
+                cells.validate_continuation_descriptor(changed, workflow, controller)
+
+        altered = deepcopy(original)
+        altered["qualification"]["sha256"] = cells.TWENTY_FIFTH_QUALIFICATION
+        with self.assertRaisesRegex(Denied, "continuation-twenty-sixth-qualification"):
+            cells.validate_continuation_descriptor(altered, workflow, controller)
+        changed_commit = {"sha": caller, "parents": [{"sha": cells.TWENTY_FIFTH_MAIN}]}
+        with self.assertRaises(Denied):
+            cells.validate_continuation_commit(changed_commit, original, caller, run, controller)
+
     def test_business_roles_guard_remains_required_in_existing_parser(self):
         _, native, who = fixture()
         matrix = {key: "supported" for key in cell_contract.MATRIX_KEYS}

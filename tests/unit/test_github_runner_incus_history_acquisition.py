@@ -222,7 +222,7 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             f._continuation_native_histories(self.get, self.descriptor, broken)
 
-    def test_twenty_fourth_and_fifth_require_every_native_family_and_reject_projection_drift(self):
+    def test_closed_successors_require_every_native_family_and_reject_projection_drift(self):
         phases = ("eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth",
                   "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth", "twentieth",
                   "twenty_first", "twenty_second", "twenty_third", "twenty_fourth")
@@ -230,6 +230,8 @@ class HistoryAcquisitionTests(unittest.TestCase):
             self.assert_continuation_native_family_drift_rejected(24, phases)
         with self.subTest(schema=25):
             self.assert_continuation_native_family_drift_rejected(25, (*phases, "twenty_fifth"))
+        with self.subTest(schema=26):
+            self.assert_continuation_native_family_drift_rejected(26, (*phases, "twenty_fifth", "twenty_sixth"))
 
     def assert_continuation_native_family_drift_rejected(self, schema, phases):
         receipt = self.receipt

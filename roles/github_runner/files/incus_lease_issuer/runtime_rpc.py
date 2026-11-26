@@ -409,10 +409,18 @@ class RuntimeRPC:
                 _write(connected, outcome)
                 return outcome
             deferred_native = operation == "run" and self._derived_configuration is not None
-            native = None if deferred_native else admission.verify_runtime_native(
-                connected, selected, request["nonce"], request["token"], request["api_token"])
+            heartbeat = operation == "heartbeat"
+            native = None
             if not deferred_native:
-                del request["token"], request["api_token"]
+                try:
+                    if heartbeat:
+                        native = admission._observe_runtime_heartbeat(connected, selected, request["nonce"],
+                            request["token"], request["api_token"], challenge_expires_at=challenge["expires_at"])
+                    else:
+                        native = admission.verify_runtime_native(
+                            connected, selected, request["nonce"], request["token"], request["api_token"])
+                finally:
+                    del request["token"], request["api_token"]
             from . import root_session
             with root_session._session(self._config.preparation_config_path,
                                        self._config.preparation_config_sha256) as session:
@@ -429,10 +437,11 @@ class RuntimeRPC:
                 # The original five-second native capability must STILL be
                 # live after pre-admission reads. No timing allowance, token
                 # expiry or running lease is silently stretched by preflight.
-                current_worker, who = admission._require_native(native, connected, selected)
-                require(current_worker == worker and admission._controls(selected)[0] == controls, "runtime-peer-drift")
-                self._require_origin(who, selector)
-                if operation in {"run", "heartbeat"}:
+                if not heartbeat:
+                    current_worker, who = admission._require_native(native, connected, selected)
+                    require(current_worker == worker and admission._controls(selected)[0] == controls, "runtime-peer-drift")
+                    self._require_origin(who, selector)
+                if operation == "run":
                     require(self._config.heartbeat_lead_seconds < who.valid_until - int(time.time()),
                             "runtime-renewal-budget")
                 if operation == "run":
@@ -478,9 +487,16 @@ class RuntimeRPC:
                                             prepared, store, current_worker, config)
                         budget()
                         engine_executor._start_locked(session, self._registry, selector, store, lease_id, receipt)
-                elif operation == "heartbeat":
+                elif heartbeat:
                     lease_id = request["lease_id"]
-                    refresh._refresh_locked(session, connected, self._registry, selector, store, lease_id, native_proof=native)
+
+                    def authorize():
+                        require(native.worker == worker and native.controls == controls, "runtime-peer-drift")
+                        self._require_origin(native.identity, selector)
+                        return admission._finish_runtime_heartbeat(native, connected, selected)
+
+                    refresh._refresh_locked(session, connected, self._registry, selector, store, lease_id,
+                        authorize_native=authorize, minimum_validity=self._config.heartbeat_lead_seconds)
                 else:
                     proof = store.consume_runtime_proof(native.nonce, current_worker, who, operation,
                         cell_sha256=selected.cell_sha256, identity_policy_sha256=identity.policy_digest(selected.identity),
@@ -711,8 +727,13 @@ class BootstrapRuntimeRPC:
         proof = run_factory.verify_bootstrap_native(connected, bootstrap, selector, request["nonce"],
             request["token"], request["api_token"], purpose="observer")
         configuration = run_factory.find_existing_configuration(bootstrap, selector, proof)
-        _, who, remaining = run_factory.require_bootstrap_native(proof, connected, proof.policy,
-                                                                 request["token"], request["api_token"])
+        # C26's lookup brackets the complete catalogue with full host reads.
+        # Recheck identity at both inner reads. The final reply still requires
+        # a full fresh host verification on the same socket.
+        continuation = bootstrap.value.get("operating_continuation", {})
+        require_reader = (run_factory.require_bootstrap_observer_reader if continuation.get("schema") == 26
+                          else run_factory.require_bootstrap_native)
+        _, who, remaining = require_reader(proof, connected, proof.policy, request["token"], request["api_token"])
         origin = run_factory.read_configuration_origin(configuration)
         require((who.run_id, who.caller_sha, who.reusable_sha) ==
                 (origin["run_id"], origin["source_sha"], origin["reusable_sha"])
@@ -748,7 +769,7 @@ class BootstrapRuntimeRPC:
                         kind = "operating-receipt"
                         break
                 if operation == "observe-profile" and record["state"] == "closed":
-                    run_factory.require_bootstrap_native(proof, connected, proof.policy, request["token"], request["api_token"])
+                    require_reader(proof, connected, proof.policy, request["token"], request["api_token"])
                     config = runtime._check()
                     receipt = signed_context.RootSigner(config.signing_key_path, config.signing_public_key).issue_final_receipt(
                         runtime._registry, selector, store, lease_id)

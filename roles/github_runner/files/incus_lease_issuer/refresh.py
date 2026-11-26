@@ -89,7 +89,8 @@ class RootRefresher:
             raise RefreshDenied("refresh-denied") from None
 
 
-def _refresh_locked(session, connected_socket, registry, selector, store, lease_id, *, native_proof=None):
+def _refresh_locked(session, connected_socket, registry, selector, store, lease_id, *, authorize_native=None,
+                    minimum_validity=None):
     from . import root_session
     require(os.geteuid() == 0, "refresh-root-required")
     config = root_session._require_session(session)
@@ -119,19 +120,19 @@ def _refresh_locked(session, connected_socket, registry, selector, store, lease_
         require(not running or (len(running) == 1 and running[0]["state"] == "verified"
                                 and "engine_process" in running[0] and "engine_container_id" in running[0]),
                 "refresh-running-engine-unbound")
-        _same_worker(connected_socket, selected, before["worker"])
+        if authorize_native is None:
+            _same_worker(connected_socket, selected, before["worker"])
         context, old_sha, descriptor, engine_raw, engine_sha = _old_context(selected, lease_id)
         # Actual bridge owns strict framing, live native identity,
         # fresh nonce/JTI and collector-before/after verification.
-        if native_proof is None:
+        if authorize_native is None:
             result = admission.AdmissionBridge(selected, expected_operation="refresh").handle(connected_socket)
             require(result == {"schema": 1, "operation": "refresh", "lease_id": lease_id,
                                "expires_at": selected.deadline}, "refresh-admission-result")
         else:
-            native_worker, native_identity = admission._require_native(native_proof, connected_socket, selected)
-            require(asdict(native_worker) == before["worker"], "refresh-native-worker")
-            store.runtime_refresh_identity(lease_id, native_proof.nonce, native_worker, native_identity,
-                cell_sha256=selected.cell_sha256, identity_policy_sha256=identity.policy_digest(selected.identity))
+            native_proof = authorize_native()
+            require(asdict(native_proof.worker) == before["worker"], "refresh-native-worker")
+            store._commit_runtime_heartbeat(lease_id, native_proof, connected_socket, selected, minimum_validity)
         after = store.read(lease_id)
         attempted = after != before
         require(after["authorizations"][:-1] == before["authorizations"]
@@ -209,7 +210,9 @@ def _refresh_locked(session, connected_socket, registry, selector, store, lease_
             except Exception:
                 pass  # Retain intent/already verified record without retry or overwrite.
             raise RefreshUnknown("refresh-unknown") from None
-    except Exception:
+    except Exception as error:
+        if authorize_native is not None:
+            identity._diagnostic_failed("runtime-heartbeat-refresh", error)
         if before is not None and not attempted:
             try:
                 # Admission may have committed then lost its response.

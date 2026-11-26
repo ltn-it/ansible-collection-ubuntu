@@ -119,6 +119,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 26:
+        return _validate_twenty_sixth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 25:
         return _validate_twenty_fifth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 24:
@@ -200,7 +202,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
                     15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
                     19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN, 21: TWENTY_FIRST_MAIN, 22: TWENTY_SECOND_MAIN,
-                    23: TWENTY_THIRD_MAIN, 24: TWENTY_FOURTH_MAIN, 25: TWENTY_FIFTH_MAIN}
+                    23: TWENTY_THIRD_MAIN, 24: TWENTY_FOURTH_MAIN, 25: TWENTY_FIFTH_MAIN, 26: TWENTY_SIXTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -258,6 +260,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 26:
+        return _validate_twenty_sixth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 25:
         return _validate_twenty_fifth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 24:
@@ -2798,5 +2802,67 @@ def _validate_twenty_fifth_qualification(value):
             and retired["closed_record_sha256"] == TWENTY_FIFTH_CLOSED_RECORD
             and PurePosixPath(bootstrap["path"]).parent == PurePosixPath(bank["path"]).parent,
             "continuation-twenty-fifth-original-locators")
+    _validate_closed_vm_catalogues(retired, previous["retirement"]["catalogues"])
+    return identities
+
+
+TWENTY_SIXTH_MAIN = "91f581f565ce21beb1b4ce3a59c71c8d332c951f"
+TWENTY_SIXTH_RUN = 45835485677
+TWENTY_SIXTH_CHECKS = (139969460344, 139980094233)
+TWENTY_SIXTH_GRAPH = "4c06ef95134ed675ce609046a527dbab3164d0e58956c7549e564f852406b7bf"
+TWENTY_SIXTH_LEASE = "c3cbfb0c56f1fee98d48f351226475a1"
+TWENTY_SIXTH_BOOTSTRAP = "c8e7f398b90b30b7de247980fcadc4c751984a198e8552ff0a47cce94185fe67"
+TWENTY_SIXTH_CLOSED_RECORD = "71ce45459438c94e989f24b60b969ec184d888d58698c73cf81c8a9b10bfdcbd"
+TWENTY_SIXTH_ARCHIVE = "db3236db2009e2c83c33a69cf80966edcf28f988086c856087154d7052b44c17"
+TWENTY_SIXTH_TERMINAL = "b53bec6aadd35164cdf3bb871797a6c3c2f5ae3a355be8925c5466c244e77e2c"
+TWENTY_SIXTH_QUALIFICATION = "d35f77beaa1424f5ca4e5637ff0eb6168428f1d40412d333d3c411a44a9fb83d"
+TWENTY_SIXTH_REASON = TWENTY_FIFTH_REASON
+TWENTY_SIXTH_SUCCESSOR_REUSABLE = "0ee6d6410abaf5ceb8ceabeb5708ed2a1f112ade"
+TWENTY_SIXTH_SUCCESSOR_WORKFLOW = "5461bdb0776899a271e5e251fd360737c95229c696860dc6002fc11c045f5421"
+
+
+def twenty_sixth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, TWENTY_FIFTH_SUCCESSOR_REUSABLE,
+                                       TWENTY_SIXTH_GRAPH, TWENTY_SIXTH_CHECKS, TWENTY_SIXTH_MAIN)
+
+
+def _validate_twenty_sixth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    engine_policy._hash(TWENTY_SIXTH_SUCCESSOR_WORKFLOW)
+    cell_contract._commit(TWENTY_SIXTH_SUCCESSOR_REUSABLE)
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == TWENTY_SIXTH_REASON and ref["sha256"] == TWENTY_SIXTH_QUALIFICATION,
+            "continuation-twenty-sixth-qualification")
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=TWENTY_SIXTH_MAIN, expected_workflow=TWENTY_SIXTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=TWENTY_SIXTH_SUCCESSOR_REUSABLE, reason="continuation-twenty-sixth-successor")
+    require(successor["source_sha"] != TWENTY_SIXTH_MAIN and successor["run_id"] > TWENTY_SIXTH_RUN,
+            "continuation-twenty-sixth-replay")
+    return value
+
+
+def _validate_twenty_sixth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_twenty_sixth", "previous_qualification", "retirement"})
+    require(value["purpose"] == TWENTY_SIXTH_REASON and ledger.digest(value) == TWENTY_SIXTH_QUALIFICATION
+            and ledger.digest(value["native_twenty_sixth"]) == TWENTY_SIXTH_GRAPH,
+            "continuation-twenty-sixth-history")
+    previous = value["previous_qualification"]
+    require(previous["schema"] == 25, "continuation-twenty-sixth-previous-schema")
+    identities = _validate_twenty_fifth_qualification(previous)
+    retired = engine_policy._keys(value["retirement"], {"original_bootstrap", "original_bank",
+        "closed_record_sha256", "entries", "catalogues"})
+    bootstrap = engine_policy._keys(retired["original_bootstrap"], {"path", "sha256", "device", "inode"})
+    bank = engine_policy._keys(retired["original_bank"], {"path", "device", "inode", "state_file_sha256"})
+    for locator in (bootstrap, bank):
+        engine_policy._path(locator["path"])
+        for coordinate in ("device", "inode"):
+            engine_policy._integer(locator[coordinate], 1, 2**63 - 1)
+    engine_policy._hash(bank["state_file_sha256"])
+    require(bootstrap["sha256"] == TWENTY_SIXTH_BOOTSTRAP
+            and retired["closed_record_sha256"] == TWENTY_SIXTH_CLOSED_RECORD
+            and PurePosixPath(bootstrap["path"]).parent == PurePosixPath(bank["path"]).parent,
+            "continuation-twenty-sixth-original-locators")
     _validate_closed_vm_catalogues(retired, previous["retirement"]["catalogues"])
     return identities

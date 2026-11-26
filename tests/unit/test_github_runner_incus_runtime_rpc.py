@@ -167,9 +167,27 @@ class RootRuntimeTests(unittest.TestCase):
         self.assertEqual(self.store.read(self.lease), before)
 
     def test_heartbeat_actual_native_proof_publishes_then_renews_once(self):
+        self.value["authentication_timeout_seconds"] = 20
+        self.seal()
         before = self.store.read(self.lease)
-        with self.fixture.kernel():
+        worker_reads = []
+        tick = time.monotonic()
+
+        def collect(*_):
+            worker_reads.append(self.fixture.worker)
+            return self.fixture.worker
+
+        def monotonic():
+            # Standalone RPC has the initial challenge read plus three reads
+            # in the heartbeat verification. Model the last one taking >5s.
+            return tick + (6 if len(worker_reads) >= 4 else 0)
+
+        fake_time = mock.Mock(wraps=time)
+        fake_time.monotonic.side_effect = monotonic
+        with self.fixture.kernel(), mock.patch.object(runtime_rpc.admission, "time", fake_time), \
+             mock.patch.object(runtime_rpc.admission, "_worker", side_effect=collect):
             result, _ = self.invoke("heartbeat")
+        self.assertGreaterEqual(len(worker_reads), 4)
         self.assertEqual(result["type"], "result")
         self.assertEqual(result["operation"], "heartbeat")
         after = self.store.read(self.lease)
@@ -183,6 +201,33 @@ class RootRuntimeTests(unittest.TestCase):
         self.assertEqual(renewals[0]["host_api_authorization"]["authorization_sha256"],
                          ledger.digest(after["authorizations"][-1]))
         self.assertEqual(len(self.fixture.host_sends), 2)  # Maintenance baseline + paired actual grant.
+
+    def test_heartbeat_proof_expiring_after_ledger_lock_entry_cannot_renew(self):
+        self.value["authentication_timeout_seconds"] = 20
+        self.seal()
+        before = self.store.read(self.lease)
+        tick = time.monotonic()
+        fake_time = mock.Mock(wraps=time)
+        fake_time.monotonic.return_value = tick
+        commit = ledger.Ledger._commit_runtime_heartbeat
+
+        def delay_commit(store, *args):
+            load = store._load
+
+            def delayed_load():
+                state = load()
+                fake_time.monotonic.return_value = tick + runtime_rpc.admission.FRAME_TIMEOUT_SECONDS
+                return state
+
+            with mock.patch.object(store, "_load", side_effect=delayed_load):
+                return commit(store, *args)
+
+        with self.fixture.kernel(), mock.patch.object(runtime_rpc.admission, "time", fake_time), \
+             mock.patch.object(ledger.Ledger, "_commit_runtime_heartbeat", delay_commit):
+            result, _ = self.invoke("heartbeat")
+        self.assertEqual(result["type"], "failure")
+        self.assertEqual(self.store.read(self.lease), before)
+        self.assertEqual(self.fixture.nft_calls, [])
 
     def test_run_rejects_before_lease_when_first_heartbeat_can_overlap_preparation(self):
         before = self.store.read(self.lease)
