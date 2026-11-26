@@ -1001,7 +1001,8 @@ class PodmanContinuationTests(unittest.TestCase):
             store.read.return_value = active
             readback.return_value = (111, 99, 100, 5000)
             run_factory._twelfth_host_fence(config, 41, "/unit/bank", successor)
-            readback.assert_called_with(policy, tuple_value=(42, "10.0.0.2"), maximum_ms=5400000)
+            readback.assert_called_with(policy, tuple_value=(42, "10.0.0.2"),
+                                        maximum_ms=5400000, allow_expiring=True)
             with self.assertRaisesRegex(identity.Denied, "continuation-twelfth-host-fence-original-tuple"):
                 run_factory._twelfth_host_fence(config, 42, "/unit/bank", successor)
 

@@ -146,6 +146,18 @@ class HostRulesTests(unittest.TestCase):
               mock.patch.object(host, "_nft", return_value=ledger.canonical(grant)) as nft,
               mock.patch.object(ledger, "Ledger", return_value=nullcontext(store))):
             run_factory._twelfth_host_fence(*args)
+            # nft floors the last fractional second to zero while still
+            # reporting the exact tuple. Retired history only needs ownership.
+            expiring = deepcopy(grant)
+            element = next(row["set"] for row in expiring["nftables"] if "set" in row)["elem"][0]["elem"]
+            element["expires"] = 0
+            nft.return_value = ledger.canonical(expiring)
+            run_factory._twelfth_host_fence(*args)
+            element["val"]["concat"][1] = "10.250.23.3"
+            nft.return_value = ledger.canonical(expiring)
+            with self.assertRaisesRegex(Denied, "host-api-tuple-timer"):
+                run_factory._twelfth_host_fence(*args)
+            nft.return_value = ledger.canonical(grant)
             # A new heartbeat was archived, but its attempted renewal did not change the kernel gate.
             next_authorization = {"valid_until": deadline + 60}
             record["authorizations"].append(next_authorization)

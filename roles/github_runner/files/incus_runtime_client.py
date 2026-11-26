@@ -51,6 +51,8 @@ MAX_EVIDENCE_TOTAL_BYTES = 512 * 1024 ** 2
 FRAME_SECONDS = 5
 AUTHENTICATION_IDLE_SECONDS = 60
 INITIAL_AUTH_CAPABILITY = "initial-auth-idle-v1"
+# Keep the derived runtime's preparation reserve in sync with this lead.
+DERIVED_HEARTBEAT_LEAD_SECONDS = 90
 sys.dont_write_bytecode = True
 
 
@@ -753,6 +755,12 @@ def _capture(connection, terminal):
         os.close(directory)
 
 
+def _heartbeat_at(selector, authorization):
+    lead = DERIVED_HEARTBEAT_LEAD_SECONDS if selector in _CONFIGURATIONS else 30
+    remaining = authorization - int(time.time())
+    return authorization - min(lead, max(1, remaining // 2))
+
+
 def run_cell(selector, *, recover=False):
     connection, previous, cancelled = None, {}, [None]
     operation_name = "recover" if recover else "run"
@@ -769,7 +777,7 @@ def run_cell(selector, *, recover=False):
                     and _integer(reply["expires_at"], int(time.time()) + 1, int(time.time()) + 5400)
                     and _integer(reply["authorization_expires_at"], int(time.time()) + 1, reply["expires_at"]))
             lease, deadline, authorization = reply["lease_id"], reply["expires_at"], reply["authorization_expires_at"]
-            next_heartbeat = authorization - min(30, max(1, (authorization - int(time.time())) // 2))
+            next_heartbeat = _heartbeat_at(selector, authorization)
             def requested(kind, _frame):
                 cancelled[0] = cancelled[0] or kind
             for kind in (signal.SIGINT, signal.SIGTERM):
@@ -784,7 +792,7 @@ def run_cell(selector, *, recover=False):
                     refreshed = operation(selector, "heartbeat", lease)
                     require(refreshed["expires_at"] == deadline and refreshed["authorization_expires_at"] > time.time())
                     authorization = refreshed["authorization_expires_at"]
-                    next_heartbeat = authorization - min(30, max(1, (authorization - int(time.time())) // 2))
+                    next_heartbeat = _heartbeat_at(selector, authorization)
                 readable, _, _ = select.select([connection[0]], [], [], 1)
                 if readable:
                     reply = _receive(connection[0])
@@ -1110,7 +1118,7 @@ def run_operating(case):
                 and _integer(reply["expires_at"], int(time.time()) + 1, int(time.time()) + 5400)
                 and _integer(reply["authorization_expires_at"], int(time.time()) + 1, reply["expires_at"]))
         lease, deadline, authorization = reply["lease_id"], reply["expires_at"], reply["authorization_expires_at"]
-        next_heartbeat = authorization - min(30, max(1, (authorization - int(time.time())) // 2))
+        next_heartbeat = _heartbeat_at(selector, authorization)
         ready_uuid, cancelled = None, False
         def requested(_kind, _frame):
             interrupted[0] = True
@@ -1125,7 +1133,7 @@ def run_operating(case):
                 renewed = operation(selector, "heartbeat", lease)
                 require(renewed["expires_at"] == deadline and renewed["authorization_expires_at"] > time.time())
                 authorization = renewed["authorization_expires_at"]
-                next_heartbeat = authorization - min(30, max(1, (authorization - int(time.time())) // 2))
+                next_heartbeat = _heartbeat_at(selector, authorization)
             if not select.select([connection[0]], [], [], 1)[0]:
                 continue
             frame = _receive(connection[0])

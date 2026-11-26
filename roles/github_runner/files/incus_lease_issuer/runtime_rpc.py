@@ -105,7 +105,7 @@ def _configuration(path, sha):
 
 
 
-def _initial_transition_budget(config, valid_until, now):
+def _initial_transition_budget(config, valid_until, now, *, derived=False):
     """Reduce a Root-sealed maximum; never extend signed authorization.
 
     Absent minimum preserves the legacy full-maximum requirement. A separately
@@ -119,11 +119,12 @@ def _initial_transition_budget(config, valid_until, now):
     minimum = maximum if minimum is None else minimum
     engine_policy._integer(maximum, 1, 300)
     engine_policy._integer(minimum, 1, maximum)
-    # Keep the existing 31-second authorization reserve and one further second
-    # for transition bookkeeping/unwind before the signed absolute boundary.
-    effective = min(maximum, math.floor(valid_until - now - 31 - 1))
+    # Derived requests verify the retained catalogue around locator resolution.
+    # Reserve the client's renewal lead, a clock tick and an unwind second.
+    reserve = (91 if derived else 31)
+    effective = min(maximum, math.floor(valid_until - now - reserve - 1))
     require(effective >= minimum, "runtime-initial-authorization-budget")
-    return effective, valid_until - 31
+    return effective, valid_until - reserve
 
 
 def _read(connected, maximum, seconds):
@@ -418,11 +419,10 @@ class RuntimeRPC:
                     require(self._config.heartbeat_lead_seconds < who.valid_until - int(time.time()),
                             "runtime-renewal-budget")
                 if operation == "run":
-                    # The client can renew 30 seconds before authorization expires.
-                    # Preparation holds the Root session, so reserve that lead
-                    # outside the full initial transition before admitting effects.
+                    # Preparation holds the Root session. Leave the client's
+                    # renewal lead outside that initial transition.
                     initial_timeout, preparation_deadline = _initial_transition_budget(
-                        self._config, who.valid_until, time.time())
+                        self._config, who.valid_until, time.time(), derived=self._derived_configuration is not None)
                     require(who.valid_until <= selected.deadline, "runtime-initial-authorization-budget")
                     lease_id = store.runtime_prepare(native.nonce, current_worker, who,
                         policy_sha256=selected.custody_policy_sha256, cell_sha256=selected.cell_sha256,

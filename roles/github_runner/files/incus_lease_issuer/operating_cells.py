@@ -119,8 +119,10 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 23:
+        return _validate_closed_vm_descriptor(value, workflow_sha256, reusable_sha, native_cleanup=True)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 22:
-        return _validate_twenty_second_descriptor(value, workflow_sha256, reusable_sha)
+        return _validate_closed_vm_descriptor(value, workflow_sha256, reusable_sha, native_cleanup=False)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 21:
         return _validate_twenty_first_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 20:
@@ -193,7 +195,8 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
                     6: SIXTH_MAIN, 7: SEVENTH_MAIN, 8: EIGHTH_MAIN, 9: NINTH_MAIN, 10: TENTH_MAIN,
                     11: ELEVENTH_MAIN, 12: TWELFTH_MAIN, 13: THIRTEENTH_MAIN, 14: FOURTEENTH_MAIN,
                     15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
-                    19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN, 21: TWENTY_FIRST_MAIN, 22: TWENTY_SECOND_MAIN}
+                    19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN, 21: TWENTY_FIRST_MAIN, 22: TWENTY_SECOND_MAIN,
+                    23: TWENTY_THIRD_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -251,6 +254,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 23:
+        return _validate_twenty_third_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 22:
         return _validate_twenty_second_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 21:
@@ -2548,6 +2553,19 @@ TWENTY_SECOND_REAUTHORIZATION = "e9d87d24d91594267deae0f37bcbbb9c74833fb2df76625
 TWENTY_SECOND_REASON = "terminal-original-push-after-verified-stopped-vm-cleanup"
 TWENTY_SECOND_SUCCESSOR_REUSABLE = "b25236cc594fee06854ee524d6ab87004255b70f"
 TWENTY_SECOND_SUCCESSOR_WORKFLOW = "9260545a21eedf0cfc9f96b71632ab2bb04426495b7576d55d6267864e652567"
+TWENTY_THIRD_MAIN = "af5a45eca7e7dcaa85af8bea3e6d77c775fd8b9a"
+TWENTY_THIRD_RUN = 45634151997
+TWENTY_THIRD_CHECKS = (139281015107, 139292701192)
+TWENTY_THIRD_GRAPH = "a1451e46b3b14ce6c483f90b00832628f76f9c1e20016ed757e0f25026f093e3"
+TWENTY_THIRD_LEASE = "f4807b68239e49b717d0a77623f87e59"
+TWENTY_THIRD_BOOTSTRAP = "e5f41df9ea92c3d75500a37521035b0a4799ca21ffd2afc42bf3fb511433ab28"
+TWENTY_THIRD_CLOSED_RECORD = "f0af286786b57b7cc57c26414b5c2191fd6f3bb4ebf0f18645ce4c78d4151264"
+TWENTY_THIRD_ARCHIVE = "e6fe210b504b20159991640dedbf2c27aa72f1368634b3cc6900e3af749eec01"
+TWENTY_THIRD_TERMINAL = "fedc4d83c09e62091943f1486c9d4dcfee036460a2f19d8bf01c4b5a7307d249"
+TWENTY_THIRD_QUALIFICATION = "d0a4256e5b4df12b39baf2570094ac94e8c5b49e7303b375146981f9295dd5fa"
+TWENTY_THIRD_REASON = "terminal-original-push-after-native-vm-cleanup"
+TWENTY_THIRD_SUCCESSOR_REUSABLE = "14c9a0a00f64da5b531e0236c871f6a4eee8444c"
+TWENTY_THIRD_SUCCESSOR_WORKFLOW = "3e209cbf72d0bd33db1734490e9556235d4b1c5cbb93dfb0ad4514fed4f4ef25"
 
 
 def twenty_second_native_projection(run, inventory, checks):
@@ -2555,16 +2573,27 @@ def twenty_second_native_projection(run, inventory, checks):
                                        TWENTY_SECOND_GRAPH, TWENTY_SECOND_CHECKS, TWENTY_SECOND_MAIN)
 
 
-def _validate_twenty_second_descriptor(value, workflow_sha256, reusable_sha):
+def twenty_third_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, TWENTY_SECOND_SUCCESSOR_REUSABLE,
+                                       TWENTY_THIRD_GRAPH, TWENTY_THIRD_CHECKS, TWENTY_THIRD_MAIN)
+
+
+def _validate_closed_vm_descriptor(value, workflow_sha256, reusable_sha, *, native_cleanup):
     engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
     ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
     engine_policy._path(ref["path"])
     engine_policy._hash(ref["sha256"])
-    require(value["reason"] == TWENTY_SECOND_REASON, "continuation-twenty-second-qualification")
+    if native_cleanup:
+        require(ref["sha256"] == TWENTY_THIRD_QUALIFICATION, "continuation-twenty-third-qualification")
+    reason = TWENTY_THIRD_REASON if native_cleanup else TWENTY_SECOND_REASON
+    predecessor = TWENTY_THIRD_MAIN if native_cleanup else TWENTY_SECOND_MAIN
+    expected_workflow = TWENTY_THIRD_SUCCESSOR_WORKFLOW if native_cleanup else TWENTY_SECOND_SUCCESSOR_WORKFLOW
+    expected_reusable = TWENTY_THIRD_SUCCESSOR_REUSABLE if native_cleanup else TWENTY_SECOND_SUCCESSOR_REUSABLE
+    require(value["reason"] == reason, "continuation-closed-vm-qualification")
     successor = value["successor"]
     _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
-        first_parent=TWENTY_SECOND_MAIN, expected_workflow=TWENTY_SECOND_SUCCESSOR_WORKFLOW,
-        expected_reusable=TWENTY_SECOND_SUCCESSOR_REUSABLE, reason="continuation-twenty-second-successor")
+        first_parent=predecessor, expected_workflow=expected_workflow,
+        expected_reusable=expected_reusable, reason="continuation-closed-vm-successor")
     require(successor["source_sha"] not in {
                 ELEVENTH_MAIN, TWELFTH_MAIN, THIRTEENTH_MAIN, FOURTEENTH_MAIN, FIFTEENTH_MAIN, SIXTEENTH_MAIN,
                 SEVENTEENTH_MAIN, EIGHTEENTH_MAIN, NINETEENTH_MAIN, TWENTIETH_MAIN, TWENTY_FIRST_MAIN,
@@ -2572,7 +2601,10 @@ def _validate_twenty_second_descriptor(value, workflow_sha256, reusable_sha):
             and successor["run_id"] not in {
                 ELEVENTH_RUN, TWELFTH_RUN, THIRTEENTH_RUN, FOURTEENTH_RUN, FIFTEENTH_RUN, SIXTEENTH_RUN,
                 SEVENTEENTH_RUN, EIGHTEENTH_RUN, NINETEENTH_RUN, TWENTIETH_RUN, TWENTY_FIRST_RUN,
-                TWENTY_SECOND_RUN}, "continuation-twenty-second-replay")
+                TWENTY_SECOND_RUN}, "continuation-closed-vm-replay")
+    if native_cleanup:
+        require(successor["source_sha"] != TWENTY_THIRD_MAIN and successor["run_id"] != TWENTY_THIRD_RUN,
+                "continuation-twenty-third-replay")
     return value
 
 
@@ -2601,8 +2633,37 @@ def _validate_twenty_second_qualification(value):
             and PurePosixPath(closure["path"]) ==
                 PurePosixPath(bootstrap["path"]).with_name("c21-no-fixed-wait-cleanup-done.json"),
             "continuation-twenty-second-original-locators")
+    _validate_closed_vm_catalogues(retired, previous["retirement"]["catalogues"])
+    return identities
+
+
+def _validate_twenty_third_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_twenty_third", "previous_qualification", "retirement"})
+    require(ledger.digest(value) == TWENTY_THIRD_QUALIFICATION and value["purpose"] == TWENTY_THIRD_REASON
+            and ledger.digest(value["native_twenty_third"]) == TWENTY_THIRD_GRAPH,
+            "continuation-twenty-third-history")
+    previous = value["previous_qualification"]
+    require(previous["schema"] == 22, "continuation-twenty-third-previous-schema")
+    identities = _validate_twenty_second_qualification(previous)
+    retired = engine_policy._keys(value["retirement"], {"original_bootstrap", "original_bank",
+        "closed_record_sha256", "entries", "catalogues"})
+    bootstrap = engine_policy._keys(retired["original_bootstrap"], {"path", "sha256", "device", "inode"})
+    bank = engine_policy._keys(retired["original_bank"], {"path", "device", "inode", "state_file_sha256"})
+    for locator in (bootstrap, bank):
+        engine_policy._path(locator["path"])
+        engine_policy._integer(locator["device"], 1, 2**63 - 1)
+        engine_policy._integer(locator["inode"], 1, 2**63 - 1)
+    engine_policy._hash(bank["state_file_sha256"])
+    require(bootstrap["sha256"] == TWENTY_THIRD_BOOTSTRAP
+            and retired["closed_record_sha256"] == TWENTY_THIRD_CLOSED_RECORD
+            and PurePosixPath(bootstrap["path"]).parent == PurePosixPath(bank["path"]).parent,
+            "continuation-twenty-third-original-locators")
+    _validate_closed_vm_catalogues(retired, previous["retirement"]["catalogues"])
+    return identities
+
+
+def _validate_closed_vm_catalogues(retired, old_catalogues):
     entries = engine_policy._keys(retired["entries"], {"configuration", "intake"})
-    old_catalogues = previous["retirement"]["catalogues"]
     require(set(retired["catalogues"]) == set(old_catalogues), "continuation-twenty-second-catalogues")
     for kind, catalogue in (("configuration", "native_run_configuration_catalogue"),
                             ("intake", "native_intake_catalogue")):
@@ -2615,4 +2676,3 @@ def _validate_twenty_second_qualification(value):
                 and retired["catalogues"][catalogue] ==
                     old_catalogues[catalogue] | {entry["name"]: entry["inventory_sha256"]},
                 "continuation-twenty-second-catalogue-extension")
-    return identities
