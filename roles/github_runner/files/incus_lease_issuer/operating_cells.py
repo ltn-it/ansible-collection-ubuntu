@@ -2690,8 +2690,8 @@ TWENTY_FOURTH_BOOTSTRAP = "67057bf660b69e44056e559b2182b07a4661a8ce8bbe508fff388
 TWENTY_FOURTH_QUALIFICATION = "3faf1922825880df82c4fe244af13f71a87579e9d23a465c681fca8475f0e7b8"
 TWENTY_FOURTH_REASON = "terminal-original-push-after-sealed-configuration-without-lease"
 # Filled from the protected publication before this candidate ships.
-TWENTY_FOURTH_SUCCESSOR_REUSABLE = None
-TWENTY_FOURTH_SUCCESSOR_WORKFLOW = None
+TWENTY_FOURTH_SUCCESSOR_REUSABLE = "37a023a34f3d5e8d7b5f033c0caa06ae4f63c7f3"
+TWENTY_FOURTH_SUCCESSOR_WORKFLOW = "5551752e1514190ca40fc17c7dee2f950e2f290241627c02cc97a3a32de1abb2"
 
 
 def twenty_fourth_native_projection(run, inventory, checks):
