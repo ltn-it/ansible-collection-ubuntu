@@ -731,7 +731,7 @@ class BootstrapRuntimeRPC:
         # Recheck identity at both inner reads. The final reply still requires
         # a full fresh host verification on the same socket.
         continuation = bootstrap.value.get("operating_continuation", {})
-        require_reader = (run_factory.require_bootstrap_observer_reader if continuation.get("schema") in {26, 27}
+        require_reader = (run_factory.require_bootstrap_observer_reader if continuation.get("schema") in {26, 27, 28}
                           else run_factory.require_bootstrap_native)
         _, who, remaining = require_reader(proof, connected, proof.policy, request["token"], request["api_token"])
         origin = run_factory.read_configuration_origin(configuration)
@@ -848,13 +848,17 @@ class BootstrapRuntimeRPC:
                 return result
             if operation == "run":
                 staging = True
-                # This factory performs the single authoritative archive stage;
-                # no redundant outer acquisition/readback or assumed receipt.
+                # The factory verifies current native authority and host
+                # closure after sealing, then verifies the sealed readback.
                 configuration = run_factory.create_run_configuration(proof, connected, bootstrap, selector,
                     request["token"], request["api_token"])
+                now = int(time.time())
+                require(int(proof.expires_monotonic - time.monotonic()) > 0
+                        and now + 31 < proof.identity.valid_until
+                        and now < configuration.deadline, "bootstrap-native-expired")
             else:
                 configuration = run_factory.find_existing_execution_configuration(bootstrap, selector, proof)
-            run_factory.require_bootstrap_native(proof, connected, proof.policy, request["token"], request["api_token"])
+                run_factory.require_bootstrap_native(proof, connected, proof.policy, request["token"], request["api_token"])
             del request["token"], request["api_token"]
             self._binding(configuration)
             result = {"schema": 2, "type": "intake-ready", "operation": operation, "cell": selector,

@@ -272,22 +272,33 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_successful_intake_preserves_original_reply_without_diagnostics(self):
         obj, writes = self.bootstrap()
+        clock = SimpleNamespace(time=lambda: 1000, monotonic=lambda: 10)
+        self.enterContext(mock.patch.object(runtime_rpc, "time", clock))
         self.enterContext(mock.patch.object(run_factory, "challenge_bootstrap", return_value={
             "nonce": "c" * 64, "audience": "synthetic-secret-audience", "expires_at": 1234}))
-        self.enterContext(mock.patch.object(runtime_rpc, "_authentication", return_value={
+        self.enterContext(mock.patch.object(runtime_rpc, "_authentication", side_effect=lambda *_: {
             "nonce": "c" * 64, "token": "synthetic-secret-oidc", "api_token": "synthetic-secret-api"}))
         self.enterContext(mock.patch.object(run_factory, "verify_bootstrap_native",
-                                           return_value=SimpleNamespace(policy=object())))
+            return_value=SimpleNamespace(policy=object(), expires_monotonic=60,
+                                         identity=SimpleNamespace(valid_until=1234))))
         self.enterContext(mock.patch.object(run_factory, "create_run_configuration", return_value=SimpleNamespace(
             manifest_sha256="d" * 64, deadline=4321)))
-        self.enterContext(mock.patch.object(run_factory, "require_bootstrap_native"))
-        self.enterContext(mock.patch.object(obj, "_binding"))
+        repeated = self.enterContext(mock.patch.object(run_factory, "require_bootstrap_native"))
+        binding = self.enterContext(mock.patch.object(obj, "_binding"))
         expected = {"schema": 2, "type": "intake-ready", "operation": "run", "cell": "approved-heavy",
                     "configuration": "d" * 64, "deadline": 4321, "lease_created": False}
         self.assertEqual(obj.handle(object()), expected)
         self.assertEqual(writes.call_count, 2)
         self.assertEqual(writes.call_args.args[1], expected)
         self.socket.assert_not_called()
+        repeated.assert_not_called()
+
+        clock.monotonic = lambda: 60
+        binding.reset_mock()
+        self.assertEqual(obj.handle(object()), {
+            "schema": 2, "type": "failure", "operation": "run", "disposition": "unknown-hold"})
+        binding.assert_not_called()
+        self.assertEqual(self.record()["reason"], "bootstrap-native-expired")
 
     def test_unavailable_journal_socket_never_replaces_original_denial(self):
         self.socket.side_effect = PermissionError("synthetic-secret-socket-error")

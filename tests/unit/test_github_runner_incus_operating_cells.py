@@ -299,6 +299,36 @@ class OperatingCellTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "continuation-first-parent"):
                 cells.validate_continuation_commit(wrong_parent, descriptor, source, successor["run_id"], reusable)
 
+    def test_c27_sealed_prelease_successor_binds_attempt_controller_and_first_parent(self):
+        source = "a" * 40
+        workflow_sha = "b" * 64
+        reusable = "c" * 40
+        successor = {
+            "source_sha": source, "run_id": cells.TWENTY_EIGHTH_RUN + 1, "run_attempt": 1,
+            "first_parent": cells.TWENTY_EIGHTH_MAIN, "source_workflow_sha256": workflow_sha,
+            "reusable_sha": reusable,
+        }
+        descriptor = {
+            "schema": 28, "reason": cells.TWENTY_EIGHTH_REASON,
+            "qualification": {"path": "/private/prelease-proof.json", "sha256": cells.TWENTY_EIGHTH_QUALIFICATION},
+            "successor": successor,
+        }
+        commit = {"sha": source, "parents": [{"sha": cells.TWENTY_EIGHTH_MAIN}]}
+        with patch.object(cells, "TWENTY_EIGHTH_SUCCESSOR_WORKFLOW", workflow_sha), \
+             patch.object(cells, "TWENTY_EIGHTH_SUCCESSOR_REUSABLE", reusable):
+            cells.validate_continuation_commit(commit, descriptor, source, successor["run_id"], reusable)
+            for field, value in (
+                ("run_attempt", 2), ("source_sha", cells.TWENTY_EIGHTH_MAIN),
+                ("run_id", cells.TWENTY_EIGHTH_RUN), ("reusable_sha", "d" * 40),
+                ("first_parent", cells.TWENTY_SIXTH_MAIN), ("source_workflow_sha256", "d" * 64),
+            ):
+                wrong = descriptor | {"successor": successor | {field: value}}
+                with self.subTest(field=field), self.assertRaises(Denied):
+                    cells.validate_continuation_descriptor(wrong, workflow_sha, reusable)
+            wrong_parent = commit | {"parents": [{"sha": cells.TWENTY_SIXTH_MAIN}]}
+            with self.assertRaisesRegex(Denied, "continuation-first-parent"):
+                cells.validate_continuation_commit(wrong_parent, descriptor, source, successor["run_id"], reusable)
+
     def test_closed_c25_accepts_only_the_bound_c26_successor(self):
         caller = "a" * 40
         run = cells.TWENTY_SIXTH_RUN + 1
