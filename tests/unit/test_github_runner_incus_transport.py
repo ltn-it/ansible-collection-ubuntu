@@ -311,6 +311,21 @@ class HTTPSReaderBoundaryTests(unittest.TestCase):
                 self.assertEqual(opener.open.call_count, calls)
                 self.assertEqual(claim.call_count, calls - 1)
 
+    def test_history_only_classifier_separates_recoverable_disconnect_from_status_or_tls(self):
+        for failure, reason in (
+            (urllib.error.URLError(http.client.RemoteDisconnected()), "https-transient-read-failed"),
+            (urllib.error.HTTPError(RUN_URL, 403, "safe-fixture", {}, None), "https-status"),
+            (ssl.SSLCertVerificationError("safe-fixture"), "https-read-failed"),
+        ):
+            with self.subTest(code=reason):
+                reader = identity.HTTPSReader(classify_transient=True)
+                opener = mock.Mock()
+                opener.open.side_effect = failure
+                with mock.patch.object(identity.urllib.request, "build_opener", return_value=opener):
+                    with self.assertRaisesRegex(identity.Denied, f"^{reason}$"):
+                        reader.read(RUN_URL, bearer=FAKE_ACCESS_TOKEN)
+                self.assertEqual(opener.open.call_count, 1)
+
     def test_status_and_body_limits_deny_without_retry(self):
         for status, body in ((503, b"private-error-body"), (200, b"x" * 8388609)):
             with self.subTest(status=status):

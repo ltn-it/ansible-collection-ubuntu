@@ -2242,8 +2242,8 @@ def _revalidate_twenty_fourth_prelease(receipt, successor_bank):
 
 
 @identity._diagnostic_step("native-histories")
-def _continuation_native_histories(get, descriptor, receipt):
-    """Overlap only independent terminal families; join before any proof escapes."""
+def _continuation_native_histories(get, descriptor, receipt, *, allow_resume=None):
+    """Join independent reads. Resume one transient family within the same proof."""
     generation = descriptor["schema"]
     twenty_seventh = receipt if generation == 27 else None
     if twenty_seventh is not None:
@@ -2408,13 +2408,36 @@ def _continuation_native_histories(get, descriptor, receipt):
         schedule = sorted(families, key=lambda family: family[0] is not _continuation_ninth_native)
         pending = {reason: executor.submit(helper, get, **arguments)
                    for helper, arguments, _, reason in schedule}
-        for _, _, expected, reason in families:
-            require(pending[reason].result() == expected, reason)
+        interrupted = None
+        for helper, arguments, expected, reason in families:
+            try:
+                observed = pending[reason].result()
+            except Denied as error:
+                if (allow_resume is None or interrupted is not None
+                        or error.args != ("https-transient-read-failed",)):
+                    raise
+                interrupted = helper, arguments, expected, reason
+                continue
+            require(observed == expected, reason)
+    if interrupted is None:
+        return False
+
+    def resumed_get(path):
+        require(allow_resume(), "bootstrap-native-expired")
+        return get(path)
+
+    helper, arguments, expected, reason = interrupted
+    require(allow_resume(), "bootstrap-native-expired")
+    require(helper(resumed_get, **arguments) == expected, reason)
+    require(allow_resume(), "bootstrap-native-expired")
+    return True
 
 
 @identity._diagnostic_step("native-current")
-def _native(connected, selected, nonce, token, api_token, *, check_origin=True, check_host_resources=True):
+def _native(connected, selected, nonce, token, api_token, *, check_origin=True, check_host_resources=True,
+            history_resume_until=None):
     admission._secret(token); admission._secret(api_token)
+    resumed = False
     controls = _controls(selected.bootstrap)
     admission._socket(connected)
     worker, acquisition = collector.begin_worker_acquisition(connected, selected.bootstrap.collector)
@@ -2455,13 +2478,33 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True, 
             # Historical terminal qualification is minted once into this
             # request's opaque proof. There is no shared cache.
             if check_origin:
-                retry = threading.BoundedSemaphore()
-                history_reader = identity.HTTPSReader(claim_transport_retry=lambda: retry.acquire(blocking=False))
+                history_reader = identity.HTTPSReader(classify_transient=True)
 
                 def get_history(path):
                     return identity.decode_json(history_reader.read(prefix + path, bearer=api_token))
 
-                _continuation_native_histories(get_history, descriptor, receipt)
+                def allow_resume():
+                    return (type(history_resume_until) is int
+                            and int(time.time()) < min(history_resume_until, who.valid_until - 31))
+
+                resumed = _continuation_native_histories(get_history, descriptor, receipt, allow_resume=allow_resume)
+                if resumed:
+                    from . import runtime_entry
+
+                    require(runtime_entry._anchor()[0] == {
+                        "schema": 2, "bootstrap_path": selected.bootstrap.path,
+                        "bootstrap_sha256": selected.bootstrap.sha256,
+                    }, "bootstrap-policy-changed")
+                    fresh, fresh_workflow = identity.verify_github_workflow_assignment(
+                        token, selected.identity, audience=ledger.AUDIENCE + nonce,
+                        peer_uid=worker.uid, access_token=api_token, clock=time.time)
+                    refreshed = get("/actions/jobs/" + str(who.job_id))
+                    fields = ("id", "run_id", "head_sha", "status", "conclusion", "name", "started_at")
+                    require(fresh == who and fresh_workflow == workflow
+                            and all(refreshed.get(k) == job.get(k) for k in fields)
+                            and _continuation_receipt(selected.bootstrap.value) == qualified,
+                            "bootstrap-native-drift")
+                    require(allow_resume(), "bootstrap-native-expired")
             # Origin validation may read a network namespace cookie. Its observer
             # needs the process to be single-threaded after the history reads.
             if check_host_resources:
@@ -2477,6 +2520,12 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True, 
         require(collector.finish_worker_acquisition(acquisition, connected, selected.bootstrap.collector) == worker
                 and _controls(selected.bootstrap) == controls,
                 "bootstrap-native-drift")
+        if resumed:
+            require(runtime_entry._anchor()[0] == {
+                "schema": 2, "bootstrap_path": selected.bootstrap.path,
+                "bootstrap_sha256": selected.bootstrap.sha256,
+            }, "bootstrap-policy-changed")
+            require(allow_resume(), "bootstrap-native-expired")
         return worker, who, controls, stamp
     finally:
         collector.discard_worker_acquisition(acquisition)
@@ -2498,7 +2547,8 @@ def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_to
         before = _worker(connected, bootstrap)
         challenge = _challenge(selected, nonce, before, snapshot_receipt_sha256)
         require(challenge["issued_at"] <= int(time.time()) < challenge["expires_at"], "bootstrap-challenge-expired")
-        worker, who, controls, started = _native(connected, selected, nonce, token, api_token)
+        worker, who, controls, started = _native(connected, selected, nonce, token, api_token,
+            history_resume_until=challenge["expires_at"])
         require(worker == before, "bootstrap-native-drift")
         remaining = min(600, who.valid_until - int(time.time()) - 31)
         require(remaining > 0, "bootstrap-native-expired")
