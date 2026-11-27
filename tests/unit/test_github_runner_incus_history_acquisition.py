@@ -365,6 +365,9 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.subTest(schema=27):
             self.assert_continuation_native_family_drift_rejected(
                 27, (*phases, "twenty_fifth", "twenty_sixth", "twenty_seventh"))
+        with self.subTest(schema=28):
+            self.assert_continuation_native_family_drift_rejected(
+                28, (*phases, "twenty_fifth", "twenty_sixth", "twenty_seventh", "twenty_eighth"))
 
     def assert_continuation_native_family_drift_rejected(self, schema, phases):
         receipt = self.receipt
