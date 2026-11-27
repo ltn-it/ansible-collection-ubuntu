@@ -751,6 +751,15 @@ class SixteenthBankPreservationTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root Linux preservation fixture")
 class TwentyFourthBankPreservationTests(unittest.TestCase):
+    original_schema = 23
+    original_run = cells.TWENTY_FOURTH_RUN
+    original_main = cells.TWENTY_FOURTH_MAIN
+    original_controller = cells.TWENTY_THIRD_SUCCESSOR_REUSABLE
+    original_job = cells.TWENTY_FOURTH_CHECKS[0]
+
+    def previous_qualification(self):
+        return {"schema": self.original_schema}
+
     def setUp(self):
         parent = Path("/run/proof")
         if not parent.is_dir() or parent.stat().st_uid != 0 or parent.stat().st_mode & 0o077:
@@ -764,7 +773,7 @@ class TwentyFourthBankPreservationTests(unittest.TestCase):
         bootstrap = root / "bootstrap.json"
         bootstrap.touch(mode=0o600)
         stamp = bootstrap.stat()
-        previous = {"schema": 23}
+        previous = self.previous_qualification()
         self.original = SimpleNamespace(path=str(bootstrap), sha256="a" * 64,
                                        value={"ledger_path": str(self.old)}, file_stamp=(stamp.st_dev, stamp.st_ino))
         self.entries = {"intake": {"receipt_sha256": "b" * 64}, "configuration": {"receipt_sha256": "c" * 64}}
@@ -775,9 +784,10 @@ class TwentyFourthBankPreservationTests(unittest.TestCase):
                                    "device": stamp.st_dev, "inode": stamp.st_ino},
             "original_bank": self.bank, "entries": self.entries}}
         self.enterContext(patch.object(run_factory, "load_bootstrap", return_value=self.original))
+        self.original_invocation = {"run_id": self.original_run, "source_sha": self.original_main,
+                                    "reusable_sha": self.original_controller}
         self.enterContext(patch.object(run_factory, "_continuation_receipt", return_value=(
-            {"schema": 23, "successor": {"run_id": cells.TWENTY_FOURTH_RUN, "source_sha": cells.TWENTY_FOURTH_MAIN}},
-            previous)))
+            {"schema": self.original_schema, "successor": self.original_invocation}, previous)))
         self.seals = self.enterContext(patch.object(run_factory, "_retired_original_entries"))
 
     def verify(self, successor=None):
@@ -786,27 +796,27 @@ class TwentyFourthBankPreservationTests(unittest.TestCase):
     def test_unchanged_bank_is_verified_with_both_seals_without_writing(self):
         before = self.state.read_bytes(), self.state.stat().st_mtime_ns
         self.verify()
-        self.seals.assert_called_once_with(self.original, self.entries, cells.TWENTY_FOURTH_MAIN,
-                cells.TWENTY_THIRD_SUCCESSOR_REUSABLE, cells.TWENTY_FOURTH_RUN, cells.TWENTY_FOURTH_CHECKS[0],
+        self.seals.assert_called_once_with(self.original, self.entries, self.original_main,
+                self.original_controller, self.original_run, self.original_job,
                 revalidating=True)
         self.assertEqual((self.state.read_bytes(), self.state.stat().st_mtime_ns), before)
 
     def test_bank_reuse_alias_inode_and_hash_drift_are_denied(self):
         with self.assertRaisesRegex(identity.Denied, "continuation-tenth-bank-reuse"):
             self.verify(self.old)
-        with (patch.object(run_factory.installation, "_open_directory", return_value=os.open(self.old, os.O_RDONLY)),
+        with (patch.object(run_factory.installation, "_open_directory", side_effect=lambda _: os.open(self.old, os.O_RDONLY)),
               self.assertRaisesRegex(identity.Denied, "continuation-tenth-bank-alias")):
             self.verify()
         with (patch.dict(self.bank, inode=self.bank["inode"] + 1),
               self.assertRaisesRegex(identity.Denied, "ledger-history-bank-drift")):
             self.verify()
         with (patch.dict(self.bank, state_file_sha256="f" * 64),
-              self.assertRaisesRegex(identity.Denied, "continuation-twenty-fourth-original-prelease-state")):
+              self.assertRaisesRegex(identity.Denied, "continuation-sealed-prelease-original-prelease-state")):
             self.verify()
 
     def test_original_requires_empty_leases_and_tokens(self):
         for changed, reason in (("leases", "continuation-tenth-original-lease"),
-                                ("tokens", "continuation-twenty-fourth-original-prelease-state")):
+                                ("tokens", "continuation-sealed-prelease-original-prelease-state")):
             state = {"leases": {}, "tokens": {}, changed: {"synthetic": {}}}
             with (self.subTest(changed=changed), patch.object(ledger.Ledger, "_load", return_value=state),
                   self.assertRaisesRegex(identity.Denied, reason)):
@@ -821,8 +831,81 @@ class TwentyFourthBankPreservationTests(unittest.TestCase):
         def replace_state(*args, **kwargs):
             self.state.write_bytes(self.state.read_bytes() + b" ")
         self.seals.side_effect = replace_state
-        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-fourth-original-prelease-state"):
+        with self.assertRaisesRegex(identity.Denied, "continuation-sealed-prelease-original-prelease-state"):
             self.verify()
+
+
+class TwentyEighthBankPreservationTests(TwentyFourthBankPreservationTests):
+    original_schema = 27
+    original_run = cells.TWENTY_EIGHTH_RUN
+    original_main = cells.TWENTY_EIGHTH_MAIN
+    original_controller = cells.TWENTY_SEVENTH_SUCCESSOR_REUSABLE
+    original_job = cells.TWENTY_EIGHTH_CHECKS[0]
+
+    def previous_qualification(self):
+        earlier = self.old.parent / "earlier"
+        earlier.mkdir(mode=0o700)
+        ledger.Ledger.initialize(str(earlier))
+        stamp = earlier.stat()
+        bank = {"path": str(earlier), "device": stamp.st_dev, "inode": stamp.st_ino}
+        ninth = {"retirement": {"original_bootstrap": {}}, "previous_qualification": {}}
+        tenth = {"previous_bank": bank, "previous_qualification": ninth}
+        previous = {"retirement": {}, "previous_qualification": tenth}
+        for generation in range(12, 28):
+            catalogues = {"earlier_generation": generation}
+            previous = {"schema": generation, "previous_qualification": previous, "catalogues": catalogues,
+                        "retirement": {"catalogues": catalogues}}
+        self.enterContext(patch.dict(cells.NINTH_RETIRED_PARTIAL, original_bank=bank))
+        self.enterContext(patch.object(run_factory, "_ninth_retired_partial_projection",
+                                      return_value=ninth["retirement"]))
+        for helper in ("_revalidate_prelease_origin", "_revalidate_closed_vm", "_revalidate_twenty_fourth_prelease",
+                       "_revalidate_oci_retirement", "_revalidate_twentieth_prelease", "_revalidate_eighteenth_retirement",
+                       "_revalidate_seventeenth_retirement", "_revalidate_sixteenth_prelease",
+                       "_revalidate_fifteenth_retirement", "_revalidate_fourteenth_preservation",
+                       "_revalidate_thirteenth_preservation", "_revalidate_twelfth_retirement",
+                       "_revalidate_eleventh_retirement"):
+            self.enterContext(patch.object(run_factory, helper))
+        return previous
+
+    def setUp(self):
+        super().setUp()
+        self.catalogues = {
+            "native_intake_catalogue": {"d" * 64: {"fixture": "C27 intake"}},
+            "native_run_configuration_catalogue": {"e" * 64: {"fixture": "C27 configuration"}},
+        }
+        self.receipt["retirement"]["catalogues"] = self.catalogues
+        self.descriptor = {"schema": 28, "successor": {
+            "run_id": self.original_run + 1, "source_sha": "f" * 40, "reusable_sha": "e" * 40}}
+        self.counts = {
+            "native_intake_catalogue": {"fixture": "intake root"},
+            "native_run_configuration_catalogue": {"fixture": "configuration root"},
+        }
+        self.catalogue = self.enterContext(patch.object(run_factory, "_continuation_catalogue"))
+
+    def verify(self, successor=None):
+        bootstrap = SimpleNamespace(sha256="b" * 64, value={
+            "ledger_path": str(self.new if successor is None else successor), "cells": {"heavy": {}}})
+        run_factory._continuation_origin_absent(bootstrap, (self.descriptor, self.receipt, self.counts, None))
+
+    def test_original_bootstrap_drift_denied_before_catalogue(self):
+        stamp = self.original.file_stamp
+        with (patch.object(self.original, "file_stamp", (stamp[0], stamp[1] + 1)),
+              self.assertRaisesRegex(identity.Denied, "continuation-sealed-prelease-original-bootstrap")):
+            self.verify()
+        with (patch.dict(self.original_invocation, reusable_sha="0" * 40),
+              self.assertRaisesRegex(identity.Denied, "continuation-sealed-prelease-original-bootstrap")):
+            self.verify()
+        self.seals.assert_not_called()
+        self.catalogue.assert_not_called()
+
+    def test_c27_retirement_is_passed_to_both_catalogue_checks(self):
+        self.verify()
+        self.assertEqual(self.catalogue.call_args_list, [
+            call(run_factory.run_intake.ROOT, self.counts["native_intake_catalogue"], self.descriptor,
+                 "b" * 64, {"heavy": {}}, intake=True, retired=self.catalogues["native_intake_catalogue"]),
+            call(run_factory.ROOT, self.counts["native_run_configuration_catalogue"], self.descriptor,
+                 "b" * 64, {"heavy": {}}, intake=False, retired=self.catalogues["native_run_configuration_catalogue"]),
+        ])
 
 
 class PodmanContinuationTests(unittest.TestCase):

@@ -123,6 +123,135 @@ class HistoryAcquisitionTests(unittest.TestCase):
             paths = [p for name, p in expected if name == label]
             self.assertEqual([p for p in actual if p in set(paths)], paths)
 
+    def test_transient_history_resume_keeps_every_other_verified_family(self):
+        prefix = "/actions/runs/" + str(cells.SEVENTH_RUN)
+        first = collections.Counter()
+        lock = threading.Lock()
+
+        def get(path):
+            with lock:
+                first[path] += 1
+                if path == prefix and first[path] == 1:
+                    raise Denied("https-transient-read-failed")
+            return self.get(path)
+
+        with ExitStack() as stack:
+            state = self.wrapped(stack, barrier=True)
+            self.assertTrue(f._continuation_native_histories(
+                get, self.descriptor, self.receipt, allow_resume=lambda: True))
+        self.assertEqual(first[prefix], 2)
+        self.assertEqual(state["active"], 0)
+        self.assertCountEqual(state["finished"], NAMES + ["seventh"])
+
+    def test_history_resume_is_denied_on_expiry_permanent_or_repeated_failure(self):
+        prefix = "/actions/runs/" + str(cells.SEVENTH_RUN)
+        for failure, allowed, wanted, count in (
+            ("https-transient-read-failed", False, "bootstrap-native-expired", 1),
+            ("https-status", True, "https-status", 1),
+            ("https-transient-read-failed", True, "https-transient-read-failed", 2),
+        ):
+            calls = []
+
+            def get(path):
+                if path == prefix:
+                    calls.append(path)
+                    raise Denied(failure)
+                return self.get(path)
+
+            with self.subTest(failure=failure, allowed=allowed):
+                with self.assertRaisesRegex(Denied, wanted):
+                    f._continuation_native_histories(
+                        get, self.descriptor, self.receipt, allow_resume=lambda: allowed)
+                self.assertEqual(len(calls), count)
+
+    def test_resume_refuses_two_transient_families(self):
+        runs = {"/actions/runs/" + str(value) for value in (cells.SEVENTH_RUN, cells.SIXTH_RUN)}
+        calls = []
+
+        def get(path):
+            if path in runs:
+                calls.append(path)
+                raise Denied("https-transient-read-failed")
+            return self.get(path)
+
+        with self.assertRaisesRegex(Denied, "https-transient-read-failed"):
+            f._continuation_native_histories(get, self.descriptor, self.receipt, allow_resume=lambda: True)
+        self.assertCountEqual(calls, runs)
+
+    def test_resumed_history_rechecks_job_anchor_and_deadline_before_host_proof(self):
+        from incus_lease_issuer import runtime_entry
+
+        now = int(time.time())
+        raw = b"controlled caller"
+        worker = ledger.Worker(995, 78, 1234, 5678, "12345678-1234-4234-8234-123456789abc")
+        who = NS(caller_sha="a" * 40, run_id=800, reusable_sha="b" * 40, job_id=123, valid_until=now + 200)
+        source = {"run_id": who.run_id, "source_sha": who.caller_sha, "reusable_sha": who.reusable_sha}
+        bootstrap = NS(path="/private/bootstrap.json", sha256="f" * 64, collector=object(),
+            value={"source_identity": {"runner_id": 78, "service_uid": 995},
+                   "source_workflow_sha256": hashlib.sha256(raw).hexdigest()})
+        selected = NS(bootstrap=bootstrap, identity=NS(required_native_job_name="modeled-job"))
+        anchor = {"schema": 2, "bootstrap_path": bootstrap.path, "bootstrap_sha256": bootstrap.sha256}
+        workflow = {"type": "file", "path": ".github/workflows/collection-ci.yml", "encoding": "base64",
+                    "size": len(raw), "content": base64.b64encode(raw).decode()}
+        job = {"id": who.job_id, "run_id": who.run_id, "head_sha": who.caller_sha,
+               "status": "in_progress", "conclusion": None, "name": "modeled-job",
+               "started_at": datetime.fromtimestamp(now - 1, timezone.utc).isoformat().replace("+00:00", "Z")}
+        left, right = socket.socketpair()
+        with left, right:
+            for case in ("recovered", "job-completed", "anchor-changed", "expired", "expires-during-final-anchor"):
+                with self.subTest(case=case), ExitStack() as updates:
+                    clock = unittest.mock.Mock(return_value=now)
+                    anchor_reads = 0
+
+                    def read_anchor():
+                        nonlocal anchor_reads
+                        anchor_reads += 1
+                        if anchor_reads == 2 and case == "expires-during-final-anchor":
+                            clock.return_value = now + 90
+                        value = anchor if case != "anchor-changed" else anchor | {"bootstrap_sha256": "e" * 64}
+                        return value, None, None
+
+                    late_job = job if case != "job-completed" else job | {"status": "completed"}
+                    reader = NS(read=unittest.mock.Mock(side_effect=[
+                        ledger.canonical(job), ledger.canonical(late_job), ledger.canonical({"sha": who.caller_sha})]))
+                    changes = [
+                        (f.admission, "_secret", unittest.mock.Mock()), (f.admission, "_socket", unittest.mock.Mock()),
+                        (f, "_controls", unittest.mock.Mock(return_value="same")),
+                        (f.collector, "begin_worker_acquisition", unittest.mock.Mock(return_value=(worker, object()))),
+                        (f.collector, "finish_worker_acquisition", unittest.mock.Mock(return_value=worker)),
+                        (f.collector, "discard_worker_acquisition", unittest.mock.Mock()),
+                        (f.identity, "verify_github_workflow_assignment", unittest.mock.Mock(return_value=(who, workflow))),
+                        (f.identity, "HTTPSReader", unittest.mock.Mock(return_value=reader)),
+                        (f, "_continuation_receipt", unittest.mock.Mock(return_value=({"schema": 27, "successor": source}, {}, {}, None))),
+                        (f, "_continuation_native_histories", unittest.mock.Mock(return_value=True)),
+                        (f, "_continuation_origin_absent", unittest.mock.Mock()),
+                        (cells, "validate_continuation_commit", unittest.mock.Mock()),
+                        (runtime_entry, "_anchor", unittest.mock.Mock(side_effect=read_anchor)),
+                        (f.time, "time", clock),
+                    ]
+                    for obj, name, value in changes:
+                        updates.enter_context(patch.object(obj, name, value))
+
+                    def acquire():
+                        return f._native(left, selected, "opaque", "modeled-oidc", "modeled-api",
+                            history_resume_until=now - 1 if case == "expired" else now + 90)
+
+                    if case == "recovered":
+                        self.assertEqual(acquire()[:3], (worker, who, "same"))
+                        f._continuation_origin_absent.assert_called_once()
+                        self.assertEqual(f.identity.verify_github_workflow_assignment.call_count, 2)
+                        self.assertEqual(runtime_entry._anchor.call_count, 2)
+                    elif case == "expires-during-final-anchor":
+                        with self.assertRaisesRegex(Denied, "^bootstrap-native-expired$"):
+                            acquire()
+                        self.assertEqual(runtime_entry._anchor.call_count, 2)
+                        f.collector.discard_worker_acquisition.assert_called_once()
+                    else:
+                        with self.assertRaises(Denied):
+                            acquire()
+                        f._continuation_origin_absent.assert_not_called()
+                        f.collector.finish_worker_acquisition.assert_not_called()
+
     def test_every_projection_drift_denied_and_all_workers_joined(self):
 
         def receipts():
@@ -236,6 +365,9 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.subTest(schema=27):
             self.assert_continuation_native_family_drift_rejected(
                 27, (*phases, "twenty_fifth", "twenty_sixth", "twenty_seventh"))
+        with self.subTest(schema=28):
+            self.assert_continuation_native_family_drift_rejected(
+                28, (*phases, "twenty_fifth", "twenty_sixth", "twenty_seventh", "twenty_eighth"))
 
     def assert_continuation_native_family_drift_rejected(self, schema, phases):
         receipt = self.receipt

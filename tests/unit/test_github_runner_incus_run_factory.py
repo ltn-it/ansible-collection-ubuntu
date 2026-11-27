@@ -673,6 +673,23 @@ class RootConfigurationTests(unittest.TestCase):
 
         dispatcher = rpc.BootstrapRuntimeRPC(self.bootstrap.path, self.bootstrap.sha256)
         phases = []
+        factory_returned = False
+        sealed_checks = []
+        create_configuration = factory.create_run_configuration
+        require_native = factory.require_bootstrap_native
+
+        def create_then_record(*args, **kwargs):
+            nonlocal factory_returned
+            configuration = create_configuration(*args, **kwargs)
+            factory_returned = True
+            return configuration
+
+        def check_native(*args, **kwargs):
+            self.assertFalse(factory_returned, "RPC repeated the factory's final host check")
+            for directory in self.directory.iterdir():
+                if (directory / "sealed-inventory.json").is_file():
+                    sealed_checks.append(directory)
+            return require_native(*args, **kwargs)
 
         def round_trip(snapshot):
             received, errors = [], []
@@ -707,6 +724,8 @@ class RootConfigurationTests(unittest.TestCase):
 
         self.stage.stop()  # Use the actual archived-file writer and reader.
         with mock.patch.object(intake, "ROOT", str(staged)), mock.patch.object(rpc, "BOOTSTRAP_BINDINGS", str(bindings)), \
+             mock.patch.object(factory, "create_run_configuration", side_effect=create_then_record), \
+             mock.patch.object(factory, "require_bootstrap_native", side_effect=check_native), \
              mock.patch.object(intake, "_native_request", return_value=request), \
              mock.patch.object(intake, "_acquire_memory", side_effect=download) as writer, \
              mock.patch.object(acquisition, "_tree", side_effect=read_tree), mock.patch.object(acquisition, "_native", return_value=native):
@@ -723,6 +742,7 @@ class RootConfigurationTests(unittest.TestCase):
             self.assertEqual(result.manifest_sha256, ready["configuration"])
             self.assertEqual(len(list(bindings.iterdir())), 1)
             self.assertEqual(writer.call_count, 1)
+            self.assertEqual(sealed_checks, [Path(result.directory)])
         self.assertEqual(len(set(phases)), 3)
         with ledger.Ledger(self.helper.store_path, clock=factory.time.time) as store:
             self.assertEqual(store.lease_ids(), ())

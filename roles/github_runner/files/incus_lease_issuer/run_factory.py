@@ -145,7 +145,7 @@ def load_bootstrap(path, expected_sha256):
                         runtime["initial_transition_timeout_seconds"])
     runtime_rpc._validate_early_renewal(runtime)
     continuation = value.get("operating_continuation")
-    if type(continuation) is dict and continuation.get("schema") in {25, 26, 27}:
+    if type(continuation) is dict and continuation.get("schema") in {25, 26, 27, 28}:
         require(runtime.get("renewal_lead_seconds") == runtime_rpc.EARLY_RENEWAL_LEAD_SECONDS,
                 "bootstrap-twenty-fifth-renewal-policy")
     require(type(runtime["capture"]) is dict, "bootstrap-runtime-capture")
@@ -282,7 +282,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 27 or receipt.get("schema") == 27:
+    if descriptor["schema"] == 28 or receipt.get("schema") == 28:
+        require(descriptor["schema"] == receipt.get("schema") == 28, "continuation-twenty-eighth-receipt-kind")
+    elif descriptor["schema"] == 27 or receipt.get("schema") == 27:
         require(descriptor["schema"] == receipt.get("schema") == 27, "continuation-twenty-seventh-receipt-kind")
     elif descriptor["schema"] == 26 or receipt.get("schema") == 26:
         require(descriptor["schema"] == receipt.get("schema") == 26, "continuation-twenty-sixth-receipt-kind")
@@ -823,6 +825,7 @@ def _continuation_origin_observations(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    twenty_eighth_catalogues = None
     twenty_sixth_catalogues = None
     twenty_fifth_catalogues = None
     twenty_fourth_catalogues = None
@@ -837,6 +840,14 @@ def _continuation_origin_observations(bootstrap, qualified):
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 28:
+        _revalidate_sealed_prelease(receipt, bootstrap.value["ledger_path"],
+                                    operating_cells.TWENTY_EIGHTH_RUN, operating_cells.TWENTY_EIGHTH_MAIN,
+                                    operating_cells.TWENTY_SEVENTH_SUCCESSOR_REUSABLE,
+                                    operating_cells.TWENTY_EIGHTH_CHECKS[0], 27)
+        twenty_eighth_catalogues = receipt["retirement"]["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 27
     if schema == 27:
         _revalidate_prelease_origin(receipt, bootstrap.value["ledger_path"], 26,
                                     operating_cells.TWENTY_SEVENTH_RUN, operating_cells.TWENTY_SEVENTH_MAIN,
@@ -947,7 +958,7 @@ def _continuation_origin_observations(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = (twenty_sixth_catalogues or twenty_fifth_catalogues or twenty_fourth_catalogues or twenty_third_catalogues
+        retired = (twenty_eighth_catalogues or twenty_sixth_catalogues or twenty_fifth_catalogues or twenty_fourth_catalogues or twenty_third_catalogues
                    or twenty_second_catalogues or twenty_first_catalogues
                    or twentieth_catalogues or nineteenth_catalogues
                    or eighteenth_catalogues or seventeenth_catalogues
@@ -2213,38 +2224,46 @@ def _revalidate_twentieth_prelease(receipt, successor_bank):
 
 
 def _revalidate_twenty_fourth_prelease(receipt, successor_bank):
+    _revalidate_sealed_prelease(receipt, successor_bank, operating_cells.TWENTY_FOURTH_RUN,
+                                operating_cells.TWENTY_FOURTH_MAIN, operating_cells.TWENTY_THIRD_SUCCESSOR_REUSABLE,
+                                operating_cells.TWENTY_FOURTH_CHECKS[0], 23)
+
+
+def _revalidate_sealed_prelease(receipt, successor_bank, run_id, source_sha, reusable_sha, job_id, original_schema):
     """Preserve the failed run's two seals and unconsumed predecessor bank."""
     retired = receipt["retirement"]
     ref, bank = retired["original_bootstrap"], retired["original_bank"]
     original = load_bootstrap(ref["path"], ref["sha256"])
     qualified = _continuation_receipt(original.value)
-    constants = operating_cells
     require(original.file_stamp[:2] == (ref["device"], ref["inode"])
-            and qualified is not None and qualified[0]["schema"] == 23
+            and qualified is not None and qualified[0]["schema"] == original_schema
             and qualified[1] == receipt["previous_qualification"]
-            and qualified[0]["successor"]["run_id"] == constants.TWENTY_FOURTH_RUN
-            and qualified[0]["successor"]["source_sha"] == constants.TWENTY_FOURTH_MAIN
-            and original.value["ledger_path"] == bank["path"], "continuation-twenty-fourth-original-bootstrap")
+            and (qualified[0]["successor"]["run_id"], qualified[0]["successor"]["source_sha"],
+                 qualified[0]["successor"]["reusable_sha"]) == (run_id, source_sha, reusable_sha)
+            and original.value["ledger_path"] == bank["path"], "continuation-sealed-prelease-original-bootstrap")
     _check_empty_previous_bank(bank, successor_bank)
     path = str(Path(bank["path"]) / "state.json")
     with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]):
         with ledger.Ledger(bank["path"]) as store, store._transaction(read_only=True) as state:
             proof, _, _ = installation._file(path, MAX_POLICY, private=True)
             require(proof.sha256 == bank["state_file_sha256"] and not state["leases"] and not state["tokens"],
-                    "continuation-twenty-fourth-original-prelease-state")
-            _retired_original_entries(original, retired["entries"], constants.TWENTY_FOURTH_MAIN,
-                constants.TWENTY_THIRD_SUCCESSOR_REUSABLE, constants.TWENTY_FOURTH_RUN,
-                constants.TWENTY_FOURTH_CHECKS[0], revalidating=True)
+                    "continuation-sealed-prelease-original-prelease-state")
+            _retired_original_entries(original, retired["entries"], source_sha, reusable_sha, run_id, job_id,
+                                      revalidating=True)
             require(load_bootstrap(original.path, original.sha256) == original,
-                    "continuation-twenty-fourth-original-drift")
+                    "continuation-sealed-prelease-original-drift")
             final, _, _ = installation._file(path, MAX_POLICY, private=True)
-            require(final == proof, "continuation-twenty-fourth-original-prelease-state")
+            require(final == proof, "continuation-sealed-prelease-original-prelease-state")
 
 
 @identity._diagnostic_step("native-histories")
-def _continuation_native_histories(get, descriptor, receipt):
-    """Overlap only independent terminal families; join before any proof escapes."""
+def _continuation_native_histories(get, descriptor, receipt, *, allow_resume=None):
+    """Join independent reads. Resume one transient family within the same proof."""
     generation = descriptor["schema"]
+    twenty_eighth = receipt if generation == 28 else None
+    if twenty_eighth is not None:
+        receipt = twenty_eighth["previous_qualification"]
+        generation = 27
     twenty_seventh = receipt if generation == 27 else None
     if twenty_seventh is not None:
         receipt = twenty_seventh["previous_qualification"]
@@ -2402,19 +2421,45 @@ def _continuation_native_histories(get, descriptor, receipt):
     if twenty_seventh is not None:
         families.append((_continuation_twenty_seventh_native, {}, twenty_seventh["native_twenty_seventh"],
                          "continuation-twenty-seventh-native-drift"))
+    if twenty_eighth is not None:
+        families.append((_continuation_twenty_eighth_native, {}, twenty_eighth["native_twenty_eighth"],
+                         "continuation-twenty-eighth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
         schedule = sorted(families, key=lambda family: family[0] is not _continuation_ninth_native)
         pending = {reason: executor.submit(helper, get, **arguments)
                    for helper, arguments, _, reason in schedule}
-        for _, _, expected, reason in families:
-            require(pending[reason].result() == expected, reason)
+        interrupted = None
+        for helper, arguments, expected, reason in families:
+            try:
+                observed = pending[reason].result()
+            except Denied as error:
+                if (allow_resume is None or interrupted is not None
+                        or error.args != ("https-transient-read-failed",)):
+                    raise
+                interrupted = helper, arguments, expected, reason
+                continue
+            require(observed == expected, reason)
+    if interrupted is None:
+        return False
+
+    def resumed_get(path):
+        require(allow_resume(), "bootstrap-native-expired")
+        return get(path)
+
+    helper, arguments, expected, reason = interrupted
+    require(allow_resume(), "bootstrap-native-expired")
+    require(helper(resumed_get, **arguments) == expected, reason)
+    require(allow_resume(), "bootstrap-native-expired")
+    return True
 
 
 @identity._diagnostic_step("native-current")
-def _native(connected, selected, nonce, token, api_token, *, check_origin=True, check_host_resources=True):
+def _native(connected, selected, nonce, token, api_token, *, check_origin=True, check_host_resources=True,
+            history_resume_until=None):
     admission._secret(token); admission._secret(api_token)
+    resumed = False
     controls = _controls(selected.bootstrap)
     admission._socket(connected)
     worker, acquisition = collector.begin_worker_acquisition(connected, selected.bootstrap.collector)
@@ -2455,13 +2500,33 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True, 
             # Historical terminal qualification is minted once into this
             # request's opaque proof. There is no shared cache.
             if check_origin:
-                retry = threading.BoundedSemaphore()
-                history_reader = identity.HTTPSReader(claim_transport_retry=lambda: retry.acquire(blocking=False))
+                history_reader = identity.HTTPSReader(classify_transient=True)
 
                 def get_history(path):
                     return identity.decode_json(history_reader.read(prefix + path, bearer=api_token))
 
-                _continuation_native_histories(get_history, descriptor, receipt)
+                def allow_resume():
+                    return (type(history_resume_until) is int
+                            and int(time.time()) < min(history_resume_until, who.valid_until - 31))
+
+                resumed = _continuation_native_histories(get_history, descriptor, receipt, allow_resume=allow_resume)
+                if resumed:
+                    from . import runtime_entry
+
+                    require(runtime_entry._anchor()[0] == {
+                        "schema": 2, "bootstrap_path": selected.bootstrap.path,
+                        "bootstrap_sha256": selected.bootstrap.sha256,
+                    }, "bootstrap-policy-changed")
+                    fresh, fresh_workflow = identity.verify_github_workflow_assignment(
+                        token, selected.identity, audience=ledger.AUDIENCE + nonce,
+                        peer_uid=worker.uid, access_token=api_token, clock=time.time)
+                    refreshed = get("/actions/jobs/" + str(who.job_id))
+                    fields = ("id", "run_id", "head_sha", "status", "conclusion", "name", "started_at")
+                    require(fresh == who and fresh_workflow == workflow
+                            and all(refreshed.get(k) == job.get(k) for k in fields)
+                            and _continuation_receipt(selected.bootstrap.value) == qualified,
+                            "bootstrap-native-drift")
+                    require(allow_resume(), "bootstrap-native-expired")
             # Origin validation may read a network namespace cookie. Its observer
             # needs the process to be single-threaded after the history reads.
             if check_host_resources:
@@ -2477,6 +2542,12 @@ def _native(connected, selected, nonce, token, api_token, *, check_origin=True, 
         require(collector.finish_worker_acquisition(acquisition, connected, selected.bootstrap.collector) == worker
                 and _controls(selected.bootstrap) == controls,
                 "bootstrap-native-drift")
+        if resumed:
+            require(runtime_entry._anchor()[0] == {
+                "schema": 2, "bootstrap_path": selected.bootstrap.path,
+                "bootstrap_sha256": selected.bootstrap.sha256,
+            }, "bootstrap-policy-changed")
+            require(allow_resume(), "bootstrap-native-expired")
         return worker, who, controls, stamp
     finally:
         collector.discard_worker_acquisition(acquisition)
@@ -2498,7 +2569,8 @@ def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_to
         before = _worker(connected, bootstrap)
         challenge = _challenge(selected, nonce, before, snapshot_receipt_sha256)
         require(challenge["issued_at"] <= int(time.time()) < challenge["expires_at"], "bootstrap-challenge-expired")
-        worker, who, controls, started = _native(connected, selected, nonce, token, api_token)
+        worker, who, controls, started = _native(connected, selected, nonce, token, api_token,
+            history_resume_until=challenge["expires_at"])
         require(worker == before, "bootstrap-native-drift")
         remaining = min(600, who.valid_until - int(time.time()) - 31)
         require(remaining > 0, "bootstrap-native-expired")
@@ -2769,7 +2841,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 27:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
@@ -3778,3 +3850,8 @@ def _continuation_twenty_sixth_native(get):
 def _continuation_twenty_seventh_native(get):
     return _terminal_family(get, operating_cells.TWENTY_SEVENTH_RUN, operating_cells.TWENTY_SEVENTH_CHECKS,
                             operating_cells.twenty_seventh_native_projection)
+
+
+def _continuation_twenty_eighth_native(get):
+    return _terminal_family(get, operating_cells.TWENTY_EIGHTH_RUN, operating_cells.TWENTY_EIGHTH_CHECKS,
+                            operating_cells.twenty_eighth_native_projection)

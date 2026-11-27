@@ -63,7 +63,7 @@ _DIAGNOSTIC_REASONS = frozenset({
     "installation-filesystem", "installation-file-hash", "installation-tree-changed",
     "installation-manifest-changed", "installation-root-changed", "installation-acquisition-denied", "installation-entry-changed", "installation-directory-changed",
     "installation-inventory-limit", "installation-hash-workers-not-joined",
-    "https-read-failed", "https-status", "https-body-limit", "token-time", "invalid-signature",
+    "https-read-failed", "https-transient-read-failed", "https-status", "https-body-limit", "token-time", "invalid-signature",
     "issuer-or-audience", "stale-observation", "native-run-mismatch", "native-job-assignment",
     "native-job-cell-name", "native-check-job-join", "incomplete-job-inventory",
     "current-protected-main", "native-reusable-workflow", "native-repository-mismatch",
@@ -498,8 +498,9 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class HTTPSReader:
     """Fixed-origin GETs with verified TLS, bounded bodies, and no redirects."""
 
-    def __init__(self, *, claim_transport_retry=None):
+    def __init__(self, *, claim_transport_retry=None, classify_transient=False):
         self._claim_transport_retry = claim_transport_retry
+        self._classify_transient = classify_transient
 
     @staticmethod
     def _transient_transport(error):
@@ -536,7 +537,12 @@ class HTTPSReader:
                 if (attempt == 0 and self._claim_transport_retry is not None
                         and self._transient_transport(error) and self._claim_transport_retry()):
                     continue
-                code = "https-status" if isinstance(error, urllib.error.HTTPError) else "https-read-failed"
+                if isinstance(error, urllib.error.HTTPError):
+                    code = "https-status"
+                elif self._classify_transient and self._transient_transport(error):
+                    code = "https-transient-read-failed"
+                else:
+                    code = "https-read-failed"
                 raise Denied(code) from None
 
 
