@@ -119,6 +119,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 29:
+        return _validate_twenty_ninth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 28:
         return _validate_twenty_eighth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 27:
@@ -207,7 +209,7 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
                     15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
                     19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN, 21: TWENTY_FIRST_MAIN, 22: TWENTY_SECOND_MAIN,
                     23: TWENTY_THIRD_MAIN, 24: TWENTY_FOURTH_MAIN, 25: TWENTY_FIFTH_MAIN, 26: TWENTY_SIXTH_MAIN,
-                    27: TWENTY_SEVENTH_MAIN, 28: TWENTY_EIGHTH_MAIN}
+                    27: TWENTY_SEVENTH_MAIN, 28: TWENTY_EIGHTH_MAIN, 29: TWENTY_NINTH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -265,6 +267,8 @@ ORIGIN_NO_INTAKE = "6019bd8ca2ee3b2784ed90a9c759a7585170a8e385f259e1f4727b308355
 
 def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 29:
+        return _validate_twenty_ninth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 28:
         return _validate_twenty_eighth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 27:
@@ -2984,3 +2988,52 @@ def _validate_twenty_eighth_qualification(value):
             "continuation-twenty-eighth-original-locators")
     _validate_closed_vm_catalogues(retired, previous["previous_qualification"]["retirement"]["catalogues"])
     return identities
+
+
+TWENTY_NINTH_MAIN = "5f95e001877ed7141fb12dd939a40ee8bde84498"
+TWENTY_NINTH_RUN = 46015079402
+TWENTY_NINTH_CHECKS = (140564272230, 140570096209)
+TWENTY_NINTH_GRAPH = "4e711a1676172ac1b2ef3612af42ec2bbe312e0e6c315efeee8b1a4466a0452f"
+TWENTY_NINTH_BOOTSTRAP = "297edde08e43ab0e261dc014bafd3e45845ebf6e279b04f2fc3e62820cbee148"
+TWENTY_NINTH_QUALIFICATION = "7b6a154f44043408f9281545658f3148a4fcd9040d4c06f8340639fe5886b6cc"
+TWENTY_NINTH_LEASE = "ff356d2ced0d7c91577385820dad6611"
+TWENTY_NINTH_REASON = "terminal-original-push-before-engine-with-retired-fence"
+TWENTY_NINTH_SUCCESSOR_REUSABLE = "6461e64863cfb44a7b84852fce4eae428c516fda"
+TWENTY_NINTH_SUCCESSOR_WORKFLOW = "7b336e0d42a2a335c8727bb8a6fcf0dccd1d9b1ea37064b013d1f0ced9d4d688"
+
+
+def twenty_ninth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, TWENTY_EIGHTH_SUCCESSOR_REUSABLE,
+                                       TWENTY_NINTH_GRAPH, TWENTY_NINTH_CHECKS, TWENTY_NINTH_MAIN)
+
+
+def _validate_twenty_ninth_descriptor(value, workflow_sha256, reusable_sha):
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == TWENTY_NINTH_REASON and ref["sha256"] == TWENTY_NINTH_QUALIFICATION,
+            "continuation-twenty-ninth-qualification")
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=TWENTY_NINTH_MAIN, expected_workflow=TWENTY_NINTH_SUCCESSOR_WORKFLOW,
+        expected_reusable=TWENTY_NINTH_SUCCESSOR_REUSABLE, reason="continuation-twenty-ninth-successor")
+    require(successor["source_sha"] != TWENTY_NINTH_MAIN and successor["run_id"] > TWENTY_NINTH_RUN,
+            "continuation-twenty-ninth-replay")
+    return value
+
+
+def _validate_twenty_ninth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_twenty_ninth", "previous_qualification", "retirement"})
+    require(value["purpose"] == TWENTY_NINTH_REASON and ledger.digest(value) == TWENTY_NINTH_QUALIFICATION
+            and ledger.digest(value["native_twenty_ninth"]) == TWENTY_NINTH_GRAPH,
+            "continuation-twenty-ninth-history")
+    previous = value["previous_qualification"]
+    require(previous["schema"] == 28, "continuation-twenty-ninth-previous-schema")
+    counts = _validate_twenty_eighth_qualification(previous)
+    retirement = engine_policy._keys(value["retirement"], {"original_bootstrap", "original_bank", "original_record",
+                                                          "entries", "catalogues", "archive", "journals"})
+    require(retirement["original_bootstrap"]["sha256"] == TWENTY_NINTH_BOOTSTRAP
+            and retirement["original_record"]["lease_id"] == TWENTY_NINTH_LEASE,
+            "continuation-twenty-ninth-original-scope")
+    _validate_closed_vm_catalogues(retirement, previous["retirement"]["catalogues"])
+    return counts

@@ -400,7 +400,8 @@ def bind_creator(path, expected, prepared, store, worker, config, effect_id):
             left, right = namespace._links(private, prepared)
             require((info.st_dev, info.st_ino, left, right) == tuple(effect["fence"][key] for key in
                     ("netns_device", "netns_inode", "host_ifindex", "peer_ifindex")), "host-api-creator-drift")
-        store.bind_host_api_fence(prepared.lease_id, effect_id, **baseline)
+        namespace._commit_creation_checkpoint(
+            lambda: store.bind_host_api_fence(prepared.lease_id, effect_id, **baseline))
         require(_bound(path, expected, config) == policy, "host-api-policy-drift")
         return baseline
 
