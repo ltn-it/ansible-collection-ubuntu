@@ -119,6 +119,14 @@ class RecycledNamespaceGenerationTests(unittest.TestCase):
                 self.assertIsNone(observed)
                 self.assertEqual(held, ["lit-lease-" + lease_id])
             self.assertFalse(held)
+            cookie.reset_mock()
+            with factory._historical_namespace_coordinates("/unused", successor,
+                                                           original_namespace=coordinates,
+                                                           original_cookie=None) as observed:
+                self.assertIsNone(observed)
+                self.assertEqual(held, ["lit-lease-" + lease_id])
+            self.assertFalse(held)
+            cookie.assert_not_called()
             cookie.return_value = factory._NINTH_NAMESPACE_COOKIE
             with self.assertRaisesRegex(Denied, "continuation-namespace-kernel-generation"):
                 with factory._historical_namespace_coordinates("/unused", successor):
@@ -128,6 +136,11 @@ class RecycledNamespaceGenerationTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "continuation-namespace-successor-fence"):
                 with factory._historical_namespace_coordinates("/unused", successor):
                     self.fail("unverified successor generation")
+            with self.assertRaisesRegex(Denied, "continuation-namespace-successor-fence"):
+                with factory._historical_namespace_coordinates("/unused", successor,
+                                                               original_namespace=coordinates,
+                                                               original_cookie=None):
+                    self.fail("unverified successor without an original cookie")
 
 class NinthSeparateRetirementTests(unittest.TestCase):
     def retirement(self):

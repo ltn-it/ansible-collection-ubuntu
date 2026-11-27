@@ -4,10 +4,11 @@ The only subprocess fixtures are synthetic sealed executables, never ip/nft.
 Kernel paths are mocked in journal tests; actual nsfs placeholder rejection is
 independent. Central proper EE executes these tests; no host/native activation.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 import datetime as dt
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -495,6 +496,43 @@ class RootFenceComponentTests(unittest.TestCase):
             self.call(fence.create)
         self.assertEqual(observed, [("fence-create", "intent", True)])
 
+    def test_reader_overlap_retries_only_creator_metadata(self):
+        bind_creator = host_fence.bind_creator
+        clock = time.monotonic
+        with self.kernel_fixture(), open(self.store.path / "lock", "rb") as reader:
+            offset = 0
+            baseline = {
+                "policy_sha256": "b" * 64, "baseline_sha256": "c" * 64, "boot_id": fence.kernel.read_boot_id(),
+                "host_netns_device": 4, "host_netns_inode": 80, "nft_table_handle": 1,
+            }
+            policy = SimpleNamespace(boot_id=baseline["boot_id"], backend=self.policy.backend,
+                                     port=self.policy.port, sha256=baseline["policy_sha256"])
+
+            def read_local(_):
+                nonlocal offset
+                offset += 1  # The host readback exceeds the lock-only wait budget.
+                fcntl.flock(reader, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+            def release_reader(_):
+                fcntl.flock(reader, fcntl.LOCK_UN)
+
+            with mock.patch.object(host_fence, "bind_creator", side_effect=bind_creator), \
+                 mock.patch.object(host_fence, "_bound", return_value=policy), \
+                 mock.patch.object(host_fence, "_host", side_effect=lambda _: nullcontext()), \
+                 mock.patch.object(host_fence, "_local", side_effect=read_local) as local, \
+                 mock.patch.object(host_fence, "_baseline", return_value=baseline), \
+                 mock.patch.object(host_fence, "_readback", return_value=(1, 4, 0, 0)), \
+                 mock.patch.object(fence.time, "monotonic", side_effect=lambda: clock() + offset), \
+                 mock.patch.object(fence.time, "sleep", side_effect=release_reader) as wait:
+                receipt = self.call(fence.create)
+            local.assert_called_once()
+            wait.assert_called_once()
+        self.assertEqual(receipt.operation, "fence-create")
+        self.assertEqual(sum(argv[:2] == ("netns", "add") for _, argv, _ in self.commands), 1)
+        [effect] = [item for item in self.effects() if item["operation"] == "fence-create"]
+        self.assertEqual(effect["state"], "verified")
+        self.assertIn("host_api", effect)
+
     def test_host_withdrawal_precedes_private_cut_in_the_same_once_intent(self):
         self.create_fixture()
         observed = []
@@ -943,6 +981,31 @@ class RootFenceRemovalTests(unittest.TestCase):
             second.close()
             os.close(directory)
             os.close(namespace)
+
+    def test_namespace_census_without_cookie_rejects_task_membership(self):
+        coordinates = os.stat("/proc/self/ns/net")
+        with self.assertRaisesRegex(Denied, "fence-namespace-task-live"):
+            fence._namespace_refs_drained(-1, coordinates, None)
+
+    def test_socket_namespace_fallback_requires_the_kernel_witness_and_closes_it(self):
+        current = os.stat("/proc/self/ns/net")
+        target = (current.st_dev, current.st_ino)
+        for same_namespace in (True, False):
+            with self.subTest(same_namespace=same_namespace), socket.socket() as sock:
+                namespace_fd = os.open("/proc/self/ns/net", os.O_RDONLY | os.O_CLOEXEC)
+                observed = os.fstat(sock.fileno())
+                identity = (observed.st_dev, observed.st_ino, stat.S_IFMT(observed.st_mode))
+                with mock.patch.object(fence.fcntl, "ioctl", side_effect=(namespace_fd, fence.CLONE_NEWNET)):
+                    if same_namespace:
+                        with self.assertRaisesRegex(Denied, "fence-namespace-socket-live"):
+                            fence._require_drained_socket_namespace(sock.fileno(), identity, target)
+                    else:
+                        fence._require_drained_socket_namespace(sock.fileno(), identity, (target[0], target[1] + 1))
+                with self.assertRaises(OSError):
+                    os.fstat(namespace_fd)
+                with mock.patch.object(fence.fcntl, "ioctl", side_effect=PermissionError):
+                    with self.assertRaisesRegex(Denied, "fence-socket-namespace-unavailable"):
+                        fence._require_drained_socket_namespace(sock.fileno(), identity, target)
 
 
 if __name__ == "__main__":

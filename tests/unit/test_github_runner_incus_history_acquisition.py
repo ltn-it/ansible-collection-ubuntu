@@ -4,16 +4,18 @@ import collections
 import copy
 import hashlib
 import importlib
+import os
 import pathlib
 import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 FILES = pathlib.Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
@@ -368,6 +370,9 @@ class HistoryAcquisitionTests(unittest.TestCase):
         with self.subTest(schema=28):
             self.assert_continuation_native_family_drift_rejected(
                 28, (*phases, "twenty_fifth", "twenty_sixth", "twenty_seventh", "twenty_eighth"))
+        with self.subTest(schema=29):
+            self.assert_continuation_native_family_drift_rejected(
+                29, (*phases, "twenty_fifth", "twenty_sixth", "twenty_seventh", "twenty_eighth", "twenty_ninth"))
 
     def assert_continuation_native_family_drift_rejected(self, schema, phases):
         receipt = self.receipt
@@ -409,6 +414,61 @@ class HistoryAcquisitionTests(unittest.TestCase):
             with self.assertRaises(Denied):
                 f._continuation_twenty_fourth_native(get)
         project.assert_called_once_with(run, original, checks)
+
+    def test_retired_c28_keeps_active_successor_identity_for_host_gate(self):
+        lease = cells.TWENTY_NINTH_LEASE
+        source, reusable, run = (cells.TWENTY_NINTH_MAIN, cells.TWENTY_EIGHTH_SUCCESSOR_REUSABLE,
+                                 cells.TWENTY_NINTH_RUN)
+        original_caller = {"source_sha": source, "reusable_sha": reusable, "run_id": run, "run_attempt": 1}
+        successor = {"source_sha": "a" * 40, "reusable_sha": "b" * 40, "run_id": run + 1, "run_attempt": 1}
+        fence = {"host_ifindex": 17}
+        original = {"state": "cancelled", "effects": {"creator": {
+            "operation": "fence-create", "state": "intent", "fence": fence,
+        }}}
+        terminal = {"run_id": run, "job_id": cells.TWENTY_NINTH_CHECKS[0], "conclusion": "failure"}
+        archive = ledger.canonical({"original": original, "native_terminal": terminal})
+        selector = f.policy_registry.profile_selector("heavy", "keycloak-heavy", "ubuntu-24.04")
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as changes:
+            root = pathlib.Path(directory)
+            bank_path, successor_bank = root / "old", root / "active"
+            bank_path.mkdir()
+            successor_bank.mkdir()
+            bank_id = bank_path.stat()
+            bank = {"path": str(bank_path), "device": bank_id.st_dev, "inode": bank_id.st_ino,
+                    "state_file_sha256": "state-digest", "state_file_identity": {
+                        "device": bank_id.st_dev, "inode": 10, "stamp": [1],
+                    }}
+            ref = {"path": str(root / "bootstrap.json"), "sha256": "bootstrap-digest", "device": 3, "inode": 4}
+            bootstrap = NS(path=ref["path"], file_stamp=(3, 4), value={"ledger_path": bank["path"]})
+            receipt = {"previous_qualification": {}, "retirement": {
+                "original_bootstrap": ref, "original_bank": bank, "entries": {}, "journals": {},
+                "original_record": {"lease_id": lease, "fence_intent": "creator", "sha256": ledger.digest(original)},
+                "archive": {"path": str(root / "failure.json"), "sha256": "archive-digest"},
+            }}
+            store = MagicMock(path=bank_path)
+            store.__enter__.return_value = store
+            store.lease_ids.return_value = (lease,)
+            store.read.return_value = original
+            configuration = NS(registry_path="registry", registry_sha256="registry-digest")
+            selected = NS(ledger_path=bank["path"])
+            files = [(NS(sha256="state-digest", device=bank_id.st_dev, inode=10), None, (1,)),
+                     (NS(sha256="archive-digest"), archive, None)]
+            changes.enter_context(patch.object(f, "load_bootstrap", return_value=bootstrap))
+            changes.enter_context(patch.object(f, "_continuation_receipt",
+                                               return_value=({"schema": 28, "successor": original_caller}, {})))
+            changes.enter_context(patch.object(f, "_retired_original_entries",
+                                               return_value=(None, configuration, {"invocation": {"selector": selector}})))
+            changes.enter_context(patch.object(f.policy_registry, "load_registry",
+                                               return_value=NS(select=lambda _: selected)))
+            changes.enter_context(patch.object(ledger, "_observe_historical_bank"))
+            changes.enter_context(patch.object(ledger, "Ledger", return_value=store))
+            changes.enter_context(patch.object(f.installation, "_open_directory",
+                                               side_effect=lambda path: os.open(path, os.O_RDONLY | os.O_DIRECTORY)))
+            changes.enter_context(patch.object(f.installation, "_file", side_effect=files))
+            observe = changes.enter_context(patch.object(f, "_twenty_ninth_resources_absent"))
+            f._revalidate_twenty_ninth_retirement(receipt, str(successor_bank), successor)
+            observe.assert_called_once_with(configuration, selected, lease, original, fence,
+                                            str(successor_bank), successor)
 
     def test_data_missing_pagination_and_second_readback_still_deny(self):
         origin = '/actions/runs/' + str(self.args[0][0]['id']) + '/attempts/1/jobs?per_page=100&page='

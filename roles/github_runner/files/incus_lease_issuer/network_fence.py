@@ -521,14 +521,37 @@ def _unknown(store, prepared, effect):
         pass  # Intent/committed state is retained; never repair or retry.
 
 
+def _commit_creation_checkpoint(checkpoint):
+    """Wait briefly for a ledger reader, never reissue a kernel operation."""
+    deadline = time.monotonic() + 0.25
+    while True:
+        try:
+            return checkpoint()
+        except Denied as error:
+            if type(error) is not Denied or error.args != ("ledger-busy",):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.005, remaining))
+            if time.monotonic() >= deadline:
+                raise
+
+
 def _transaction(store, prepared, operation, target, action):
     effect = store.begin(prepared.lease_id, operation, target)
     try:
         observed = action(effect)
         digest = ledger.digest(observed)
-        store.record(prepared.lease_id, effect, "verified", evidence_sha256=digest)
+        if operation == "fence-create":
+            _commit_creation_checkpoint(lambda: store.record(
+                prepared.lease_id, effect, "verified", evidence_sha256=digest))
+        else:
+            store.record(prepared.lease_id, effect, "verified", evidence_sha256=digest)
         return FenceReceipt(prepared.lease_id, operation, digest)
-    except Exception:
+    except Exception as error:
+        if operation == "fence-create":
+            identity._diagnostic_failed("fence-create", error)
         _unknown(store, prepared, effect)
         raise FenceUnknown("fence-effect-unknown") from None
 
@@ -590,7 +613,7 @@ def create(root_policy_path, expected_sha256, prepared, store, worker, root_conf
             require(expires == 0 and deadline == 0, "fence-create-not-denied")
             metadata = dict(policy_sha256=policy.sha256, boot_id=kernel.read_boot_id(), netns_device=info.st_dev,
                             netns_inode=info.st_ino, host_ifindex=left, peer_ifindex=right, nft_table_handle=handle)
-            store.bind_fence(prepared.lease_id, effect, **metadata)
+            _commit_creation_checkpoint(lambda: store.bind_fence(prepared.lease_id, effect, **metadata))
             from . import host_api_fence
             host_api_fence.bind_creator(root_configuration.host_api_fence_policy_path,
                 root_configuration.host_api_fence_policy_sha256, prepared, store, worker, root_configuration, effect)
@@ -945,6 +968,24 @@ def _require_drained_socket(borrowed, observed, cookie):
     require(_socket_cookie(borrowed) != cookie, "fence-namespace-socket-live")
 
 
+def _require_drained_socket_namespace(borrowed, observed, namespace):
+    """Check the kernel namespace directly when the retired record has no cookie."""
+    current = os.fstat(borrowed)
+    require((current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode)) == observed,
+            "fence-proc-fds-changed")
+    # Linux uapi/linux/sockios.h, SIOCGSKNS. This opens an nsfs reference without setns.
+    try:
+        namespace_fd = fcntl.ioctl(borrowed, 0x894C)
+    except OSError as error:
+        raise Denied("fence-socket-namespace-unavailable") from error
+    try:
+        info = os.fstat(namespace_fd)
+        require(fcntl.ioctl(namespace_fd, NS_GET_NSTYPE) == CLONE_NEWNET, "fence-socket-namespace-type")
+        require((info.st_dev, info.st_ino) != namespace, "fence-namespace-socket-live")
+    finally:
+        os.close(namespace_fd)
+
+
 @identity._diagnostic_step("namespace-census")
 def _namespace_refs_drained(witness_fd, info, cookie):
     """Reacquire whole observations after churn under the original deadline."""
@@ -980,6 +1021,7 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
     # coordinates. In that case the historical cookie still checks sockets.
     require(info is not None or witness_fd == -1, "fence-namespace-witness")
     target, count = ((info.st_dev, info.st_ino) if info is not None else None), 0
+    require(cookie is not None or target is not None, "fence-namespace-observation-target")
     proc = os.open("/proc", engine.DIR)
     try:
         with os.scandir(proc) as processes:
@@ -1022,7 +1064,10 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
                         if observed[2] == stat.S_IFSOCK:
                             borrowed = _borrow_socket(pid, pidfd, number)
                             try:
-                                _require_drained_socket(borrowed, observed, cookie)
+                                if cookie is None:
+                                    _require_drained_socket_namespace(borrowed, observed, target)
+                                else:
+                                    _require_drained_socket(borrowed, observed, cookie)
                             finally:
                                 os.close(borrowed)
                     after = _process_stat(process, pid)
