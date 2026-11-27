@@ -776,7 +776,8 @@ class TwentyFourthBankPreservationTests(unittest.TestCase):
             "original_bank": self.bank, "entries": self.entries}}
         self.enterContext(patch.object(run_factory, "load_bootstrap", return_value=self.original))
         self.enterContext(patch.object(run_factory, "_continuation_receipt", return_value=(
-            {"schema": 23, "successor": {"run_id": cells.TWENTY_FOURTH_RUN, "source_sha": cells.TWENTY_FOURTH_MAIN}},
+            {"schema": 23, "successor": {"run_id": cells.TWENTY_FOURTH_RUN, "source_sha": cells.TWENTY_FOURTH_MAIN,
+                                        "reusable_sha": cells.TWENTY_THIRD_SUCCESSOR_REUSABLE}},
             previous)))
         self.seals = self.enterContext(patch.object(run_factory, "_retired_original_entries"))
 
@@ -801,12 +802,12 @@ class TwentyFourthBankPreservationTests(unittest.TestCase):
               self.assertRaisesRegex(identity.Denied, "ledger-history-bank-drift")):
             self.verify()
         with (patch.dict(self.bank, state_file_sha256="f" * 64),
-              self.assertRaisesRegex(identity.Denied, "continuation-twenty-fourth-original-prelease-state")):
+              self.assertRaisesRegex(identity.Denied, "continuation-sealed-prelease-original-prelease-state")):
             self.verify()
 
     def test_original_requires_empty_leases_and_tokens(self):
         for changed, reason in (("leases", "continuation-tenth-original-lease"),
-                                ("tokens", "continuation-twenty-fourth-original-prelease-state")):
+                                ("tokens", "continuation-sealed-prelease-original-prelease-state")):
             state = {"leases": {}, "tokens": {}, changed: {"synthetic": {}}}
             with (self.subTest(changed=changed), patch.object(ledger.Ledger, "_load", return_value=state),
                   self.assertRaisesRegex(identity.Denied, reason)):
@@ -821,7 +822,7 @@ class TwentyFourthBankPreservationTests(unittest.TestCase):
         def replace_state(*args, **kwargs):
             self.state.write_bytes(self.state.read_bytes() + b" ")
         self.seals.side_effect = replace_state
-        with self.assertRaisesRegex(identity.Denied, "continuation-twenty-fourth-original-prelease-state"):
+        with self.assertRaisesRegex(identity.Denied, "continuation-sealed-prelease-original-prelease-state"):
             self.verify()
 
 
