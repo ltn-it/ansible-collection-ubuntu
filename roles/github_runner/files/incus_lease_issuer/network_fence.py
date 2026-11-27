@@ -521,14 +521,37 @@ def _unknown(store, prepared, effect):
         pass  # Intent/committed state is retained; never repair or retry.
 
 
+def _commit_creation_checkpoint(checkpoint):
+    """Wait briefly for a ledger reader, never reissue a kernel operation."""
+    deadline = time.monotonic() + 0.25
+    while True:
+        try:
+            return checkpoint()
+        except Denied as error:
+            if type(error) is not Denied or error.args != ("ledger-busy",):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.005, remaining))
+            if time.monotonic() >= deadline:
+                raise
+
+
 def _transaction(store, prepared, operation, target, action):
     effect = store.begin(prepared.lease_id, operation, target)
     try:
         observed = action(effect)
         digest = ledger.digest(observed)
-        store.record(prepared.lease_id, effect, "verified", evidence_sha256=digest)
+        if operation == "fence-create":
+            _commit_creation_checkpoint(lambda: store.record(
+                prepared.lease_id, effect, "verified", evidence_sha256=digest))
+        else:
+            store.record(prepared.lease_id, effect, "verified", evidence_sha256=digest)
         return FenceReceipt(prepared.lease_id, operation, digest)
-    except Exception:
+    except Exception as error:
+        if operation == "fence-create":
+            identity._diagnostic_failed("fence-create", error)
         _unknown(store, prepared, effect)
         raise FenceUnknown("fence-effect-unknown") from None
 
@@ -590,7 +613,7 @@ def create(root_policy_path, expected_sha256, prepared, store, worker, root_conf
             require(expires == 0 and deadline == 0, "fence-create-not-denied")
             metadata = dict(policy_sha256=policy.sha256, boot_id=kernel.read_boot_id(), netns_device=info.st_dev,
                             netns_inode=info.st_ino, host_ifindex=left, peer_ifindex=right, nft_table_handle=handle)
-            store.bind_fence(prepared.lease_id, effect, **metadata)
+            _commit_creation_checkpoint(lambda: store.bind_fence(prepared.lease_id, effect, **metadata))
             from . import host_api_fence
             host_api_fence.bind_creator(root_configuration.host_api_fence_policy_path,
                 root_configuration.host_api_fence_policy_sha256, prepared, store, worker, root_configuration, effect)

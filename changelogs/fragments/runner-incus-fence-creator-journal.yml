@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - Wait briefly for concurrent ledger readers when committing Incus firewall creation evidence.
+    Kernel operations are issued once.
+  - Record allowlisted firewall failure categories in the private runtime journal.

@@ -4,10 +4,11 @@ The only subprocess fixtures are synthetic sealed executables, never ip/nft.
 Kernel paths are mocked in journal tests; actual nsfs placeholder rejection is
 independent. Central proper EE executes these tests; no host/native activation.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 import datetime as dt
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -494,6 +495,43 @@ class RootFenceComponentTests(unittest.TestCase):
         with self.kernel_fixture(), mock.patch.object(host_fence, "bind_creator", side_effect=bound):
             self.call(fence.create)
         self.assertEqual(observed, [("fence-create", "intent", True)])
+
+    def test_reader_overlap_retries_only_creator_metadata(self):
+        bind_creator = host_fence.bind_creator
+        clock = time.monotonic
+        with self.kernel_fixture(), open(self.store.path / "lock", "rb") as reader:
+            offset = 0
+            baseline = {
+                "policy_sha256": "b" * 64, "baseline_sha256": "c" * 64, "boot_id": fence.kernel.read_boot_id(),
+                "host_netns_device": 4, "host_netns_inode": 80, "nft_table_handle": 1,
+            }
+            policy = SimpleNamespace(boot_id=baseline["boot_id"], backend=self.policy.backend,
+                                     port=self.policy.port, sha256=baseline["policy_sha256"])
+
+            def read_local(_):
+                nonlocal offset
+                offset += 1  # The host readback exceeds the lock-only wait budget.
+                fcntl.flock(reader, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+            def release_reader(_):
+                fcntl.flock(reader, fcntl.LOCK_UN)
+
+            with mock.patch.object(host_fence, "bind_creator", side_effect=bind_creator), \
+                 mock.patch.object(host_fence, "_bound", return_value=policy), \
+                 mock.patch.object(host_fence, "_host", side_effect=lambda _: nullcontext()), \
+                 mock.patch.object(host_fence, "_local", side_effect=read_local) as local, \
+                 mock.patch.object(host_fence, "_baseline", return_value=baseline), \
+                 mock.patch.object(host_fence, "_readback", return_value=(1, 4, 0, 0)), \
+                 mock.patch.object(fence.time, "monotonic", side_effect=lambda: clock() + offset), \
+                 mock.patch.object(fence.time, "sleep", side_effect=release_reader) as wait:
+                receipt = self.call(fence.create)
+            local.assert_called_once()
+            wait.assert_called_once()
+        self.assertEqual(receipt.operation, "fence-create")
+        self.assertEqual(sum(argv[:2] == ("netns", "add") for _, argv, _ in self.commands), 1)
+        [effect] = [item for item in self.effects() if item["operation"] == "fence-create"]
+        self.assertEqual(effect["state"], "verified")
+        self.assertIn("host_api", effect)
 
     def test_host_withdrawal_precedes_private_cut_in_the_same_once_intent(self):
         self.create_fixture()

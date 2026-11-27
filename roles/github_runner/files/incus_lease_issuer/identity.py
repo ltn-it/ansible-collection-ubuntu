@@ -49,10 +49,14 @@ _DIAGNOSTIC_STAGES = frozenset({
     "native-current", "native-histories", "intake-stage", "intake-discovery",
     "snapshot-acquisition", "snapshot-readback", "observer", "observer-lookup",
     "observer-native", "runtime-selected", "continuation-origin", "continuation-commit",
-    "namespace-census", "collector-finish", "engine-spawn", "runtime-native-heartbeat",
+    "namespace-census", "collector-finish", "fence-create", "engine-spawn", "runtime-native-heartbeat",
     "runtime-native-heartbeat-finish", "runtime-native-heartbeat-consume", "runtime-heartbeat-refresh",
 })
 _DIAGNOSTIC_REASONS = frozenset({
+    "host-api-baseline-busy", "host-api-baseline-not-empty", "host-api-creator-drift",
+    "host-api-creator-unbound", "host-api-endpoint-binding", "host-api-endpoint-not-local",
+    "host-api-host-namespace-drift", "host-api-kernel-slot-busy", "host-api-policy-drift",
+    "fence-command-failed", "fence-command-timeout", "fence-worker-not-live",
     "fence-proc-acquire-unstable", "bootstrap-challenge-expired", "bootstrap-native-denied", "bootstrap-native-drift",
     "bootstrap-native-expired", "bootstrap-policy-changed", "bootstrap-workflow-sha",
     "bootstrap-native-job", "collector-acquisition-denied", "collector-maps-changed",
