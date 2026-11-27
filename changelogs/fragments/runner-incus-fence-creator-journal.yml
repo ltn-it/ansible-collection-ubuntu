@@ -4,3 +4,4 @@ bugfixes:
     Kernel operations are issued once.
   - Record allowlisted firewall failure categories in the private runtime journal.
   - Preserve the active successor identity when checking the retired C28 network fence.
+  - Verify that no task or socket still references the retired C28 network namespace.

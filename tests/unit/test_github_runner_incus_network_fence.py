@@ -982,6 +982,31 @@ class RootFenceRemovalTests(unittest.TestCase):
             os.close(directory)
             os.close(namespace)
 
+    def test_namespace_census_without_cookie_rejects_task_membership(self):
+        coordinates = os.stat("/proc/self/ns/net")
+        with self.assertRaisesRegex(Denied, "fence-namespace-task-live"):
+            fence._namespace_refs_drained(-1, coordinates, None)
+
+    def test_socket_namespace_fallback_requires_the_kernel_witness_and_closes_it(self):
+        current = os.stat("/proc/self/ns/net")
+        target = (current.st_dev, current.st_ino)
+        for same_namespace in (True, False):
+            with self.subTest(same_namespace=same_namespace), socket.socket() as sock:
+                namespace_fd = os.open("/proc/self/ns/net", os.O_RDONLY | os.O_CLOEXEC)
+                observed = os.fstat(sock.fileno())
+                identity = (observed.st_dev, observed.st_ino, stat.S_IFMT(observed.st_mode))
+                with mock.patch.object(fence.fcntl, "ioctl", side_effect=(namespace_fd, fence.CLONE_NEWNET)):
+                    if same_namespace:
+                        with self.assertRaisesRegex(Denied, "fence-namespace-socket-live"):
+                            fence._require_drained_socket_namespace(sock.fileno(), identity, target)
+                    else:
+                        fence._require_drained_socket_namespace(sock.fileno(), identity, (target[0], target[1] + 1))
+                with self.assertRaises(OSError):
+                    os.fstat(namespace_fd)
+                with mock.patch.object(fence.fcntl, "ioctl", side_effect=PermissionError):
+                    with self.assertRaisesRegex(Denied, "fence-socket-namespace-unavailable"):
+                        fence._require_drained_socket_namespace(sock.fileno(), identity, target)
+
 
 if __name__ == "__main__":
     unittest.main()

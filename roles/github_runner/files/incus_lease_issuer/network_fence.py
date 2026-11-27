@@ -968,6 +968,24 @@ def _require_drained_socket(borrowed, observed, cookie):
     require(_socket_cookie(borrowed) != cookie, "fence-namespace-socket-live")
 
 
+def _require_drained_socket_namespace(borrowed, observed, namespace):
+    """Check the kernel namespace directly when the retired record has no cookie."""
+    current = os.fstat(borrowed)
+    require((current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode)) == observed,
+            "fence-proc-fds-changed")
+    # Linux uapi/linux/sockios.h, SIOCGSKNS. This opens an nsfs reference without setns.
+    try:
+        namespace_fd = fcntl.ioctl(borrowed, 0x894C)
+    except OSError as error:
+        raise Denied("fence-socket-namespace-unavailable") from error
+    try:
+        info = os.fstat(namespace_fd)
+        require(fcntl.ioctl(namespace_fd, NS_GET_NSTYPE) == CLONE_NEWNET, "fence-socket-namespace-type")
+        require((info.st_dev, info.st_ino) != namespace, "fence-namespace-socket-live")
+    finally:
+        os.close(namespace_fd)
+
+
 @identity._diagnostic_step("namespace-census")
 def _namespace_refs_drained(witness_fd, info, cookie):
     """Reacquire whole observations after churn under the original deadline."""
@@ -1003,6 +1021,7 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
     # coordinates. In that case the historical cookie still checks sockets.
     require(info is not None or witness_fd == -1, "fence-namespace-witness")
     target, count = ((info.st_dev, info.st_ino) if info is not None else None), 0
+    require(cookie is not None or target is not None, "fence-namespace-observation-target")
     proc = os.open("/proc", engine.DIR)
     try:
         with os.scandir(proc) as processes:
@@ -1045,7 +1064,10 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
                         if observed[2] == stat.S_IFSOCK:
                             borrowed = _borrow_socket(pid, pidfd, number)
                             try:
-                                _require_drained_socket(borrowed, observed, cookie)
+                                if cookie is None:
+                                    _require_drained_socket_namespace(borrowed, observed, target)
+                                else:
+                                    _require_drained_socket(borrowed, observed, cookie)
                             finally:
                                 os.close(borrowed)
                     after = _process_stat(process, pid)

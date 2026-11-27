@@ -1755,6 +1755,7 @@ def _revalidate_twenty_ninth_retirement(receipt, successor_bank, successor=None)
 
 
 def _twenty_ninth_resources_absent(configuration, selected, lease, record, fence, successor_bank, successor):
+    from types import SimpleNamespace
     from . import cleanup_storage, engine_executor, incus_admin, incus_mutation, kernel, network_fence
 
     config, _, _ = preparation._config(configuration.preparation_config_path, configuration.preparation_config_sha256)
@@ -1779,8 +1780,16 @@ def _twenty_ninth_resources_absent(configuration, selected, lease, record, fence
             "continuation-twenty-ninth-link-reappeared")
     namespace = (fence["netns_device"], fence["netns_inode"])
     _, seconds = cleanup_storage._cleanup_limits(config)
-    cleanup_storage._no_consumers(descriptor, descriptor_path, lease, (), time.monotonic() + seconds,
-                                  {namespace}, (), forbidden_namespace=namespace)
+    # C28's sealed record binds the nsfs coordinates on this boot. A verified
+    # successor that reused them stays pinned for the entire observation.
+    with _historical_namespace_coordinates(successor_bank, successor, original_namespace=namespace,
+                                           original_cookie=None) as former:
+        identities = set() if former is None else {former}
+        cleanup_storage._no_consumers(descriptor, descriptor_path, lease, (), time.monotonic() + seconds,
+                                      identities, (), forbidden_namespace=former)
+        if former is not None:
+            observed = SimpleNamespace(st_dev=former[0], st_ino=former[1])
+            network_fence._namespace_refs_drained(-1, observed, None)
     _twelfth_host_fence(config, fence["host_ifindex"], successor_bank, successor, original_lease=lease)
     require(not any(os.path.lexists(path) for path in paths), "continuation-twenty-ninth-paths-reappeared")
     require(network_fence._host_namespace() == host, "fence-host-namespace-changed")
@@ -3771,11 +3780,11 @@ def _historical_namespace_coordinates(successor_bank, successor, *,
         name = "lit-lease-" + lease_id
         with network_fence._namespace_witness(name) as (fd, info):
             require((info.st_dev, info.st_ino) == original_namespace
-                    and network_fence._namespace_cookie(fd, info) != original_cookie,
+                    and (original_cookie is None or network_fence._namespace_cookie(fd, info) != original_cookie),
                     "continuation-namespace-kernel-generation")
             yield None
             # Keep the FD open so those coordinates cannot be recycled during
-            # either census. The original cookie still governs socket checks.
+            # either census. The verified creator binds a new live namespace.
             with network_fence._namespace_witness(name) as (_, after):
                 require((after.st_dev, after.st_ino) == original_namespace,
                         "continuation-namespace-successor-alias")
