@@ -3,3 +3,4 @@ bugfixes:
   - Wait briefly for concurrent ledger readers when committing Incus firewall creation evidence.
     Kernel operations are issued once.
   - Record allowlisted firewall failure categories in the private runtime journal.
+  - Preserve the active successor identity when checking the retired C28 network fence.

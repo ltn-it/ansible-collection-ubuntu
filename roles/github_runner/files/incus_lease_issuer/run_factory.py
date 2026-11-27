@@ -145,7 +145,7 @@ def load_bootstrap(path, expected_sha256):
                         runtime["initial_transition_timeout_seconds"])
     runtime_rpc._validate_early_renewal(runtime)
     continuation = value.get("operating_continuation")
-    if type(continuation) is dict and continuation.get("schema") in {25, 26, 27, 28}:
+    if type(continuation) is dict and continuation.get("schema") in {25, 26, 27, 28, 29}:
         require(runtime.get("renewal_lead_seconds") == runtime_rpc.EARLY_RENEWAL_LEAD_SECONDS,
                 "bootstrap-twenty-fifth-renewal-policy")
     require(type(runtime["capture"]) is dict, "bootstrap-runtime-capture")
@@ -282,7 +282,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 28 or receipt.get("schema") == 28:
+    if descriptor["schema"] == 29 or receipt.get("schema") == 29:
+        require(descriptor["schema"] == receipt.get("schema") == 29, "continuation-twenty-ninth-receipt-kind")
+    elif descriptor["schema"] == 28 or receipt.get("schema") == 28:
         require(descriptor["schema"] == receipt.get("schema") == 28, "continuation-twenty-eighth-receipt-kind")
     elif descriptor["schema"] == 27 or receipt.get("schema") == 27:
         require(descriptor["schema"] == receipt.get("schema") == 27, "continuation-twenty-seventh-receipt-kind")
@@ -825,6 +827,7 @@ def _continuation_origin_observations(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    twenty_ninth_catalogues = None
     twenty_eighth_catalogues = None
     twenty_sixth_catalogues = None
     twenty_fifth_catalogues = None
@@ -840,6 +843,11 @@ def _continuation_origin_observations(bootstrap, qualified):
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 29:
+        _revalidate_twenty_ninth_retirement(receipt, bootstrap.value["ledger_path"], descriptor["successor"])
+        twenty_ninth_catalogues = receipt["retirement"]["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 28
     if schema == 28:
         _revalidate_sealed_prelease(receipt, bootstrap.value["ledger_path"],
                                     operating_cells.TWENTY_EIGHTH_RUN, operating_cells.TWENTY_EIGHTH_MAIN,
@@ -958,7 +966,8 @@ def _continuation_origin_observations(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = (twenty_eighth_catalogues or twenty_sixth_catalogues or twenty_fifth_catalogues or twenty_fourth_catalogues or twenty_third_catalogues
+        retired = (twenty_ninth_catalogues or twenty_eighth_catalogues or twenty_sixth_catalogues or twenty_fifth_catalogues
+                   or twenty_fourth_catalogues or twenty_third_catalogues
                    or twenty_second_catalogues or twenty_first_catalogues
                    or twentieth_catalogues or nineteenth_catalogues
                    or eighteenth_catalogues or seventeenth_catalogues
@@ -1669,6 +1678,130 @@ def _revalidate_eighteenth_retirement(retirement, previous, successor_bank=None,
     return _revalidate_oci_retirement(retirement, previous, successor_bank, successor, bound_exit=True)
 
 
+def _revalidate_twenty_ninth_retirement(receipt, successor_bank, successor=None):
+    """Read the exact C28 no-engine failure and its separate Root withdrawal receipts."""
+    retirement = receipt["retirement"]
+    reference, bank = retirement["original_bootstrap"], retirement["original_bank"]
+    original = retirement["original_record"]
+    old = load_bootstrap(reference["path"], reference["sha256"])
+    previous = _continuation_receipt(old.value)
+    require(old.file_stamp[:2] == (reference["device"], reference["inode"])
+            and old.value["ledger_path"] == bank["path"] != successor_bank
+            and previous is not None and previous[1] == receipt["previous_qualification"]
+            and previous[0]["schema"] == 28, "continuation-twenty-ninth-preserved-bootstrap")
+    caller = previous[0]["successor"]
+    source, reusable, run, job = (operating_cells.TWENTY_NINTH_MAIN, operating_cells.TWENTY_EIGHTH_SUCCESSOR_REUSABLE,
+        operating_cells.TWENTY_NINTH_RUN, operating_cells.TWENTY_NINTH_CHECKS[0])
+    require((caller["source_sha"], caller["reusable_sha"], caller["run_id"], caller["run_attempt"]) ==
+            (source, reusable, run, 1), "continuation-twenty-ninth-original-run")
+    _, configuration, sealed = _retired_original_entries(
+        old, retirement["entries"], source, reusable, run, job, revalidating=True)
+    registry = policy_registry.load_registry(configuration.registry_path, configuration.registry_sha256)
+    selected = registry.select(sealed["invocation"]["selector"])
+    require(selected.ledger_path == bank["path"]
+            and sealed["invocation"]["selector"] == policy_registry.profile_selector("heavy", "keycloak-heavy", "ubuntu-24.04"),
+            "continuation-twenty-ninth-original-selector")
+    lease = original["lease_id"]
+    with ledger._observe_historical_bank(bank["path"], bank["device"], bank["inode"]), ledger.Ledger(bank["path"]) as store:
+        if successor_bank is not None:
+            successor_fd = installation._open_directory(successor_bank)
+            try:
+                current = os.fstat(successor_fd)
+                require((current.st_dev, current.st_ino) != (bank["device"], bank["inode"]),
+                        "continuation-twenty-ninth-bank-alias")
+            finally:
+                os.close(successor_fd)
+        proof, _, stamp = installation._file(str(store.path / "state.json"), MAX_POLICY, private=True)
+        require(proof.sha256 == bank["state_file_sha256"] and
+                bank["state_file_identity"] == {"device": proof.device, "inode": proof.inode, "stamp": list(stamp)}
+                and store.lease_ids() == (lease,), "continuation-twenty-ninth-original-bank")
+        record = store.read(lease)
+        require(ledger.digest(record) == original["sha256"] and record["state"] == "cancelled"
+                and not {"owned_instance", "custody"} & record.keys(), "continuation-twenty-ninth-original-record")
+        unresolved = [(identifier, row["operation"], row["state"]) for identifier, row in record["effects"].items()
+                      if row["state"] != "verified"]
+        require(unresolved == [(original["fence_intent"], "fence-create", "intent")]
+                and not any(row["operation"] in {"engine-start", "fence-renew"} for row in record["effects"].values())
+                and "fence" in record["effects"][original["fence_intent"]]
+                and "host_api" not in record["effects"][original["fence_intent"]], "continuation-twenty-ninth-fence-intent")
+        archive = retirement["archive"]
+        manifest, raw, _ = installation._file(archive["path"], 65536, private=True, keep=True)
+        evidence = identity.decode_json(raw)
+        terminal = evidence["native_terminal"]
+        require(Path(archive["path"]).parent == Path(old.path).parent and manifest.sha256 == archive["sha256"]
+                and evidence["original"] == record and (terminal["run_id"], terminal["job_id"], terminal["conclusion"]) ==
+                (run, job, "failure"), "continuation-twenty-ninth-original-archive")
+        for name, journal in retirement["journals"].items():
+            directory = Path(journal["path"])
+            require(directory.parent == Path(old.path).parent, "continuation-twenty-ninth-journal-path")
+            fd = installation._open_directory(str(directory))
+            try:
+                expected = journal["members"]
+                actual = run_intake._entries(fd)
+                require((set(expected) == actual if name != "certificate-receipt" else
+                         set(expected) <= actual), "continuation-twenty-ninth-journal-inventory")
+                for leaf, digest in expected.items():
+                    item, content, _ = installation._file(str(directory / leaf), 65536, private=True, keep=True)
+                    entry = identity.decode_json(content)
+                    require(item.sha256 == digest and content == ledger.canonical(entry) + b"\n"
+                            and entry["original_record_sha256"] == original["sha256"],
+                            "continuation-twenty-ninth-journal-drift")
+                require(run_intake._entries(fd) == actual, "continuation-twenty-ninth-journal-inventory")
+            finally:
+                os.close(fd)
+        fence = record["effects"][original["fence_intent"]]["fence"]
+        _twenty_ninth_resources_absent(configuration, selected, lease, record, fence, successor_bank, successor)
+        require(store.read(lease) == record, "continuation-twenty-ninth-original-drift")
+
+
+def _twenty_ninth_resources_absent(configuration, selected, lease, record, fence, successor_bank, successor):
+    from . import cleanup_storage, engine_executor, incus_admin, incus_mutation, kernel, network_fence
+
+    config, _, _ = preparation._config(configuration.preparation_config_path, configuration.preparation_config_sha256)
+    cell, _, _ = cell_contract._sealed(selected.cell_config_path, selected.cell_sha256)
+    env = cell_contract._environment(cell, selected.identity, record["identity"])
+    target = cell_contract._incus(cell["incus"], env, lease, selected.cell_sha256)
+    descriptor = cell_contract._descriptor(cell["engine"], env, selected.identity, lease,
+                                           record["expires_at"], record["created_at"])
+    descriptor_path = cell["engine"]["paths"]["descriptor"] + "/" + lease + ".json"
+    paths = (descriptor["engine"]["storage_root"], descriptor["engine"]["runroot"], descriptor["output_path"],
+             descriptor["context_path"], descriptor_path, "/run/netns/lit-lease-" + lease)
+    require(not any(os.path.lexists(path) for path in paths), "continuation-twenty-ninth-paths-reappeared")
+    engine_executor._slice_inactive(lease)
+    policy = network_fence._bound_policy(config.network_fence_policy_path, config.network_fence_policy_sha256, config)
+    host = network_fence._host_namespace()
+    require(fence["boot_id"] == kernel.read_boot_id() and fence["policy_sha256"] == policy.sha256,
+            "continuation-twenty-ninth-fence-scope")
+    link_names = {"lth" + lease[:12], "ltp" + lease[:12]}
+    interfaces = network_fence._ip(policy, "link", "show")
+    require(interfaces and all(type(row.get("ifindex")) is int and type(row.get("ifname")) is str
+            and row["ifindex"] != fence["host_ifindex"] and row["ifname"] not in link_names for row in interfaces),
+            "continuation-twenty-ninth-link-reappeared")
+    namespace = (fence["netns_device"], fence["netns_inode"])
+    _, seconds = cleanup_storage._cleanup_limits(config)
+    cleanup_storage._no_consumers(descriptor, descriptor_path, lease, (), time.monotonic() + seconds,
+                                  {namespace}, (), forbidden_namespace=namespace)
+    _twelfth_host_fence(config, fence["host_ifindex"], successor_bank, successor, original_lease=lease)
+    require(not any(os.path.lexists(path) for path in paths), "continuation-twenty-ninth-paths-reappeared")
+    require(network_fence._host_namespace() == host, "fence-host-namespace-changed")
+    ownership = incus_mutation.Ownership(**target["ownership"])
+    project = incus_mutation.ProjectSpec(target["project"], target["network"], target["pool"],
+        incus_mutation.ProjectLimits(**target["project_limits"]), ownership)
+    bridge = incus_mutation.BridgeSpec(target["network"], target["ipv4_address"], target["dns_domain"], ownership)
+    client = incus_admin.RootIncusAdmin(incus_admin.AdminTarget(config.incus_socket_path, target["project"],
+        target["network"], "default", target["pool"], ()))
+    mutator = incus_mutation.RootIncusMutator(client, project, bridge)
+    require(all(mutator.readback(kind)["state"] == "absent_observed" for kind in ("project", "bridge"))
+            and mutator._image_observe() is None, "continuation-twenty-ninth-incus-resource-reappeared")
+    creator, = [row for row in record["effects"].values() if row["operation"] == "certificate-create"]
+    scope = creator["certificate_scope"]
+    rows, _ = incus_mutation._certificate_inventory(client)
+    require(not any(row["fingerprint"] == scope["initial_fingerprint"] or row["name"] == scope["name"]
+                    or target["project"] in row["projects"] for row in rows)
+            and not any(row.get("project") == target["project"] for row in client.pool_volumes()),
+            "continuation-twenty-ninth-private-incus-scope-reappeared")
+
+
 def _revalidate_oci_retirement(retirement, previous, successor_bank, successor, *, bound_exit,
                                verified_start=False, image_copy=False):
     """Re-read the preserved Podman startup failure and its verified native absence."""
@@ -2260,6 +2393,10 @@ def _revalidate_sealed_prelease(receipt, successor_bank, run_id, source_sha, reu
 def _continuation_native_histories(get, descriptor, receipt, *, allow_resume=None):
     """Join independent reads. Resume one transient family within the same proof."""
     generation = descriptor["schema"]
+    twenty_ninth = receipt if generation == 29 else None
+    if twenty_ninth is not None:
+        receipt = twenty_ninth["previous_qualification"]
+        generation = 28
     twenty_eighth = receipt if generation == 28 else None
     if twenty_eighth is not None:
         receipt = twenty_eighth["previous_qualification"]
@@ -2424,6 +2561,9 @@ def _continuation_native_histories(get, descriptor, receipt, *, allow_resume=Non
     if twenty_eighth is not None:
         families.append((_continuation_twenty_eighth_native, {}, twenty_eighth["native_twenty_eighth"],
                          "continuation-twenty-eighth-native-drift"))
+    if twenty_ninth is not None:
+        families.append((_continuation_twenty_ninth_native, {}, twenty_ninth["native_twenty_ninth"],
+                         "continuation-twenty-ninth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -2841,7 +2981,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28, 29}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 27:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
@@ -3855,3 +3995,8 @@ def _continuation_twenty_seventh_native(get):
 def _continuation_twenty_eighth_native(get):
     return _terminal_family(get, operating_cells.TWENTY_EIGHTH_RUN, operating_cells.TWENTY_EIGHTH_CHECKS,
                             operating_cells.twenty_eighth_native_projection)
+
+
+def _continuation_twenty_ninth_native(get):
+    return _terminal_family(get, operating_cells.TWENTY_NINTH_RUN, operating_cells.TWENTY_NINTH_CHECKS,
+                            operating_cells.twenty_ninth_native_projection)
