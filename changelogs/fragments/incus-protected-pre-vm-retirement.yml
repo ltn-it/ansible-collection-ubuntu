@@ -1,6 +1,0 @@
----
-minor_changes:
-  - >-
-    github_runner - Permit early retirement of opted-in business test preparations when the protected Root journal
-    proves that VM authority was never issued. Preserve the native failure and inventory before retirement and
-    independently read back resource absence. Planned operating tests keep their four-hour retention.

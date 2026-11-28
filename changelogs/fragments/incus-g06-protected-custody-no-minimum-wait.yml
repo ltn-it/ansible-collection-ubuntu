@@ -1,5 +1,0 @@
----
-minor_changes:
-  - >-
-    github_runner - Allow a fresh protected G06 bootstrap to bind an explicit zero-minimum-wait custody policy.
-    Existing leases retain their original policy and ordinary terminal and resource ownership checks still apply.

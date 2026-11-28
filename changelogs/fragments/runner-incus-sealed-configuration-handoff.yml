@@ -1,8 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - Reuse the final verified configuration-factory readback when returning a sealed
-    configuration to its originating job. Runtime lease admission still requires a fresh proof.
-  - >-
-    github_runner - Preserve the original terminal GitHub result, private intake and configuration seals,
-    and empty ledger when qualifying the next isolated Incus test run.

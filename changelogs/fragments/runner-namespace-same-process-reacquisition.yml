@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - reacquire task and descriptor tables for the same verified live process
-    if they change during a namespace check, within the existing scan deadline.

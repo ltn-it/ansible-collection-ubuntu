@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - preserve all three failed native deliveries in the fixed
-    continuation contract without resetting history or relaxing admission.

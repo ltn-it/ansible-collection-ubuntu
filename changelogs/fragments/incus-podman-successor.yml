@@ -1,8 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - admit the corrected Incus workflow after a failed Podman
-    start only after independently verifying cleanup and retaining both
-    cleanup journals. Preserve final observation after verified withdrawal
-    and cleanup of the successor's network access. Keep the last verified
-    grant observable when a heartbeat is interrupted.

@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - allow the first owned network-fence transaction to reach its journaled namespace creation
-    when the runtime namespace parent is absent, while retaining strict checks for existing paths.

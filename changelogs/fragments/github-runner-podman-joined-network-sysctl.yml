@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    Start Incus runner job containers in their assigned network namespace
-    without applying Podman 4.9's default ping group sysctl to that namespace.

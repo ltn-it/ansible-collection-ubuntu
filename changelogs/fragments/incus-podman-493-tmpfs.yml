@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    Make the GitHub runner's Incus test environment compatible with Podman 4.9
-    by using a writable sticky directory for cell home and temporary files.

@@ -1,8 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - Copy the pinned Ubuntu VM image into the private Incus project for the two
-    Keycloak VM cases and reserve capacity for both the image and VM disks.
-  - >-
-    github_runner - Revalidate the original terminal failure, private capture and independently
-    verified resource absence before admitting the protected successor for the failed run.

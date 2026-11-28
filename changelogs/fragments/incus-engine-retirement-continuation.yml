@@ -1,6 +1,0 @@
----
-bugfixes:
-  - >-
-    Bind the next isolated Incus run to the archived failed start, the ordered
-    retirement journals and the exact successor workflow. Verify that the old
-    lease resources remain absent without rewriting the original start outcome.
