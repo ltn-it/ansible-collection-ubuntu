@@ -4,6 +4,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 FILES = Path(__file__).resolve().parents[2] / 'roles/github_runner/files'
@@ -101,6 +102,64 @@ class ObservationChurnTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, 'fence-proc-bounds'):
                 network_fence._namespace_refs_drained(3, 'info', 25882)
         self.assertEqual(acquire.call_count, 1)
+
+
+class ProcessNamespaceChurnTests(unittest.TestCase):
+    def setUp(self):
+        self.before = SimpleNamespace(pid=702, start_ticks=19374)
+        self.arguments = (8, 9, self.before, 10, (4, 4026532529), 25882, 20)
+
+    def test_same_process_reacquires_every_task_and_descriptor_after_churn(self):
+        with mock.patch.object(network_fence.time, "monotonic", return_value=10), \
+             mock.patch.object(network_fence, "_process_stat", return_value=self.before) as process_stat, \
+             mock.patch.object(network_fence.select, "select", return_value=([], [], [])) as poll, \
+             mock.patch.object(network_fence, "_process_namespace_refs_drained_once",
+                               side_effect=[FileNotFoundError(), Denied("fence-proc-fds-changed"), None]) as scan:
+            network_fence._process_namespace_refs_drained(*self.arguments)
+        self.assertEqual(scan.call_args_list, [mock.call(*self.arguments)] * 3)
+        self.assertEqual(process_stat.call_args_list, [mock.call(8, 702)] * 2)
+        self.assertEqual(poll.call_args_list, [mock.call([9], [], [], 0)] * 2)
+
+    def test_process_exit_or_replacement_disallows_local_retry(self):
+        for ticks, readable in [(19374, [9]), (19375, [])]:
+            replacement = SimpleNamespace(pid=702, start_ticks=ticks)
+            with self.subTest(ticks=ticks, readable=readable), \
+                 mock.patch.object(network_fence.time, "monotonic", return_value=10), \
+                 mock.patch.object(network_fence, "_process_stat", return_value=replacement), \
+                 mock.patch.object(network_fence.select, "select", return_value=(readable, [], [])), \
+                 mock.patch.object(network_fence, "_process_namespace_refs_drained_once",
+                                   side_effect=Denied("fence-proc-fds-changed")) as scan:
+                with self.assertRaisesRegex(Denied, "^fence-proc-fds-changed$"):
+                    network_fence._process_namespace_refs_drained(*self.arguments)
+                scan.assert_called_once_with(*self.arguments)
+
+    def test_live_socket_and_inaccessible_socket_hold_without_retry(self):
+        for reason in ("fence-namespace-socket-live", "fence-socket-namespace-unavailable"):
+            with self.subTest(reason=reason), \
+                 mock.patch.object(network_fence.time, "monotonic", return_value=10), \
+                 mock.patch.object(network_fence, "_process_stat") as process_stat, \
+                 mock.patch.object(network_fence, "_process_namespace_refs_drained_once",
+                                   side_effect=Denied(reason)) as scan:
+                with self.assertRaisesRegex(Denied, reason):
+                    network_fence._process_namespace_refs_drained(*self.arguments)
+                scan.assert_called_once_with(*self.arguments)
+                process_stat.assert_not_called()
+
+    def test_reacquisition_uses_original_deadline_and_remains_bounded(self):
+        for ticks, expected, attempts in [
+            ([19, 20], "fence-proc-bounds", 1),
+            ([10] * 4, "fence-proc-task-changed", 4),
+        ]:
+            with self.subTest(expected=expected), \
+                 mock.patch.object(network_fence.time, "monotonic", side_effect=ticks), \
+                 mock.patch.object(network_fence, "_process_stat", return_value=self.before), \
+                 mock.patch.object(network_fence.select, "select", return_value=([], [], [])), \
+                 mock.patch.object(network_fence, "_process_namespace_refs_drained_once",
+                                   side_effect=Denied("fence-proc-task-changed")) as scan:
+                with self.assertRaisesRegex(Denied, expected):
+                    network_fence._process_namespace_refs_drained(*self.arguments)
+                self.assertEqual(scan.call_args_list, [mock.call(*self.arguments)] * attempts)
+
 
 class StorageConsumerChurnTests(unittest.TestCase):
     def invoke(self, end=100):
