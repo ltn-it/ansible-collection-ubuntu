@@ -1,6 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - Resume one transient GitHub history interruption within the same
-    pre-intake proof. Keep verified history results request-local and recheck the current
-    job, Runner assignment, Root configuration and deadlines before accepting the proof.

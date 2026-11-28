@@ -1,6 +1,0 @@
----
-minor_changes:
-  - github_runner - add a fixed profile/scenario/target locator to the installed RuntimeV2 client without
-    extending its execution authority or success criteria.
-  - github_runner - bind prepared Validation Main cells to the independently verified native run before lease
-    preparation and recheck that binding for execution and cleanup.

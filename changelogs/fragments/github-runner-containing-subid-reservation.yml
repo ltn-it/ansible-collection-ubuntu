@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - accept a uniquely containing Root subordinate-ID reservation without expanding
-    the requested engine mapping; retain account and overlapping-reservation rejection.

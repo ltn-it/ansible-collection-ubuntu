@@ -1,4 +1,0 @@
----
-bugfixes:
-  - github_runner - inspect complete backing-file extent mappings through bounded FIEMAP pages with one proof
-    deadline, retaining full allocation coverage and rejecting holes or unsupported flags without increasing quotas.

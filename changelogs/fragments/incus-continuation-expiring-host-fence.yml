@@ -1,4 +1,0 @@
----
-bugfixes:
-  - Accept the native zero-second timer floor when verifying the exact recorded Incus host fence during continuation.
-  - Start renewal earlier for derived Incus configurations to account for retained history verification.

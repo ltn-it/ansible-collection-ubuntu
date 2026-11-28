@@ -1,6 +1,0 @@
----
-bugfixes:
-  - Separate archive staging and private job configuration into individually authenticated
-    requests so Runner01 can complete both within their existing GitHub authorization windows.
-  - Preserve the failed Runner01 intake and configuration as read-only evidence when qualifying
-    its next protected Main push.

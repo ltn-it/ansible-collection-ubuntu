@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    Allow the Incus watchdog and admission checks to read the same lease ledger
-    concurrently while preserving exclusive locks for state changes.

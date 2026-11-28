@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - repeat the bounded network namespace observation when
-    another process closes a socket during acquisition.

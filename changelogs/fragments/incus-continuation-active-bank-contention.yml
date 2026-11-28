@@ -1,5 +1,0 @@
----
-bugfixes:
-  - >-
-    github_runner - Read active continuation leases in one validated Root bank snapshot with a bounded
-    shared-lock wait, so a transient ledger write does not interrupt a live authorization renewal.

@@ -1,4 +1,0 @@
----
-bugfixes:
-  - github_runner - Issue the private Incus heartbeat proof after the final fresh
-    worker census while retaining the original native challenge and lease deadlines.

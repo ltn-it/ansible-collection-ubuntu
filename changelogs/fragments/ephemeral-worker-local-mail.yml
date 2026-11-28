@@ -1,9 +1,0 @@
----
-minor_changes:
-  - github_runner - add an opt-in library for fixed local Root alarm mail with durable
-    no-replay dispatch and mailbox confirmation.
-  - github_runner - add a disabled-by-default independent local-mail timer with pinned
-    target preflight, bounded fair dispatch and durable historical confirmation.
-known_issues:
-  - Local alarm mail has no default installation or scheduler and does not constitute
-    personal acknowledgment or capacity release.

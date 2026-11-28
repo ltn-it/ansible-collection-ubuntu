@@ -1,9 +1,0 @@
----
-minor_changes:
-  - github_runner - add a read-only fresh-guest prerequisite check before protected
-    registration when an explicit native guest UUID is supplied.
-  - Persist optional ephemeral VM UUID and operation binding through protected registration and reattest
-    identity on existing installations.
-known_issues:
-  - Guest prerequisite inspection is not image provenance, registration authorization
-    or operating acceptance; its native collection still requires qualification.
