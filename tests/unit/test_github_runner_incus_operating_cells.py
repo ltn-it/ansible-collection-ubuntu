@@ -455,6 +455,92 @@ class OperatingCellTests(unittest.TestCase):
                  self.assertRaisesRegex(Denied, "continuation-thirtieth-exact-prefix-extension"):
                 cells.validate_continuation_qualification(wrong)
 
+    def test_closed_c30_requires_the_exact_c31_native_successor(self):
+        caller = "a" * 40
+        run = cells.THIRTY_FIRST_RUN + 1
+        workflow = cells.THIRTY_FIRST_SUCCESSOR_WORKFLOW
+        controller = cells.THIRTY_FIRST_SUCCESSOR_REUSABLE
+        successor = {
+            "source_sha": caller, "run_id": run, "run_attempt": 1,
+            "first_parent": cells.THIRTY_FIRST_MAIN, "source_workflow_sha256": workflow,
+            "reusable_sha": controller,
+        }
+        descriptor = {
+            "schema": 31, "reason": cells.THIRTY_FIRST_REASON,
+            "qualification": {"path": "/private/c30-qualification.json", "sha256": cells.THIRTY_FIRST_QUALIFICATION},
+            "successor": successor,
+        }
+        commit = {"sha": caller, "parents": [{"sha": cells.THIRTY_FIRST_MAIN}]}
+        self.assertEqual(cells.validate_continuation_descriptor(descriptor, workflow, controller), descriptor)
+        cells.validate_continuation_commit(commit, descriptor, caller, run, controller)
+
+        for field, value in (
+            ("first_parent", cells.THIRTIETH_MAIN), ("source_workflow_sha256", "c" * 64),
+            ("reusable_sha", "c" * 40), ("run_attempt", 2), ("source_sha", cells.THIRTY_FIRST_MAIN),
+            ("run_id", cells.THIRTY_FIRST_RUN),
+        ):
+            changed = descriptor | {"successor": successor | {field: value}}
+            with self.subTest(field=field), self.assertRaises(Denied):
+                cells.validate_continuation_descriptor(changed, workflow, controller)
+        for workflow_arg, controller_arg in ((workflow, "c" * 40), ("c" * 64, controller)):
+            with self.assertRaisesRegex(Denied, "continuation-thirty-first-successor"):
+                cells.validate_continuation_descriptor(descriptor, workflow_arg, controller_arg)
+
+        changed = descriptor | {"qualification": descriptor["qualification"] | {"sha256": "c" * 64}}
+        with self.assertRaisesRegex(Denied, "continuation-thirty-first-qualification"):
+            cells.validate_continuation_descriptor(changed, workflow, controller)
+        wrong_parent = commit | {"parents": [{"sha": cells.THIRTIETH_MAIN}]}
+        with self.assertRaisesRegex(Denied, "continuation-first-parent"):
+            cells.validate_continuation_commit(wrong_parent, descriptor, caller, run, controller)
+        with self.assertRaisesRegex(Denied, "continuation-exact-native-tuple"):
+            cells.validate_continuation_commit(commit, descriptor, caller, cells.THIRTY_FIRST_RUN, controller)
+
+    def test_c31_retirement_extends_both_catalogues_and_keeps_the_original_closure(self):
+        native = {"test_projection": True}
+        catalogue_keys = {"configuration": "native_run_configuration_catalogue", "intake": "native_intake_catalogue"}
+        old_catalogues = {name: {"a" * 64: "b" * 64} for name in catalogue_keys.values()}
+        previous = {"schema": 30, "retirement": {"catalogues": old_catalogues}}
+        configuration = {"name": "c" * 64, "device": 1, "inode": 4,
+                         "receipt_sha256": "d" * 64, "inventory_sha256": "e" * 64}
+        intake = configuration | {"name": "f" * 64, "inode": 5}
+        entries = {"configuration": configuration, "intake": intake}
+        qualification = {
+            "schema": 31, "purpose": cells.THIRTY_FIRST_REASON,
+            "native_thirty_first": native, "previous_qualification": previous,
+            "retirement": {
+                "original_bootstrap": {
+                    "path": "/private/old/bootstrap.json", "sha256": cells.THIRTY_FIRST_BOOTSTRAP,
+                    "device": 1, "inode": 2,
+                },
+                "original_bank": {
+                    "path": "/private/old/bank", "state_file_sha256": "1" * 64,
+                    "device": 1, "inode": 3,
+                },
+                "closed_record_sha256": cells.THIRTY_FIRST_CLOSED_RECORD,
+                "entries": entries,
+                "catalogues": {name: old_catalogues[name] | {entries[kind]["name"]: entries[kind]["inventory_sha256"]}
+                               for kind, name in catalogue_keys.items()},
+            },
+        }
+        with patch.object(cells, "THIRTY_FIRST_GRAPH", ledger.digest(native)), \
+             patch.object(cells, "_validate_thirtieth_qualification", return_value=(1, 2)) as prior:
+            with patch.object(cells, "THIRTY_FIRST_QUALIFICATION", ledger.digest(qualification)):
+                self.assertEqual(cells.validate_continuation_qualification(qualification), (1, 2))
+            prior.assert_called_once_with(previous)
+            for kind, name in catalogue_keys.items():
+                for altered_name in ("a" * 64, entries[kind]["name"]):
+                    wrong = deepcopy(qualification)
+                    wrong["retirement"]["catalogues"][name][altered_name] = "3" * 64
+                    with self.subTest(kind=kind, altered=altered_name), \
+                         patch.object(cells, "THIRTY_FIRST_QUALIFICATION", ledger.digest(wrong)), \
+                         self.assertRaisesRegex(Denied, "continuation-twenty-second-catalogue-extension"):
+                        cells.validate_continuation_qualification(wrong)
+            wrong = deepcopy(qualification)
+            wrong["retirement"]["closed_record_sha256"] = "4" * 64
+            with patch.object(cells, "THIRTY_FIRST_QUALIFICATION", ledger.digest(wrong)), \
+                 self.assertRaisesRegex(Denied, "continuation-thirty-first-original-locators"):
+                cells.validate_continuation_qualification(wrong)
+
     def test_business_roles_guard_remains_required_in_existing_parser(self):
         _, native, who = fixture()
         matrix = {key: "supported" for key in cell_contract.MATRIX_KEYS}
