@@ -22,6 +22,42 @@ def has_setuid_capability():
 
 class Socket:
  def fileno(self):return 123
+
+
+class MapStabilityTests(fixtures.CollectorCompositionTests):
+    def acquire(self, samples, *, deadline, clock=(10, 11)):
+        snapshots = self.fixture.snapshots
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(collector.os, "geteuid", return_value=0))
+            stack.enter_context(patch.object(collector, "_controls", return_value={}))
+            stack.enter_context(patch.object(service, "read_service", return_value=self.service))
+            stack.enter_context(patch.object(installation, "verify_installation", return_value=self.proof))
+            stack.enter_context(patch.object(kernel, "read_peer", return_value=self.peer))
+            stack.enter_context(patch.object(kernel, "read_boot_id", return_value=fixtures.lineage_fixtures.BOOT))
+            stack.enter_context(patch.object(kernel, "read_chain", return_value=snapshots))
+            stack.enter_context(patch.object(collector.time, "monotonic", side_effect=clock))
+            observe = stack.enter_context(patch.object(collector, "_joined_closures", side_effect=samples))
+            sock = Socket()
+            try:
+                _, token = collector.begin_worker_acquisition(sock, self.policy, maps_retry_until=deadline)
+                collector.discard_worker_acquisition(token)
+            finally:
+                self.assertLessEqual(observe.call_count, 3)
+            return observe.call_count
+
+    def test_current_proof_requires_two_matching_fully_checked_samples(self):
+        self.assertEqual(self.acquire([("initial",), ("stable",), ("stable",)], deadline=12), 3)
+
+    def test_continuing_change_denies(self):
+        with self.assertRaises(Denied):
+            self.acquire([("initial",), ("changed",), ("still-changing",)], deadline=12)
+
+    def test_retry_requires_current_proof_and_checks_expiry_after_observation(self):
+        for deadline, clock in ((None, (10, 11)), (9, (10, 11)), (11, (10, 11))):
+            with self.subTest(deadline=deadline), self.assertRaises(Denied):
+                self.acquire([("initial",), ("stable",), ("stable",)], deadline=deadline, clock=clock)
+
+
 class EpochTests(fixtures.CollectorCompositionTests):
  def epoch(self, mutate=None, **changes):
   defaults={'service':[self.service]*4,'proof':[self.proof,self.proof],'peer':[self.peer]*4,'boot':[fixtures.lineage_fixtures.BOOT]*4,'chains':[self.fixture.snapshots,dict(self.fixture.snapshots)]*2};defaults.update(changes)

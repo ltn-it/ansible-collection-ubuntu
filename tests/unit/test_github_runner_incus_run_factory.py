@@ -25,7 +25,7 @@ from test_github_runner_incus_flow import FixtureReader
 
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
-from incus_lease_issuer import collector, identity, ledger, policy_registry, run_factory as factory
+from incus_lease_issuer import admission, collector, identity, ledger, policy_registry, run_factory as factory
 from incus_lease_issuer.identity import Denied
 
 
@@ -185,7 +185,7 @@ class RootBootstrapTests(unittest.TestCase):
         # Native acquisition is modeled here; real collector epochs have their
         # own kernel/FS tests. Preserve worker drift injection at both boundaries.
         mock.patch.object(collector, "begin_worker_acquisition",
-            side_effect=lambda connected, policy: (self.collected(connected, policy), object())).start()
+            side_effect=lambda connected, policy, **kwargs: (self.collected(connected, policy), object())).start()
         mock.patch.object(collector, "finish_worker_acquisition",
             side_effect=lambda token, connected, policy: self.collected(connected, policy)).start()
         mock.patch.object(collector, "discard_worker_acquisition").start()
@@ -411,6 +411,16 @@ class RootBootstrapTests(unittest.TestCase):
         self.assertNotIn(token, repr(proof))
         with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
             with store._transaction() as state: self.assertEqual(state["leases"], {})
+
+    def test_snapshot_seal_can_resample_with_the_original_worker_deadline(self):
+        proof, token = self.mint()
+        with mock.patch.object(collector, "begin_worker_acquisition",
+                               wraps=collector.begin_worker_acquisition) as begin:
+            worker, who, _ = admission.require_intake_seal_native(proof, self.server, proof.policy,
+                token, "synthetic-job-token")
+        begin.assert_called_once_with(self.server, self.bootstrap.collector,
+                                      maps_retry_until=proof.expires_monotonic)
+        self.assertEqual((worker, who), (proof.worker, proof.identity))
 
     def test_configuration_requires_distinct_nonce_for_exact_snapshot(self):
         snapshot = "a" * 64
@@ -899,3 +909,58 @@ class RootConfigurationTests(unittest.TestCase):
         self.assertNotEqual(first.directory, second.directory)
         self.assertEqual(second.deadline, late + 1200)
         self.assertEqual(Path(first.directory, "sealed-inventory.json").read_bytes(), original)
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root filesystem required")
+class OriginalUnsealedIntakeTests(unittest.TestCase):
+    def test_original_prefix_is_read_only_history(self):
+        base = Path("/run/proof")
+        if not base.is_dir() or base.stat().st_uid != 0 or stat.S_IMODE(base.stat().st_mode) != 0o700:
+            self.skipTest("private Root0700 /run/proof required")
+        cells = factory.operating_cells
+        binding = {
+            "schema": 1,
+            "source": {"repository": factory.SOURCE, "repository_id": 1103407173,
+                       "commit_sha": cells.THIRTIETH_MAIN},
+            "controller": {"repository": factory.VALIDATION, "repository_id": 1269461997,
+                           "commit_sha": cells.TWENTY_NINTH_SUCCESSOR_REUSABLE},
+            "artifact": {"run_id": cells.THIRTIETH_RUN, "head_sha": cells.THIRTIETH_MAIN, "run_attempt": 1},
+        }
+        job_id = cells.THIRTIETH_CHECKS[0]
+        intent = {"schema": 1, "binding": binding,
+                  "original_job": {"run_id": cells.THIRTIETH_RUN, "job_id": job_id, "check_run_id": job_id}}
+        with tempfile.TemporaryDirectory(dir=base) as parent, \
+             mock.patch.object(factory.run_intake, "ROOT", parent), \
+             mock.patch.object(factory, "_revalidate_prelease_origin") as verify_original:
+            name = ledger.digest(binding)
+            path = Path(parent, name)
+            path.mkdir(mode=0o700)
+            fd = factory.installation._open_directory(str(path))
+            try:
+                digest = factory.run_intake._write_at(fd, "intent.json", intent)
+                for member in factory.run_intake.ARCHIVES:
+                    factory.run_intake._write_at(fd, member, {"inert_fixture": member})
+                device, inode, *_ = factory.run_intake._directory_identity(fd)
+                previous = {"schema": 29}
+                old_bootstrap = {"sha256": cells.THIRTIETH_BOOTSTRAP}
+                original_bank = {"state_file_sha256": "e" * 64}
+                original = {"previous_bootstrap": old_bootstrap, "previous_bank": original_bank,
+                            "previous_qualification": previous}
+                receipt = {"previous_qualification": previous, "retirement": {
+                    "original_bootstrap": old_bootstrap, "original_bank": original_bank, "intake_prefix": {
+                        "name": name, "device": device, "inode": inode, "intent_sha256": digest,
+                        "inventory_sha256": factory._fifth_retired_entry(path),
+                    },
+                }}
+                factory._revalidate_thirtieth_prelease(receipt, "/exact-next-bank")
+                verify_original.assert_called_once_with(original, "/exact-next-bank", 29, cells.THIRTIETH_RUN,
+                                                        cells.THIRTIETH_MAIN, "continuation-thirtieth")
+                archive = path / "artifact.zip"
+                archive.write_bytes(b"changed")
+                with self.assertRaisesRegex(Denied, "continuation-thirtieth-original-intake-drift"):
+                    factory._revalidate_thirtieth_prelease(receipt, "/exact-next-bank")
+                factory.run_intake._write_at(fd, "sealed.json", {"unexpected": True})
+                with self.assertRaisesRegex(Denied, "continuation-thirtieth-unsealed-intake"):
+                    factory._revalidate_thirtieth_prelease(receipt, "/exact-next-bank")
+            finally:
+                os.close(fd)

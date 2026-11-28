@@ -731,7 +731,7 @@ class BootstrapRuntimeRPC:
         # Recheck identity at both inner reads. The final reply still requires
         # a full fresh host verification on the same socket.
         continuation = bootstrap.value.get("operating_continuation", {})
-        require_reader = (run_factory.require_bootstrap_observer_reader if continuation.get("schema") in {26, 27, 28, 29}
+        require_reader = (run_factory.require_bootstrap_observer_reader if continuation.get("schema") in {26, 27, 28, 29, 30}
                           else run_factory.require_bootstrap_native)
         _, who, remaining = require_reader(proof, connected, proof.policy, request["token"], request["api_token"])
         origin = run_factory.read_configuration_origin(configuration)

@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 import re
 import stat
 import threading
+import time
 import weakref
 from types import MappingProxyType
 
@@ -625,7 +626,7 @@ _ACQUISITIONS = weakref.WeakKeyDictionary()
 _ACQUISITION_GUARD = threading.RLock()
 
 
-def _worker_bracket(connected_unix_socket, policy, proof=None):
+def _worker_bracket(connected_unix_socket, policy, proof=None, *, maps_retry_until=None):
     """Keep both original short kernel/maps observations within this call."""
     require(os.geteuid() == 0, "root-collector-required")
     try:
@@ -661,7 +662,22 @@ def _worker_bracket(connected_unix_socket, policy, proof=None):
         second = kernel.read_chain(peer.pid, initial_service.main_pid)
         require(set(second) == set(first), "collector-lineage-changed")
         confirmed = _joined_closures(order, second, proof, policy, hosts, layout)
-        require(confirmed == closures, "collector-maps-changed")
+        if confirmed != closures:
+            # A current, already authenticated intake can resample a changing
+            # closure once. Both observations in the accepted pair still
+            # verify every mapped backing and the full process roots.
+            require(maps_retry_until is not None and time.monotonic() < maps_retry_until,
+                    "collector-maps-changed")
+            third = kernel.read_chain(peer.pid, initial_service.main_pid)
+            require(set(third) == set(second), "collector-lineage-changed")
+            latest = _joined_closures(order, third, proof, policy, hosts, layout)
+            require(latest == confirmed, "collector-maps-changed")
+            require(worker.verify_lineage(lineage, peer_pid=peer.pid, peer_uid=peer.uid, boot_id=boot,
+                                          snapshots=second, confirmed_snapshots=third,
+                                          confirmed_boot_id=kernel.read_boot_id()) == binding,
+                    "collector-process-changed")
+            require(time.monotonic() < maps_retry_until, "collector-maps-retry-expired")
+            second = third
         require(service.read_service(policy.service) == initial_service
                 and _controls(policy) == controls, "collector-trust-changed")
         final_peer, final_boot = kernel.read_peer(connected_unix_socket), kernel.read_boot_id()
@@ -674,8 +690,8 @@ def _worker_bracket(connected_unix_socket, policy, proof=None):
         raise Denied("collector-acquisition-denied") from None
 
 
-def begin_worker_acquisition(connected_unix_socket, policy):
-    binding, proof = _worker_bracket(connected_unix_socket, policy)
+def begin_worker_acquisition(connected_unix_socket, policy, *, maps_retry_until=None):
+    binding, proof = _worker_bracket(connected_unix_socket, policy, maps_retry_until=maps_retry_until)
     token = _WorkerAcquisition()
     state = (weakref.ref(connected_unix_socket), connected_unix_socket.fileno(),
              os.getpid(), threading.get_ident(), policy, binding, proof)
