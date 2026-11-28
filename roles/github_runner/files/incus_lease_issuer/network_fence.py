@@ -986,11 +986,13 @@ def _require_drained_socket_namespace(borrowed, observed, namespace):
         os.close(namespace_fd)
 
 
+_PROC_CENSUS_CHURN = {"fence-proc-fds-changed", "fence-proc-changed", "fence-proc-task-changed"}
+
+
 @identity._diagnostic_step("namespace-census")
 def _namespace_refs_drained(witness_fd, info, cookie):
     """Reacquire whole observations after churn under the original deadline."""
     deadline = time.monotonic() + 10
-    transient = {"fence-proc-fds-changed", "fence-proc-changed", "fence-proc-task-changed"}
     # A burst of quickly discarded snapshots can consume the attempt limit
     # before the observation deadline. Each retry still scans every reference.
     for _ in range(32):
@@ -1002,7 +1004,7 @@ def _namespace_refs_drained(witness_fd, info, cookie):
         except (FileNotFoundError, ProcessLookupError):
             pass  # Discard every partial observation; all FDs close in finally.
         except Denied as error:
-            if str(error) not in transient:
+            if str(error) not in _PROC_CENSUS_CHURN:
                 raise
     # Keep the typed hold for callers. Record only the constant for this exit.
     identity._diagnostic_failed("namespace-census", Denied("fence-proc-acquire-unstable"))
@@ -1032,58 +1034,81 @@ def _namespace_refs_drained_once(witness_fd, info, cookie, deadline):
                 require(count <= 16384 and time.monotonic() < deadline, "fence-proc-bounds")
                 pid = int(entry.name)
                 process = os.open(entry.name, engine.DIR, dir_fd=proc)
-                pidfd = tasks = leader_fd = -1
+                pidfd = -1
                 try:
                     before = _process_stat(process, pid)
                     pidfd = os.pidfd_open(pid, 0)
-                    tasks = os.open("task", engine.DIR, dir_fd=process)
-                    tids = sorted(os.listdir(tasks))
-                    require(0 < len(tids) <= 4096 and all(name.isascii() and name.isdecimal() for name in tids),
-                            "fence-proc-tasks")
-                    leader_fd = os.open("fd", engine.DIR, dir_fd=process)
-                    original = _fd_table(leader_fd, deadline)
-                    for tid in tids:
-                        task = os.open(tid, engine.DIR, dir_fd=tasks)
-                        thread_fds = -1
-                        try:
-                            task_before = _process_stat(task, int(tid))
-                            namespace = os.stat("ns/net", dir_fd=task)
-                            require((namespace.st_dev, namespace.st_ino) != target, "fence-namespace-task-live")
-                            if int(tid) != pid:
-                                _thread_file_table_drained(task, int(tid), pid, deadline)
-                            task_after = _process_stat(task, int(tid))
-                            require((task_before.pid, task_before.start_ticks) == (task_after.pid, task_after.start_ticks),
-                                    "fence-proc-task-changed")
-                        finally:
-                            if thread_fds >= 0:
-                                os.close(thread_fds)
-                            os.close(task)
-                    for number, observed in original.items():
-                        if observed[:2] == target:
-                            require(pid == os.getpid() and number == witness_fd, "fence-namespace-fd-live")
-                        if observed[2] == stat.S_IFSOCK:
-                            borrowed = _borrow_socket(pid, pidfd, number)
-                            try:
-                                if cookie is None:
-                                    _require_drained_socket_namespace(borrowed, observed, target)
-                                else:
-                                    _require_drained_socket(borrowed, observed, cookie)
-                            finally:
-                                os.close(borrowed)
-                    after = _process_stat(process, pid)
-                    os.lseek(tasks, 0, os.SEEK_SET)
-                    after_tids = sorted(os.listdir(tasks))
-                    require((before.pid, before.start_ticks) == (after.pid, after.start_ticks)
-                            and after_tids == tids and not select.select([pidfd], [], [], 0)[0],
-                            "fence-proc-changed")
-                    if pid != os.getpid():
-                        require(_fd_table(leader_fd, deadline) == original, "fence-proc-fds-changed")
+                    _process_namespace_refs_drained(process, pidfd, before, witness_fd, target, cookie, deadline)
                 finally:
-                    for selected in (leader_fd, tasks, pidfd, process):
-                        if selected >= 0:
-                            os.close(selected)
+                    if pidfd >= 0:
+                        os.close(pidfd)
+                    os.close(process)
     finally:
         os.close(proc)
+
+
+def _process_namespace_refs_drained(process, pidfd, before, witness_fd, target, cookie, deadline):
+    """Reopen task and descriptor tables only while the pinned process remains live."""
+    for attempt in range(4):
+        require(time.monotonic() < deadline, "fence-proc-bounds")
+        try:
+            _process_namespace_refs_drained_once(process, pidfd, before, witness_fd, target, cookie, deadline)
+            return
+        except (FileNotFoundError, ProcessLookupError, Denied) as error:
+            if attempt == 3 or (isinstance(error, Denied) and str(error) not in _PROC_CENSUS_CHURN):
+                raise
+            current = _process_stat(process, before.pid)
+            if current.start_ticks != before.start_ticks or select.select([pidfd], [], [], 0)[0]:
+                raise
+
+
+def _process_namespace_refs_drained_once(process, pidfd, before, witness_fd, target, cookie, deadline):
+    pid = before.pid
+    tasks = leader_fd = -1
+    try:
+        tasks = os.open("task", engine.DIR, dir_fd=process)
+        tids = sorted(os.listdir(tasks))
+        require(0 < len(tids) <= 4096 and all(name.isascii() and name.isdecimal() for name in tids),
+                "fence-proc-tasks")
+        leader_fd = os.open("fd", engine.DIR, dir_fd=process)
+        original = _fd_table(leader_fd, deadline)
+        for tid in tids:
+            task = os.open(tid, engine.DIR, dir_fd=tasks)
+            try:
+                task_before = _process_stat(task, int(tid))
+                namespace = os.stat("ns/net", dir_fd=task)
+                require((namespace.st_dev, namespace.st_ino) != target, "fence-namespace-task-live")
+                if int(tid) != pid:
+                    _thread_file_table_drained(task, int(tid), pid, deadline)
+                task_after = _process_stat(task, int(tid))
+                require((task_before.pid, task_before.start_ticks) == (task_after.pid, task_after.start_ticks),
+                        "fence-proc-task-changed")
+            finally:
+                os.close(task)
+        for number, observed in original.items():
+            if observed[:2] == target:
+                require(pid == os.getpid() and number == witness_fd, "fence-namespace-fd-live")
+            if observed[2] == stat.S_IFSOCK:
+                borrowed = _borrow_socket(pid, pidfd, number)
+                try:
+                    if cookie is None:
+                        _require_drained_socket_namespace(borrowed, observed, target)
+                    else:
+                        _require_drained_socket(borrowed, observed, cookie)
+                finally:
+                    os.close(borrowed)
+        after = _process_stat(process, pid)
+        os.lseek(tasks, 0, os.SEEK_SET)
+        after_tids = sorted(os.listdir(tasks))
+        require((before.pid, before.start_ticks) == (after.pid, after.start_ticks)
+                and after_tids == tids and not select.select([pidfd], [], [], 0)[0],
+                "fence-proc-changed")
+        if pid != os.getpid():
+            require(_fd_table(leader_fd, deadline) == original, "fence-proc-fds-changed")
+    finally:
+        for selected in (leader_fd, tasks):
+            if selected >= 0:
+                os.close(selected)
 
 
 @contextmanager
