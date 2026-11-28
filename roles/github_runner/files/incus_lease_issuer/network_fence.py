@@ -934,10 +934,16 @@ def _borrow_socket(pid, pidfd, number):
     # changes/closes the target's descriptor; PTRACE_REALCREDS permission needed.
     # https://github.com/torvalds/linux/blob/v6.8/kernel/pid.c#L628
     value = ctypes.CDLL(None, use_errno=True).syscall(438, pidfd, number, 0)
-    if value < 0 and ctypes.get_errno() == errno.EBADF:
+    if value >= 0:
+        return value
+    failure = ctypes.get_errno()
+    if failure == errno.EBADF:
         raise Denied("fence-proc-fds-changed")
-    require(value >= 0, "fence-pidfd-getfd")
-    return value
+    if failure == errno.ESRCH and select.select([pidfd], [], [], 0)[0]:
+        # A confirmed exit invalidates this snapshot. Restart the complete
+        # census under its original deadline, including all remaining tasks.
+        raise Denied("fence-proc-changed")
+    raise Denied("fence-pidfd-getfd")
 
 
 def _thread_file_table_drained(task, tid, pid, deadline):
