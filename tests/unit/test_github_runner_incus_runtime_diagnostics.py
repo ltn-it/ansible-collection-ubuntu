@@ -57,6 +57,21 @@ class DiagnosticsTests(unittest.TestCase):
                          ("namespace-census", "fence-proc-acquire-unstable"))
         self.assertEqual(record["counts"], [["namespace-census", 1, 0]])
 
+    def test_namespace_census_reports_typed_errors_without_private_details(self):
+        from incus_lease_issuer import network_fence
+
+        cases = (("fence-proc-bounds", "fence-proc-bounds"), ("fence-pidfd-getfd", "fence-pidfd-getfd"),
+                 ("fence-namespace-socket-live", "fence-namespace-socket-live"),
+                 ("fence-pidfd-getfd synthetic-private-detail", "unclassified"))
+        for reason, expected in cases:
+            with self.subTest(reason=reason), mock.patch.object(network_fence, "_namespace_refs_drained_once",
+                                                                side_effect=identity.Denied(reason)):
+                with self.assertRaises(identity.Denied), identity._diagnostic_request():
+                    network_fence._namespace_refs_drained(-1, None, 0)
+            report = self.record()
+            self.assertEqual((report["stage"], report["reason"]), ("namespace-census", expected))
+        self.assertNotIn(b"synthetic-private-detail", self.log.call_args.args[0])
+
     def test_success_and_inactive_helpers_do_not_log(self):
         @identity._diagnostic_step("collector")
         def success():

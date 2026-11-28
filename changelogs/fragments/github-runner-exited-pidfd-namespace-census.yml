@@ -1,0 +1,6 @@
+---
+bugfixes:
+  - >-
+    github_runner - reacquire the full Incus namespace census within its
+    existing deadline when socket borrowing races with a kernel-confirmed
+    process exit. Distinguish fixed census errors in private diagnostics.
