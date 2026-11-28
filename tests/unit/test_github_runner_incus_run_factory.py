@@ -25,7 +25,7 @@ from test_github_runner_incus_flow import FixtureReader
 
 FILES = Path(__file__).resolve().parents[2] / "roles/github_runner/files"
 sys.path.insert(0, str(FILES))
-from incus_lease_issuer import collector, identity, ledger, policy_registry, run_factory as factory
+from incus_lease_issuer import admission, collector, identity, ledger, policy_registry, run_factory as factory
 from incus_lease_issuer.identity import Denied
 
 
@@ -185,7 +185,7 @@ class RootBootstrapTests(unittest.TestCase):
         # Native acquisition is modeled here; real collector epochs have their
         # own kernel/FS tests. Preserve worker drift injection at both boundaries.
         mock.patch.object(collector, "begin_worker_acquisition",
-            side_effect=lambda connected, policy: (self.collected(connected, policy), object())).start()
+            side_effect=lambda connected, policy, **kwargs: (self.collected(connected, policy), object())).start()
         mock.patch.object(collector, "finish_worker_acquisition",
             side_effect=lambda token, connected, policy: self.collected(connected, policy)).start()
         mock.patch.object(collector, "discard_worker_acquisition").start()
@@ -411,6 +411,16 @@ class RootBootstrapTests(unittest.TestCase):
         self.assertNotIn(token, repr(proof))
         with ledger.Ledger(self.store_path, clock=factory.time.time) as store:
             with store._transaction() as state: self.assertEqual(state["leases"], {})
+
+    def test_snapshot_seal_can_resample_with_the_original_worker_deadline(self):
+        proof, token = self.mint()
+        with mock.patch.object(collector, "begin_worker_acquisition",
+                               wraps=collector.begin_worker_acquisition) as begin:
+            worker, who, _ = admission.require_intake_seal_native(proof, self.server, proof.policy,
+                token, "synthetic-job-token")
+        begin.assert_called_once_with(self.server, self.bootstrap.collector,
+                                      maps_retry_until=proof.expires_monotonic)
+        self.assertEqual((worker, who), (proof.worker, proof.identity))
 
     def test_configuration_requires_distinct_nonce_for_exact_snapshot(self):
         snapshot = "a" * 64

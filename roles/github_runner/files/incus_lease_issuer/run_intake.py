@@ -154,7 +154,7 @@ def acquire_run_snapshot(proof, connected_socket, selected, token, api_token, *,
         require(again[0] == worker and again[1] == who, "intake-native-drift")
         snapshot = _validate_archives(proven, artifact_fd=artifact_fd,
                                       source_fd=source_fd, controller_fd=controller_fd)
-        again = admission.require_intake_native(proof, connected_socket, selected, token, api_token)
+        again = admission.require_intake_seal_native(proof, connected_socket, selected, token, api_token)
         require(again[0] == worker and again[1] == who and time.monotonic() < deadline,
                 "intake-native-drift")
         return snapshot

@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - >-
+    github_runner - resample a changed process mapping once during authenticated intake.
+    Require two matching, fully verified observations within the original authorization.

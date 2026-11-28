@@ -2606,12 +2606,16 @@ def _continuation_native_histories(get, descriptor, receipt, *, allow_resume=Non
 
 @identity._diagnostic_step("native-current")
 def _native(connected, selected, nonce, token, api_token, *, check_origin=True, check_host_resources=True,
-            history_resume_until=None):
+            history_resume_until=None, maps_retry_until=None):
     admission._secret(token); admission._secret(api_token)
     resumed = False
     controls = _controls(selected.bootstrap)
     admission._socket(connected)
-    worker, acquisition = collector.begin_worker_acquisition(connected, selected.bootstrap.collector)
+    if maps_retry_until is None:
+        worker, acquisition = collector.begin_worker_acquisition(connected, selected.bootstrap.collector)
+    else:
+        worker, acquisition = collector.begin_worker_acquisition(
+            connected, selected.bootstrap.collector, maps_retry_until=maps_retry_until)
     try:
         require(type(worker) is ledger.Worker, "bootstrap-native-worker")
         worker.validate()
@@ -2733,9 +2737,10 @@ def verify_bootstrap_native(connected, bootstrap, selector, nonce, token, api_to
         raise Denied("bootstrap-native-denied") from None
 
 
-def require_bootstrap_native(proof, connected, selected, token, api_token):
+def require_bootstrap_native(proof, connected, selected, token, api_token, *, resample_maps=False):
     """Require current native authority and verify the earlier host resources."""
-    return _require_bootstrap_native(proof, connected, selected, token, api_token, check_host_resources=True)
+    return _require_bootstrap_native(proof, connected, selected, token, api_token, check_host_resources=True,
+                                     resample_maps=resample_maps)
 
 
 def require_bootstrap_intake_reader(proof, connected, selected, token, api_token):
@@ -2753,7 +2758,7 @@ def require_bootstrap_observer_reader(proof, connected, selected, token, api_tok
 
 
 @identity._diagnostic_step("bootstrap-final-native")
-def _require_bootstrap_native(proof, connected, selected, token, api_token, *, check_host_resources):
+def _require_bootstrap_native(proof, connected, selected, token, api_token, *, check_host_resources, resample_maps=False):
     _root()
     try:
         require(type(proof) is BootstrapNativeProof, "bootstrap-native-proof")
@@ -2765,8 +2770,11 @@ def _require_bootstrap_native(proof, connected, selected, token, api_token, *, c
         require(ledger.digest(_challenge(selected, proof.nonce, proof.worker, proof.snapshot_receipt_sha256))
                 == proof.challenge_sha256,
                 "bootstrap-challenge-drift")
+        require(not resample_maps or check_host_resources and selected.purpose == "execution",
+                "bootstrap-configuration-purpose")
         worker, who, controls, started = _native(connected, selected, proof.nonce, token, api_token,
-            check_origin=False, check_host_resources=check_host_resources)
+            check_origin=False, check_host_resources=check_host_resources,
+            maps_retry_until=proof.expires_monotonic if resample_maps else None)
         require((worker, who, controls, started) == (proof.worker, proof.identity, proof.controls_sha256, proof.job_started_at),
                 "bootstrap-native-drift")
         remaining = min(600, int(proof.expires_monotonic - time.monotonic()), who.valid_until - int(time.time()) - 31)
