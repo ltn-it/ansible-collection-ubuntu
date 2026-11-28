@@ -56,6 +56,35 @@ class ObservationChurnTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "^fence-pidfd-getfd$"):
                 network_fence._borrow_socket(os.getpid() + 1, 7, 9)
 
+    def test_confirmed_exit_while_borrowing_socket_discards_the_complete_scan(self):
+        def scan(*_arguments):
+            network_fence._borrow_socket(os.getpid() + 1, 7, 9)
+
+        with mock.patch.object(network_fence.platform, "machine", return_value="x86_64"), \
+             mock.patch.object(network_fence.ctypes, "CDLL") as libc, \
+             mock.patch.object(network_fence.ctypes, "get_errno", return_value=errno.ESRCH), \
+             mock.patch.object(network_fence.select, "select", return_value=([7], [], [])) as poll, \
+             mock.patch.object(network_fence, "_namespace_refs_drained_once", side_effect=scan) as acquire:
+            libc.return_value.syscall.side_effect = [-1, 23]
+            network_fence._namespace_refs_drained(3, "original-info", 25882)
+        poll.assert_called_once_with([7], [], [], 0)
+        self.assertEqual(acquire.call_count, 2)
+        self.assertEqual(acquire.call_args_list[0], acquire.call_args_list[1])
+
+    def test_esrch_without_pidfd_exit_readback_still_denies_observation(self):
+        def scan(*_arguments):
+            network_fence._borrow_socket(os.getpid() + 1, 7, 9)
+
+        with mock.patch.object(network_fence.platform, "machine", return_value="x86_64"), \
+             mock.patch.object(network_fence.ctypes, "CDLL") as libc, \
+             mock.patch.object(network_fence.ctypes, "get_errno", return_value=errno.ESRCH), \
+             mock.patch.object(network_fence.select, "select", return_value=([], [], [])), \
+             mock.patch.object(network_fence, "_namespace_refs_drained_once", side_effect=scan) as acquire:
+            libc.return_value.syscall.return_value = -1
+            with self.assertRaisesRegex(Denied, "^fence-pidfd-getfd$"):
+                network_fence._namespace_refs_drained(3, "original-info", 25882)
+        self.assertEqual(acquire.call_count, 1)
+
     def test_complete_network_reacquire_uses_the_original_deadline(self):
         with mock.patch.object(network_fence.time, 'monotonic', side_effect=[10, 10, 11, 12]), \
              mock.patch.object(network_fence, '_namespace_refs_drained_once',
