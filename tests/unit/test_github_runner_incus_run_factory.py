@@ -914,6 +914,9 @@ class RootConfigurationTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root filesystem required")
 class OriginalUnsealedIntakeTests(unittest.TestCase):
     def test_original_prefix_is_read_only_history(self):
+        base = Path("/run/proof")
+        if not base.is_dir() or base.stat().st_uid != 0 or stat.S_IMODE(base.stat().st_mode) != 0o700:
+            self.skipTest("private Root0700 /run/proof required")
         cells = factory.operating_cells
         binding = {
             "schema": 1,
@@ -926,7 +929,7 @@ class OriginalUnsealedIntakeTests(unittest.TestCase):
         job_id = cells.THIRTIETH_CHECKS[0]
         intent = {"schema": 1, "binding": binding,
                   "original_job": {"run_id": cells.THIRTIETH_RUN, "job_id": job_id, "check_run_id": job_id}}
-        with tempfile.TemporaryDirectory(dir="/run/proof") as parent, \
+        with tempfile.TemporaryDirectory(dir=base) as parent, \
              mock.patch.object(factory.run_intake, "ROOT", parent), \
              mock.patch.object(factory, "_revalidate_prelease_origin") as verify_original:
             name = ledger.digest(binding)
