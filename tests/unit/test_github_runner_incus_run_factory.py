@@ -909,3 +909,55 @@ class RootConfigurationTests(unittest.TestCase):
         self.assertNotEqual(first.directory, second.directory)
         self.assertEqual(second.deadline, late + 1200)
         self.assertEqual(Path(first.directory, "sealed-inventory.json").read_bytes(), original)
+
+
+@unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "isolated Root filesystem required")
+class OriginalUnsealedIntakeTests(unittest.TestCase):
+    def test_original_prefix_is_read_only_history(self):
+        cells = factory.operating_cells
+        binding = {
+            "schema": 1,
+            "source": {"repository": factory.SOURCE, "repository_id": 1103407173,
+                       "commit_sha": cells.THIRTIETH_MAIN},
+            "controller": {"repository": factory.VALIDATION, "repository_id": 1269461997,
+                           "commit_sha": cells.TWENTY_NINTH_SUCCESSOR_REUSABLE},
+            "artifact": {"run_id": cells.THIRTIETH_RUN, "head_sha": cells.THIRTIETH_MAIN, "run_attempt": 1},
+        }
+        job_id = cells.THIRTIETH_CHECKS[0]
+        intent = {"schema": 1, "binding": binding,
+                  "original_job": {"run_id": cells.THIRTIETH_RUN, "job_id": job_id, "check_run_id": job_id}}
+        with tempfile.TemporaryDirectory(dir="/run/proof") as parent, \
+             mock.patch.object(factory.run_intake, "ROOT", parent), \
+             mock.patch.object(factory, "_revalidate_prelease_origin") as verify_original:
+            name = ledger.digest(binding)
+            path = Path(parent, name)
+            path.mkdir(mode=0o700)
+            fd = factory.installation._open_directory(str(path))
+            try:
+                digest = factory.run_intake._write_at(fd, "intent.json", intent)
+                for member in factory.run_intake.ARCHIVES:
+                    factory.run_intake._write_at(fd, member, {"inert_fixture": member})
+                device, inode, *_ = factory.run_intake._directory_identity(fd)
+                previous = {"schema": 29}
+                old_bootstrap = {"sha256": cells.THIRTIETH_BOOTSTRAP}
+                original_bank = {"state_file_sha256": "e" * 64}
+                original = {"previous_bootstrap": old_bootstrap, "previous_bank": original_bank,
+                            "previous_qualification": previous}
+                receipt = {"previous_qualification": previous, "retirement": {
+                    "original_bootstrap": old_bootstrap, "original_bank": original_bank, "intake_prefix": {
+                        "name": name, "device": device, "inode": inode, "intent_sha256": digest,
+                        "inventory_sha256": factory._fifth_retired_entry(path),
+                    },
+                }}
+                factory._revalidate_thirtieth_prelease(receipt, "/exact-next-bank")
+                verify_original.assert_called_once_with(original, "/exact-next-bank", 29, cells.THIRTIETH_RUN,
+                                                        cells.THIRTIETH_MAIN, "continuation-thirtieth")
+                archive = path / "artifact.zip"
+                archive.write_bytes(b"changed")
+                with self.assertRaisesRegex(Denied, "continuation-thirtieth-original-intake-drift"):
+                    factory._revalidate_thirtieth_prelease(receipt, "/exact-next-bank")
+                factory.run_intake._write_at(fd, "sealed.json", {"unexpected": True})
+                with self.assertRaisesRegex(Denied, "continuation-thirtieth-unsealed-intake"):
+                    factory._revalidate_thirtieth_prelease(receipt, "/exact-next-bank")
+            finally:
+                os.close(fd)

@@ -145,7 +145,7 @@ def load_bootstrap(path, expected_sha256):
                         runtime["initial_transition_timeout_seconds"])
     runtime_rpc._validate_early_renewal(runtime)
     continuation = value.get("operating_continuation")
-    if type(continuation) is dict and continuation.get("schema") in {25, 26, 27, 28, 29}:
+    if type(continuation) is dict and continuation.get("schema") in {25, 26, 27, 28, 29, 30}:
         require(runtime.get("renewal_lead_seconds") == runtime_rpc.EARLY_RENEWAL_LEAD_SECONDS,
                 "bootstrap-twenty-fifth-renewal-policy")
     require(type(runtime["capture"]) is dict, "bootstrap-runtime-capture")
@@ -282,7 +282,9 @@ def _continuation_receipt(value):
     receipt = identity.decode_json(raw)
     require(raw == ledger.canonical(receipt), "continuation-qualification-canonical")
     require(type(receipt) is dict, "continuation-qualification-object")
-    if descriptor["schema"] == 29 or receipt.get("schema") == 29:
+    if descriptor["schema"] == 30 or receipt.get("schema") == 30:
+        require(descriptor["schema"] == receipt.get("schema") == 30, "continuation-thirtieth-receipt-kind")
+    elif descriptor["schema"] == 29 or receipt.get("schema") == 29:
         require(descriptor["schema"] == receipt.get("schema") == 29, "continuation-twenty-ninth-receipt-kind")
     elif descriptor["schema"] == 28 or receipt.get("schema") == 28:
         require(descriptor["schema"] == receipt.get("schema") == 28, "continuation-twenty-eighth-receipt-kind")
@@ -827,6 +829,7 @@ def _continuation_origin_observations(bootstrap, qualified):
     schema = descriptor["schema"]
     previous_bank = None
     retirement = None
+    thirtieth_catalogues = None
     twenty_ninth_catalogues = None
     twenty_eighth_catalogues = None
     twenty_sixth_catalogues = None
@@ -843,6 +846,11 @@ def _continuation_origin_observations(bootstrap, qualified):
     fourteenth_catalogues = None
     thirteenth_catalogues = None
     twelfth_catalogues = None
+    if schema == 30:
+        _revalidate_thirtieth_prelease(receipt, bootstrap.value["ledger_path"])
+        thirtieth_catalogues = receipt["retirement"]["catalogues"]
+        receipt = receipt["previous_qualification"]
+        schema = 29
     if schema == 29:
         _revalidate_twenty_ninth_retirement(receipt, bootstrap.value["ledger_path"], descriptor["successor"])
         twenty_ninth_catalogues = receipt["retirement"]["catalogues"]
@@ -966,7 +974,8 @@ def _continuation_origin_observations(bootstrap, qualified):
                         revalidating=True, defer_catalogues=True,
                         successor=descriptor["successor"]) == receipt["retirement"],
                     "continuation-ninth-retired-partial-drift")
-        retired = (twenty_ninth_catalogues or twenty_eighth_catalogues or twenty_sixth_catalogues or twenty_fifth_catalogues
+        retired = (thirtieth_catalogues or twenty_ninth_catalogues or twenty_eighth_catalogues
+                   or twenty_sixth_catalogues or twenty_fifth_catalogues
                    or twenty_fourth_catalogues or twenty_third_catalogues
                    or twenty_second_catalogues or twenty_first_catalogues
                    or twentieth_catalogues or nineteenth_catalogues
@@ -2398,10 +2407,54 @@ def _revalidate_sealed_prelease(receipt, successor_bank, run_id, source_sha, reu
             require(final == proof, "continuation-sealed-prelease-original-prelease-state")
 
 
+def _revalidate_thirtieth_prelease(receipt, successor_bank):
+    """Keep the exact failed intake unsealed and separate from the next run."""
+    retired = receipt["retirement"]
+    previous = {"previous_bootstrap": retired["original_bootstrap"], "previous_bank": retired["original_bank"],
+                "previous_qualification": receipt["previous_qualification"]}
+    _revalidate_prelease_origin(previous, successor_bank, 29, operating_cells.THIRTIETH_RUN,
+                                operating_cells.THIRTIETH_MAIN, "continuation-thirtieth")
+    _revalidate_thirtieth_intake_prefix(retired["intake_prefix"])
+
+
+def _revalidate_thirtieth_intake_prefix(prefix):
+    path = Path(run_intake.ROOT) / prefix["name"]
+    fd = installation._open_directory(str(path))
+    try:
+        stamp = run_intake._directory_identity(fd)
+        intent, digest, intent_stamp = run_intake._read_at(fd, "intent.json")
+        require(stamp[:2] == (prefix["device"], prefix["inode"])
+                and digest == prefix["intent_sha256"]
+                and run_intake._entries(fd) == run_intake.INVENTORY - {"sealed.json"},
+                "continuation-thirtieth-unsealed-intake")
+        binding, job = intent["binding"], intent["original_job"]
+        require(intent["schema"] == binding["schema"] == 1 and ledger.digest(binding) == prefix["name"]
+                and binding["source"] == {"repository": SOURCE, "repository_id": 1103407173,
+                                          "commit_sha": operating_cells.THIRTIETH_MAIN}
+                and binding["controller"] == {"repository": VALIDATION, "repository_id": 1269461997,
+                                              "commit_sha": operating_cells.TWENTY_NINTH_SUCCESSOR_REUSABLE}
+                and binding["artifact"]["run_id"] == job["run_id"] == operating_cells.THIRTIETH_RUN
+                and binding["artifact"]["head_sha"] == operating_cells.THIRTIETH_MAIN
+                and binding["artifact"]["run_attempt"] == 1
+                and job["job_id"] == job["check_run_id"] == operating_cells.THIRTIETH_CHECKS[0],
+                "continuation-thirtieth-original-job")
+        require(_fifth_retired_entry(path) == prefix["inventory_sha256"]
+                and run_intake._read_at(fd, "intent.json")[1:] == (digest, intent_stamp)
+                and run_intake._entries(fd) == run_intake.INVENTORY - {"sealed.json"}
+                and run_intake._directory_identity(fd) == stamp,
+                "continuation-thirtieth-original-intake-drift")
+    finally:
+        os.close(fd)
+
+
 @identity._diagnostic_step("native-histories")
 def _continuation_native_histories(get, descriptor, receipt, *, allow_resume=None):
     """Join independent reads. Resume one transient family within the same proof."""
     generation = descriptor["schema"]
+    thirtieth = receipt if generation == 30 else None
+    if thirtieth is not None:
+        receipt = thirtieth["previous_qualification"]
+        generation = 29
     twenty_ninth = receipt if generation == 29 else None
     if twenty_ninth is not None:
         receipt = twenty_ninth["previous_qualification"]
@@ -2573,6 +2626,9 @@ def _continuation_native_histories(get, descriptor, receipt, *, allow_resume=Non
     if twenty_ninth is not None:
         families.append((_continuation_twenty_ninth_native, {}, twenty_ninth["native_twenty_ninth"],
                          "continuation-twenty-ninth-native-drift"))
+    if thirtieth is not None:
+        families.append((_continuation_thirtieth_native, {}, thirtieth["native_thirtieth"],
+                         "continuation-thirtieth-native-drift"))
     with ThreadPoolExecutor(max_workers=4) as executor:
         # The ninth family has ten dependent reads. Start it in the first
         # batch while retaining the four-reader limit and validation order.
@@ -2998,7 +3054,7 @@ def _current_configuration_catalogue(bootstrap, root):
             retired = receipt["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 10:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
-        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28, 29}:
+        elif descriptor["schema"] in {5, 6, 9, 11, 12, 13, 14, 15, 17, 18, 19, 21, 22, 23, 24, 25, 26, 28, 29, 30}:
             retired = receipt["retirement"]["catalogues"]["native_run_configuration_catalogue"]
         elif descriptor["schema"] == 27:
             retired = receipt["previous_qualification"]["retirement"]["catalogues"]["native_run_configuration_catalogue"]
@@ -4017,3 +4073,8 @@ def _continuation_twenty_eighth_native(get):
 def _continuation_twenty_ninth_native(get):
     return _terminal_family(get, operating_cells.TWENTY_NINTH_RUN, operating_cells.TWENTY_NINTH_CHECKS,
                             operating_cells.twenty_ninth_native_projection)
+
+
+def _continuation_thirtieth_native(get):
+    return _terminal_family(get, operating_cells.THIRTIETH_RUN, operating_cells.THIRTIETH_CHECKS,
+                            operating_cells.thirtieth_native_projection)
