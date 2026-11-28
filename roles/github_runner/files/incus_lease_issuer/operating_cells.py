@@ -119,6 +119,8 @@ def continuation_origin():
 
 def validate_continuation_descriptor(value, workflow_sha256, reusable_sha):
     """Pure exact descriptor shape; Root file/native/absence proofs are separate."""
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 30:
+        return _validate_thirtieth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 29:
         return _validate_twenty_ninth_descriptor(value, workflow_sha256, reusable_sha)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 28:
@@ -209,7 +211,8 @@ def validate_continuation_commit(commit_native, value, caller_sha, run_id, reusa
                     15: FIFTEENTH_MAIN, 16: SIXTEENTH_MAIN, 17: SEVENTEENTH_MAIN, 18: EIGHTEENTH_MAIN,
                     19: NINETEENTH_MAIN, 20: TWENTIETH_MAIN, 21: TWENTY_FIRST_MAIN, 22: TWENTY_SECOND_MAIN,
                     23: TWENTY_THIRD_MAIN, 24: TWENTY_FOURTH_MAIN, 25: TWENTY_FIFTH_MAIN, 26: TWENTY_SIXTH_MAIN,
-                    27: TWENTY_SEVENTH_MAIN, 28: TWENTY_EIGHTH_MAIN, 29: TWENTY_NINTH_MAIN}
+                    27: TWENTY_SEVENTH_MAIN, 28: TWENTY_EIGHTH_MAIN, 29: TWENTY_NINTH_MAIN,
+                    30: THIRTIETH_MAIN}
     require(type(parents) is list and 1 <= len(parents) <= 2
             and all(type(p) is dict and type(p.get("sha")) is str and re.fullmatch("[0-9a-f]{40}", p["sha"])
                     for p in parents) and parents[0]["sha"] == predecessors[value["schema"]]
@@ -269,6 +272,8 @@ def validate_continuation_qualification(value):
     """Root-private historical evidence only, never current native authority."""
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 29:
         return _validate_twenty_ninth_qualification(value)
+    if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 30:
+        return _validate_thirtieth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 28:
         return _validate_twenty_eighth_qualification(value)
     if type(value) is dict and type(value.get("schema")) is int and value["schema"] == 27:
@@ -3036,4 +3041,69 @@ def _validate_twenty_ninth_qualification(value):
             and retirement["original_record"]["lease_id"] == TWENTY_NINTH_LEASE,
             "continuation-twenty-ninth-original-scope")
     _validate_closed_vm_catalogues(retirement, previous["retirement"]["catalogues"])
+    return counts
+
+
+THIRTIETH_MAIN = "87e2542ed25827982daee69511fc3b83e4d63a43"
+THIRTIETH_RUN = 46113301329
+THIRTIETH_CHECKS = (140883385586, 140885231864)
+THIRTIETH_GRAPH = "07e8c3e4d2a8f5d78e40b6d1e90af610f82d17db11228c7aa177fa007c6c0ce2"
+THIRTIETH_BOOTSTRAP = "bcc2c60e200c5ba96cb0038be6b14255e103b815d871e6b5a28f0854a7eb6d3f"
+THIRTIETH_QUALIFICATION = "62ad49691f3ff219d348e9a65901a388ff5bccd5f42afc59ebaf50861a01915b"
+THIRTIETH_REASON = "terminal-original-push-with-unsealed-intake-and-no-lease"
+THIRTIETH_SUCCESSOR_REUSABLE = "43ce7ecd39d2054b2e3f8e51606a253708016eb0"
+THIRTIETH_SUCCESSOR_WORKFLOW = "358f6547e153707018db4af16b9e55272874b10220a0c40d1de0488232df3ee5"
+
+
+def thirtieth_native_projection(run, inventory, checks):
+    return _terminal_native_projection(run, inventory, checks, TWENTY_NINTH_SUCCESSOR_REUSABLE,
+                                       THIRTIETH_GRAPH, THIRTIETH_CHECKS, THIRTIETH_MAIN)
+
+
+def _validate_thirtieth_descriptor(value, workflow_sha256, reusable_sha):
+    cell_contract._commit(THIRTIETH_SUCCESSOR_REUSABLE)
+    engine_policy._hash(THIRTIETH_SUCCESSOR_WORKFLOW)
+    engine_policy._keys(value, {"schema", "reason", "qualification", "successor"})
+    ref = engine_policy._keys(value["qualification"], {"path", "sha256"})
+    engine_policy._path(ref["path"])
+    require(value["reason"] == THIRTIETH_REASON and ref["sha256"] == THIRTIETH_QUALIFICATION,
+            "continuation-thirtieth-qualification")
+    successor = value["successor"]
+    _validate_pinned_operating_successor(successor, workflow_sha256, reusable_sha,
+        first_parent=THIRTIETH_MAIN, expected_workflow=THIRTIETH_SUCCESSOR_WORKFLOW,
+        expected_reusable=THIRTIETH_SUCCESSOR_REUSABLE, reason="continuation-thirtieth-successor")
+    require(successor["source_sha"] != THIRTIETH_MAIN and successor["run_id"] > THIRTIETH_RUN,
+            "continuation-thirtieth-replay")
+    return value
+
+
+def _validate_thirtieth_qualification(value):
+    engine_policy._keys(value, {"schema", "purpose", "native_thirtieth", "previous_qualification", "retirement"})
+    require(value["purpose"] == THIRTIETH_REASON and ledger.digest(value) == THIRTIETH_QUALIFICATION
+            and ledger.digest(value["native_thirtieth"]) == THIRTIETH_GRAPH,
+            "continuation-thirtieth-history")
+    previous = value["previous_qualification"]
+    require(previous["schema"] == 29, "continuation-thirtieth-previous-schema")
+    counts = _validate_twenty_ninth_qualification(previous)
+    retired = engine_policy._keys(value["retirement"], {"original_bootstrap", "original_bank",
+                                                         "intake_prefix", "catalogues"})
+    original = engine_policy._keys(retired["original_bootstrap"], {"path", "sha256", "device", "inode"})
+    bank = engine_policy._keys(retired["original_bank"], {"path", "state_file_sha256", "device", "inode"})
+    prefix = engine_policy._keys(retired["intake_prefix"], {"name", "device", "inode",
+                                                            "intent_sha256", "inventory_sha256"})
+    for locator in (original, bank):
+        engine_policy._path(locator["path"])
+    for locator in (original, bank, prefix):
+        for coordinate in ("device", "inode"):
+            engine_policy._integer(locator[coordinate], 1, 2**63 - 1)
+    for digest in (bank["state_file_sha256"], prefix["name"], prefix["intent_sha256"], prefix["inventory_sha256"]):
+        engine_policy._hash(digest)
+    require(original["sha256"] == THIRTIETH_BOOTSTRAP
+            and PurePosixPath(original["path"]).parent == PurePosixPath(bank["path"]).parent,
+            "continuation-thirtieth-original-locators")
+    previous_catalogues = previous["retirement"]["catalogues"]
+    intake = previous_catalogues["native_intake_catalogue"]
+    require(prefix["name"] not in intake and retired["catalogues"] ==
+            {**previous_catalogues, "native_intake_catalogue": {**intake, prefix["name"]: prefix["inventory_sha256"]}},
+            "continuation-thirtieth-exact-prefix-extension")
     return counts

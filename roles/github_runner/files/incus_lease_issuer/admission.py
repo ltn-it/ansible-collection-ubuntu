@@ -376,6 +376,16 @@ def require_intake_reader(proof, connected_socket, selected, token, api_token):
     return require_intake_native(proof, connected_socket, selected, token, api_token)
 
 
+def require_intake_seal_native(proof, connected_socket, selected, token, api_token):
+    """Revalidate before sealing private archives, within the existing proof."""
+    from . import run_factory
+
+    if type(proof) is run_factory.BootstrapNativeProof:
+        return run_factory.require_bootstrap_native(proof, connected_socket, selected, token, api_token,
+                                                    resample_maps=True)
+    return require_intake_native(proof, connected_socket, selected, token, api_token)
+
+
 def require_intake_native(proof, connected_socket, selected, token, api_token):
     """Fixed fresh native revalidation before/after slow private acquisition."""
     _root()

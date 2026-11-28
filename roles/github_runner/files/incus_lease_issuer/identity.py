@@ -60,6 +60,7 @@ _DIAGNOSTIC_REASONS = frozenset({
     "fence-proc-acquire-unstable", "bootstrap-challenge-expired", "bootstrap-native-denied", "bootstrap-native-drift",
     "bootstrap-native-expired", "bootstrap-policy-changed", "bootstrap-workflow-sha",
     "bootstrap-native-job", "collector-acquisition-denied", "collector-maps-changed",
+    "collector-maps-retry-expired",
     "collector-process-changed", "collector-peer-changed", "collector-trust-changed",
     "process-root-tree-changed", "process-root-inventory-mismatch", "process-root-file-mismatch",
     "process-root-directory-changed", "process-diagnostics-enabled", "process-privilege-state",
